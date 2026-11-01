@@ -1,0 +1,78 @@
+import { type ForkHistory, type ForkChild } from './worker-fork.ts';
+import { type BridgedConversationFeature, type BridgedFeatureSupport } from '../shared/conversation-features.ts';
+import type { Context } from '@deepseek-ai/cordis';
+import { type Agent } from '@deepseek-ai/dsh-agent';
+import { type UserMessage } from '@deepseek-ai/dsh-llm';
+import { type HarnessConversationBinding, type Worker } from '../shared/types.ts';
+import type { HarnessConversationApi, HarnessConversationDependencies, HarnessConversationEnsureOptions, HarnessConversationRecord } from './harness-conversation-types.ts';
+export * from './harness-conversation-types.ts';
+export declare const HARNESS_CLI_PROVIDER = "cliworker-native";
+export declare const HARNESS_CLI_SUBAGENT_PROVIDER = "cliworker-native-conversation";
+/** Official retries mint new inbox IDs but retain the browser RPC identity. */
+export declare const harnessSubmissionId: (message: UserMessage) => string;
+/** Native next-step input is one ordered batch, with one stable execution identity. */
+export declare const harnessBatchSubmissionId: (messages: readonly UserMessage[]) => string;
+export declare function harnessConversationBinding(record: HarnessConversationRecord, nativeSteering?: boolean, attachments?: boolean, bridged?: Record<BridgedConversationFeature, BridgedFeatureSupport>): HarnessConversationBinding;
+/** Uses the official continuable manager, preserving its real Activation and Session. */
+export declare class HarnessConversationBridge implements HarnessConversationApi {
+    private readonly ctx;
+    private readonly deps;
+    private readonly activations;
+    private readonly records;
+    private readonly creating;
+    private readonly provisioning;
+    private readonly replacements;
+    private readonly knownRuns;
+    private readonly nativeSubmissions;
+    private readonly launches;
+    private readonly projecting;
+    private readonly recordWrites;
+    private readonly suppressedSettlementWakes;
+    private readonly settlementHolds;
+    private readonly pending;
+    private readonly positions;
+    private readonly streams;
+    private readonly steeringInputs;
+    private readonly heldSteering;
+    private readonly draining;
+    private readonly lifecycleIssues;
+    private readonly disposers;
+    private readonly lifetime;
+    private readonly forkSeeds;
+    private readonly commandGuard;
+    private disposed;
+    constructor(ctx: Context, deps: HarnessConversationDependencies);
+    private model;
+    private binding;
+    /** Claim exactly one message through the same durable event as native Inbox.claim. */
+    private claimSteering;
+    private steeringNotice;
+    private displaySteering;
+    private projectSteering;
+    private settleSteering;
+    private recordSteering;
+    private pumpSteering;
+    private noop;
+    private acceptedInput;
+    private recordInputs;
+    private ownerOf;
+    private projection;
+    private admittedInput;
+    private updateRecord;
+    private bindRunTurn;
+    private drain;
+    private remember;
+    private assertLive;
+    lookup(sessionId: string): HarnessConversationRecord | undefined;
+    repairDisplay(parent: Agent, worker: Worker, expectedSessionId: string, caller?: AbortSignal): Promise<HarnessConversationBinding>;
+    private recordsForFork;
+    forkHistory(worker: Worker, atMessageId: string, signal: AbortSignal): Promise<ForkHistory>;
+    createFork(parent: Agent, worker: Worker, history: ForkHistory, signal: AbortSignal): Promise<ForkChild>;
+    ensure(parent: Agent, worker: Worker, options?: HarnessConversationEnsureOptions): Promise<HarnessConversationBinding>;
+    private projectRun;
+    private create;
+    private route;
+    private drainChildren;
+    dispose(): Promise<void>;
+}
+export declare function createHarnessConversationBridge(ctx: Context, deps: HarnessConversationDependencies): HarnessConversationApi;

@@ -1,0 +1,2053 @@
+import { forkWorkerConversation, readWorkerForkState, writeWorkerForkState } from "./worker-fork.js";
+import { readClaudeOwnRoute, prepareClaudeWorkerLaunch } from "./claude-own-route.js";
+import { extendedLaunch, isExtendedCli } from "./extended-adapters.js";
+import { appendFileSync, existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
+import { z } from 'zod';
+import { active, CLI_IDS, CLI_LABELS, CLI_SHORT_NAMES, LEGACY_ACCOUNT_RECORD_NOTICE, isRetiredCli, isUserInterrupted, RETIRED_HARNESS_NOTICE, cliOf, workerName, foldEvents, } from "../shared/types.js";
+import { agentNameSchema, availableAgentName, promptForWorker, roleSnapshotSchema, workerTitleSchema, } from "./roles.js";
+import { protocolFor, resolveCliExecutable, workerArguments, captureCatalogMetadata } from "./adapters.js";
+import { spawnManagedAgent } from "./managed-agent.js";
+import { prepareNativeWorker, transportFor, usesNativeBridge } from "./native-worker.js";
+import { BridgeProtocol } from "./bridge-protocol.js";
+import { mkdirSync } from 'node:fs';
+import { projectDirectory, ProcessCleanupUnconfirmedError, } from "./process.js";
+import { join } from 'node:path';
+import { AgyContextReader } from "./agy-context.js";
+import { attachTelemetry, TelemetryReader } from "./telemetry.js";
+import { captureConversationTelemetry, captureLastRunUsageSnapshot, withConversationTelemetry } from "./conversation-telemetry.js";
+import { captureContextTelemetry, withContextTelemetry, withoutContextTelemetry } from "./context-telemetry.js";
+import { NativeSupplementalContextReader } from "./native-supplemental-context.js";
+import { HermesSessionTelemetryReader } from "./hermes-session-telemetry.js";
+import { effectiveHermesHome } from "./hermes-account-context.js";
+import { NativeTimelineReprojector } from "./native-timeline-reprojection.js";
+import { projectPublicToolCall } from "./public-tool-projection.js";
+import { authorizeSelection, ACCOUNT_CHANGED } from "./authorized-catalog.js";
+import { readCliAccountBinding } from "./cli-account-binding.js";
+import { assertFirstPartyConfiguration, firstPartyEnvironment } from "./first-party-models.js";
+import { agyBackgroundEnvironment } from "./agy-background-environment.js";
+import { qoderEnvironment } from "./qoder-accounts.js";
+import { AgyProtocol } from "./protocol.js";
+import { FollowupQueue } from "./followup-queue.js";
+import { supportsWorkerNativeSteering } from "../shared/running-message.js";
+import { workerPermissionOptions } from "../shared/worker-permissions.js";
+import { GOAL_OBJECTIVE_LIMIT } from "../shared/conversation-features.js";
+/** Internal identity distinguishes deliberate cancellation from timeouts and failures. */
+class UserStoppedError extends Error {
+    constructor() {
+        super('用户已停止任务');
+    }
+}
+const deliveryTerminal = (state) => ['superseded', 'cancelled', 'failed', 'completed'].includes(state);
+export class WorkerRuntime {
+    storage;
+    backend;
+    config;
+    harnessPreparation;
+    setHarnessPreparation(prepare) {
+        this.harnessPreparation = prepare;
+        return () => {
+            if (this.harnessPreparation === prepare)
+                this.harnessPreparation = undefined;
+        };
+    }
+    agyContextReader = new AgyContextReader();
+    hermesSessionReader = new HermesSessionTelemetryReader();
+    telemetryReader = new TelemetryReader();
+    supplementalContextReader = new NativeSupplementalContextReader(() => { if (!this.disposed)
+        this.changed(); });
+    nativeTimelineReprojector = new NativeTimelineReprojector();
+    stagedForks = new Map();
+    tasks = new Map();
+    queue = [];
+    running = new Set();
+    listeners = new Set();
+    disposed = false;
+    blocked;
+    catalogBlocked = new Map();
+    followups;
+    followupDispatches = new Map();
+    followupRuns = new Set();
+    followupLauncher;
+    queuedExecutionGuard;
+    preparations = new Map();
+    priorityHistory = new Map();
+    latestPriority = new Map();
+    priorityRunners = new Map();
+    reservations = new Map();
+    stopOperations = new Map();
+    revision = 0;
+    constructor(storage, backend, config) {
+        this.storage = storage;
+        this.backend = backend;
+        this.config = config;
+        try {
+            this.followups = new FollowupQueue(storage);
+        }
+        catch (error) {
+            storage.close();
+            throw error;
+        }
+        // Submission events are authoritative even if a crash happened before the outbox write.
+        for (const worker of storage.workers.values()) {
+            const messages = new Map();
+            for (const event of storage.history(worker.id)) {
+                if (event.kind !== 'submission' ||
+                    !event.queuedFollowupId ||
+                    !event.deliveryState ||
+                    !event.submissionClientId ||
+                    event.submissionSequence === undefined)
+                    continue;
+                const previous = messages.get(event.queuedFollowupId);
+                messages.set(event.queuedFollowupId, {
+                    id: event.queuedFollowupId,
+                    prompt: event.text,
+                    createdAt: previous?.createdAt ?? event.time,
+                    clientId: event.submissionClientId,
+                    sequence: event.submissionSequence,
+                    state: event.deliveryState,
+                    error: event.deliveryError,
+                    runId: event.admittedRunId,
+                    generation: this.followups.generation(worker.id),
+                    controller: new AbortController(),
+                });
+            }
+            if (messages.size)
+                this.priorityHistory.set(worker.id, messages);
+            for (const message of messages.values()) {
+                this.followups.consume(worker.id, message.prompt, message.id);
+                if (!deliveryTerminal(message.state))
+                    this.updatePriority(worker, message, 'cancelled', 'Host 已重启，本条消息未自动重发');
+            }
+        }
+        const cleanup = storage.cleanupBlockState();
+        if (cleanup !== 'none')
+            this.blocked =
+                cleanup === 'invalid'
+                    ? '进程清理隔离记录无法核验，已暂停任务和账号操作'
+                    : '无法确认 CLI 进程已清理，已暂停后续派遣，请先核查进程退出状态';
+        for (const cli of CLI_IDS) {
+            const state = storage.cleanupBlockState(cli);
+            if (state !== 'none')
+                this.catalogBlocked.set(cli, state === 'invalid'
+                    ? `${CLI_LABELS[cli]} 元数据清理记录无法核验，已暂停此 CLI`
+                    : `${CLI_LABELS[cli]} 元数据进程清理尚未确认，已暂停此 CLI`);
+        }
+    }
+    /** Explicit construction policy is overridable by legacy protocol regression fixtures. */
+    initialTransport(cli) {
+        return transportFor(cli);
+    }
+    setFollowupLauncher(launch) {
+        this.followupLauncher = launch;
+    }
+    setQueuedExecutionGuard(guard) {
+        this.queuedExecutionGuard = guard;
+    }
+    /** Reserve before the Gateway's first await. This never grants execution authority. */
+    reserveSubmission(parent, id, requestId) {
+        const worker = this.get(parent, id);
+        this.assertCliEnabled(cliOf(worker.preference));
+        z.uuid().parse(requestId);
+        const entries = this.reservations.get(id) ?? new Map();
+        const entry = entries.get(requestId) ?? {
+            generation: this.followups.generation(id),
+            controller: new AbortController(),
+            leases: 0,
+        };
+        entry.leases++;
+        entries.set(requestId, entry);
+        this.reservations.set(id, entries);
+        this.changed();
+        let released = false;
+        return {
+            signal: entry.controller.signal,
+            assertCurrent: () => {
+                entry.controller.signal.throwIfAborted();
+                if (this.disposed || entry.generation !== this.followups.generation(id))
+                    throw new UserStoppedError();
+            },
+            release: () => {
+                if (released || entries.get(requestId) !== entry)
+                    return;
+                released = true;
+                if (--entry.leases)
+                    return;
+                entries.delete(requestId);
+                if (!entries.size && this.reservations.get(id) === entries)
+                    this.reservations.delete(id);
+                this.changed();
+                const current = this.storage.workers.get(id);
+                if (current && !current.archivedAt)
+                    this.dispatchFollowup(current);
+            },
+        };
+    }
+    directMessageReceipt(parent, id, prompt, requestId) {
+        const worker = this.get(parent, id);
+        z.uuid().parse(requestId);
+        const event = this.storage
+            .history(id)
+            .find((entry) => entry.kind === 'user' && entry.queuedFollowupId === requestId);
+        if (!event)
+            return undefined;
+        if (event.text !== prompt)
+            throw new Error('重复提交标识对应的消息不同');
+        return {
+            workerId: id,
+            runId: event.runId,
+            ...(event.runId === worker.runId && worker.jobId ? { jobId: worker.jobId } : {}),
+        };
+    }
+    accepting(id) {
+        return [...(this.reservations.get(id)?.values() ?? [])].some((entry) => !entry.controller.signal.aborted);
+    }
+    busyReason(worker, preparationId) {
+        if (this.stopOperations.get(worker.id)?.size || worker.status === 'stopping')
+            return 'stopping';
+        if (this.latestPriority.has(worker.id) || this.priorityRunners.has(worker.id))
+            return 'priority';
+        if ((this.preparations.has(worker.id) && this.preparations.get(worker.id).id !== preparationId) ||
+            this.followupDispatches.has(worker.id))
+            return 'preparing';
+        if (this.tasks.has(worker.id) || active(worker.status))
+            return worker.status === 'queued' ? 'queued' : 'running';
+        if (this.accepting(worker.id))
+            return 'accepting';
+        if (this.followups.list(worker.id).some((item) => item.state !== 'paused'))
+            return 'queued';
+        return undefined;
+    }
+    /** RPC cancellation can settle at the client before native metadata exits. Stop owns this wait. */
+    async prepareFollowup(parent, id, signal, prepare, priorityId) {
+        const worker = this.get(parent, id);
+        this.assertManagedIdle(worker, priorityId);
+        this.assertCliEnabled(cliOf(worker.preference));
+        signal.throwIfAborted();
+        let settle;
+        const entry = {
+            id: randomUUID(),
+            controller: new AbortController(),
+            done: new Promise((resolve) => {
+                settle = resolve;
+            }),
+        };
+        this.preparations.set(id, entry);
+        this.changed();
+        try {
+            return await prepare(AbortSignal.any([signal, entry.controller.signal]), entry.id);
+        }
+        catch (error) {
+            if (error instanceof ProcessCleanupUnconfirmedError) {
+                this.blockCatalogOnCleanup(cliOf(worker.preference), error);
+            }
+            throw error;
+        }
+        finally {
+            if (this.preparations.get(id) === entry)
+                this.preparations.delete(id);
+            settle();
+            this.changed();
+        }
+    }
+    async sendRunningMessage(parent, id, prompt, expectedRunId, requestId, signal, requestedMode) {
+        const worker = this.get(parent, id);
+        this.assertCliEnabled(cliOf(worker.preference));
+        const mode = requestedMode ?? this.storage.runningMessageSettings(worker.project, cliOf(worker.preference)).mode;
+        if (mode === 'interrupt' &&
+            (this.priorityHistory.get(id)?.has(requestId) || !this.followups.receipt(id, prompt, requestId))) {
+            this.interruptMessage(parent, id, prompt, requestId, requestId, 1, signal);
+            return {
+                id: requestId,
+                prompt,
+                createdAt: new Date().toISOString(),
+                state: 'sending',
+            };
+        }
+        if (worker.runId !== expectedRunId && (!requestedMode || mode === 'steer'))
+            throw new Error('本轮状态已变化，请刷新后重新发送');
+        signal?.throwIfAborted();
+        if (mode === 'queue' && this.priorityHistory.get(id)?.has(requestId))
+            return this.queueFollowup(parent, id, prompt, expectedRunId, requestId, !!requestedMode);
+        const priorSteer = this.tasks.get(id)?.steering.get(requestId);
+        if (priorSteer) {
+            if (priorSteer.prompt !== prompt)
+                throw new Error('重复提交标识对应的消息不同');
+            await priorSteer.done;
+            return;
+        }
+        const receipt = this.followups.receipt(id, prompt, requestId);
+        if (receipt) {
+            if (requestedMode === 'steer' && receipt.delivery !== 'steer')
+                throw new Error('这条消息已经以其他方式提交，请刷新会话');
+            if (receipt.delivery === 'steer') {
+                if (receipt.acknowledged)
+                    return;
+                throw Object.assign(new Error('该引导请求已提交，接收状态尚未确认，请核查本轮记录'), {
+                    code: 'STEER_UNKNOWN',
+                });
+            }
+            if (!receipt.item)
+                throw new Error('这条消息已经处理，请刷新会话');
+            return receipt.item;
+        }
+        if (mode === 'queue')
+            return this.queueFollowup(parent, id, prompt, expectedRunId, requestId, !!requestedMode);
+        await this.steerMessage(parent, id, prompt, expectedRunId, requestId, signal);
+    }
+    /** Current-run native input only. Queue state and queue generations never admit or order steering. */
+    async steerMessage(parent, id, prompt, expectedRunId, requestId, signal) {
+        const worker = this.get(parent, id);
+        this.assertCliEnabled(cliOf(worker.preference));
+        z.uuid().parse(requestId);
+        if (!prompt.trim() || prompt.length > 100_000)
+            throw new Error('消息须包含 1–100000 个字符');
+        if (worker.runId !== expectedRunId)
+            throw new Error('本轮状态已变化，请刷新后重新发送');
+        signal?.throwIfAborted();
+        const prior = this.tasks.get(id)?.steering.get(requestId);
+        if (prior) {
+            if (prior.prompt !== prompt)
+                throw new Error('重复提交标识对应的消息不同');
+            await prior.done;
+            return;
+        }
+        const receipt = this.followups.receipt(id, prompt, requestId);
+        if (receipt) {
+            if (receipt.delivery !== 'steer')
+                throw new Error('这条消息已经以其他方式提交，请刷新会话');
+            if (receipt.acknowledged)
+                return;
+            throw Object.assign(new Error('该引导请求已提交，接收状态尚未确认，请核查本轮记录'), {
+                code: 'STEER_UNKNOWN',
+            });
+        }
+        await this.steerRunningMessage(worker, prompt, requestId, signal);
+    }
+    async steerRunningMessage(worker, prompt, requestId, signal) {
+        z.uuid().parse(requestId);
+        if (!prompt.trim() || prompt.length > 100_000)
+            throw new Error('消息须包含 1–100000 个字符');
+        const task = this.tasks.get(worker.id);
+        if (!task?.steer || task.controller.signal.aborted || worker.status !== 'running')
+            throw new Error('当前 CLI 引导通路尚未准备好或已经结束，请保留消息稍后重试');
+        const prior = task.steering.get(requestId);
+        if (prior) {
+            if (prior.prompt !== prompt)
+                throw new Error('重复提交标识对应的消息不同');
+            return prior.done;
+        }
+        if (task.steering.size >= 200)
+            throw new Error('本轮引导消息过多，请等待本轮结束后再发送');
+        const snapshot = structuredClone(worker);
+        const control = AbortSignal.any([
+            task.controller.signal,
+            task.steeringController.signal,
+            ...(signal ? [signal] : []),
+        ]);
+        let submitted = false;
+        const done = (async () => {
+            this.queuedExecutionGuard?.(worker);
+            const binding = this.storage.accountBinding(worker.id);
+            if (!binding)
+                throw new Error(LEGACY_ACCOUNT_RECORD_NOTICE);
+            const current = await readCliAccountBinding(cliOf(worker.preference), this.backend, this.config, worker.project, control);
+            control.throwIfAborted();
+            if (binding !== current)
+                throw new Error(ACCOUNT_CHANGED);
+            if (this.tasks.get(worker.id) !== task ||
+                worker.runId !== snapshot.runId ||
+                worker.status !== 'running')
+                throw new Error('本轮状态已变化，请保留消息稍后重试');
+            this.assertCliEnabled(cliOf(worker.preference));
+            this.queuedExecutionGuard?.(worker);
+            this.followups.recordSteering(worker.id, prompt, requestId, false);
+            submitted = true;
+            await task.steer(prompt, requestId, control);
+            // A matching native receipt acknowledges delivery even if the run ends immediately afterwards.
+            this.storage.append(snapshot, {
+                kind: 'user',
+                text: prompt,
+                queuedFollowupId: requestId,
+                admittedRunId: snapshot.runId,
+            });
+            this.followups.recordSteering(worker.id, prompt, requestId, true);
+            this.changed();
+        })().catch((error) => {
+            const rejected = error && typeof error === 'object' && 'code' in error && error.code === 'STEER_REJECTED';
+            if (!submitted || rejected)
+                task.steering.delete(requestId);
+            if (submitted && rejected)
+                this.followups.forgetRejectedSteering(worker.id, requestId);
+            if (error instanceof ProcessCleanupUnconfirmedError) {
+                if (!submitted) {
+                    task.admissionFailure ??= { error };
+                    this.blockCatalogOnCleanup(cliOf(worker.preference), error);
+                }
+                else
+                    this.markCleanupBlocked(error);
+                // The live task still owns its own range. Its later cleanup must not
+                // reclassify this account-query failure as an unknown task-range fault.
+                task.controller.abort(!submitted ? new Error(error.message, { cause: error }) : error);
+                this.drain();
+            }
+            if (submitted && !rejected)
+                throw Object.assign(new Error(error instanceof Error ? error.message : String(error), {
+                    cause: error,
+                }), { code: 'STEER_UNKNOWN' });
+            throw error;
+        });
+        task.steering.set(requestId, { prompt, done });
+        await done;
+    }
+    /** Accepted intent survives transport cancellation; only an explicit Stop revokes it. */
+    interruptMessage(parent, id, prompt, requestId, clientId, sequence, signal) {
+        const worker = this.get(parent, id);
+        this.assertCliEnabled(cliOf(worker.preference));
+        signal?.throwIfAborted();
+        z.uuid().parse(requestId);
+        z.uuid().parse(clientId);
+        z.number().int().nonnegative().safe().parse(sequence);
+        if (!prompt.trim() || prompt.length > 100_000)
+            throw new Error('消息须包含 1–100000 个字符');
+        const messages = this.priorityHistory.get(id) ?? new Map();
+        const duplicate = messages.get(requestId);
+        if (duplicate) {
+            if (duplicate.prompt !== prompt)
+                throw new Error('重复提交标识对应的消息不同');
+            return {
+                messageId: requestId,
+                revision: this.revision,
+                state: duplicate.state,
+            };
+        }
+        if (!this.tasks.has(id) &&
+            !this.storage.accountBinding(id) &&
+            !(!worker.conversationId && isUserInterrupted(worker)))
+            throw new Error(LEGACY_ACCOUNT_RECORD_NOTICE);
+        this.queuedExecutionGuard?.(worker);
+        const receipt = this.followups.receipt(id, prompt, requestId);
+        if (receipt?.delivery === 'steer' || (receipt && !receipt.item))
+            throw new Error('这条消息已经处理，请刷新会话');
+        if (this.tasks.get(id)?.queuedFollowupId === requestId && this.tasks.get(id)?.spawnAttempted)
+            throw new Error('消息已进入执行队列，请使用停止操作');
+        const lastSequence = Math.max(-1, ...[...messages.values()].filter((item) => item.clientId === clientId).map((item) => item.sequence));
+        const message = {
+            id: requestId,
+            prompt,
+            clientId,
+            sequence,
+            createdAt: new Date().toISOString(),
+            generation: this.followups.generation(id),
+            state: sequence <= lastSequence ? 'superseded' : 'pending',
+            controller: new AbortController(),
+        };
+        this.updatePriority(worker, message, message.state, message.state === 'superseded' ? '已被后续插队取消' : undefined);
+        messages.set(requestId, message);
+        this.priorityHistory.set(id, messages);
+        try {
+            this.followups.consume(id, prompt, requestId);
+        }
+        catch (error) {
+            this.updatePriority(worker, message, 'failed', `待发送消息状态保存失败：${String(error)}`);
+            this.blocked = message.error;
+            throw error;
+        }
+        if (message.state === 'pending') {
+            const previous = this.latestPriority.get(id);
+            if (previous && !deliveryTerminal(previous.state)) {
+                if (!previous.spawnAttempted)
+                    this.updatePriority(worker, previous, 'superseded', '已被后续插队取消');
+                previous.controller.abort(new UserStoppedError());
+            }
+            this.latestPriority.set(id, message);
+            if (this.priorityRunners.has(id)) {
+                // Stop owns the process/preparation cleanup; newer callers never await an older RPC.
+                void this.stopCurrent(parent, id, true).catch(() => undefined);
+            }
+            else
+                this.startPriorityRunner(worker);
+        }
+        this.changed();
+        return {
+            messageId: requestId,
+            revision: this.revision,
+            state: message.state,
+        };
+    }
+    updatePriority(worker, message, state, error) {
+        this.storage.append(worker, {
+            kind: 'submission',
+            text: message.prompt,
+            queuedFollowupId: message.id,
+            deliveryState: state,
+            deliveryError: error,
+            admittedRunId: message.runId,
+            submissionClientId: message.clientId,
+            submissionSequence: message.sequence,
+        });
+        message.state = state;
+        message.error = error;
+        this.changed();
+    }
+    startPriorityRunner(worker) {
+        const operation = (async () => {
+            while (this.latestPriority.has(worker.id)) {
+                let message = this.latestPriority.get(worker.id);
+                try {
+                    await this.stopCurrent(worker.parentSessionId, worker.id, true);
+                    const latest = this.latestPriority.get(worker.id);
+                    if (!latest)
+                        break;
+                    message = latest;
+                    message.controller.signal.throwIfAborted();
+                    this.assertCliEnabled(cliOf(worker.preference));
+                    this.queuedExecutionGuard?.(worker);
+                    if (!this.followupLauncher)
+                        throw new Error('续聊通路尚未准备好');
+                    await this.followupLauncher(structuredClone(worker), {
+                        id: message.id,
+                        prompt: message.prompt,
+                        createdAt: message.createdAt,
+                        state: 'sending',
+                    }, { id: message.id, expectedRunId: worker.runId, priority: true }, message.controller.signal);
+                    const task = this.tasks.get(worker.id);
+                    if (task?.queuedFollowupId === message.id)
+                        await task.done;
+                }
+                catch (error) {
+                    if (!deliveryTerminal(message.state))
+                        this.updatePriority(worker, message, message.controller.signal.aborted && !this.blocked ? 'cancelled' : 'failed', this.blocked ?? (message.controller.signal.aborted ? '已停止发送' : String(error)));
+                    if (this.latestPriority.get(worker.id) === message)
+                        this.pauseFollowups(worker.id, message.error ?? '插队未完成，请确认后继续发送', message.generation);
+                }
+                finally {
+                    if (this.latestPriority.get(worker.id) === message)
+                        this.latestPriority.delete(worker.id);
+                }
+            }
+        })().finally(() => {
+            this.priorityRunners.delete(worker.id);
+            this.changed();
+            if (this.latestPriority.has(worker.id) && !this.disposed)
+                this.startPriorityRunner(worker);
+            else {
+                this.dispatchFollowup(worker);
+            }
+        });
+        this.priorityRunners.set(worker.id, operation);
+        void operation.catch(() => undefined);
+    }
+    interruptQueuedFollowup(parent, id, queuedId, _expectedRunId, signal) {
+        const worker = this.get(parent, id);
+        const known = this.priorityHistory.get(id)?.get(queuedId);
+        const item = this.followups.list(id).find((entry) => entry.id === queuedId) ??
+            (known
+                ? {
+                    id: known.id,
+                    prompt: known.prompt,
+                    createdAt: known.createdAt,
+                    state: 'sending',
+                }
+                : undefined);
+        if (!item)
+            throw new Error('消息已发送或已取消，请刷新会话');
+        this.interruptMessage(parent, worker.id, item.prompt, item.id, item.id, 1, signal);
+        return Promise.resolve({ ...item, state: 'sending' });
+    }
+    queueFollowup(parent, id, prompt, expectedRunId, requestId, workerBound = false) {
+        const worker = this.get(parent, id);
+        this.assertCliEnabled(cliOf(worker.preference));
+        const priority = this.priorityHistory.get(id)?.get(requestId);
+        if (priority) {
+            if (priority.prompt !== prompt)
+                throw new Error('重复提交标识对应的消息不同');
+            return {
+                id: requestId,
+                prompt,
+                createdAt: priority.createdAt,
+                state: 'sending',
+            };
+        }
+        if (!this.tasks.has(id) && !this.storage.accountBinding(id))
+            throw new Error(LEGACY_ACCOUNT_RECORD_NOTICE);
+        if (!workerBound && worker.runId !== expectedRunId)
+            throw new Error('本轮状态已变化，请刷新后重新发送');
+        const receipt = this.followups.receipt(id, prompt, requestId);
+        if (receipt) {
+            if (receipt.delivery !== 'queue' || !receipt.item)
+                throw new Error('这条消息已经处理，请刷新会话');
+            return receipt.item;
+        }
+        if ((!workerBound && worker.status === 'stopping') ||
+            (!['queued', 'running', 'completed'].includes(worker.status) &&
+                !this.followups.list(id).length &&
+                !(workerBound && (isUserInterrupted(worker) || this.stopOperations.get(id)?.size))))
+            throw new Error('本轮已暂停或异常，请确认后重新发送');
+        const item = this.followups.add(id, prompt, requestId);
+        this.changed();
+        this.dispatchFollowup(worker);
+        return item;
+    }
+    cancelQueuedFollowup(parent, id, queuedId) {
+        this.get(parent, id);
+        if (this.disposed)
+            throw new Error('CLI Worker is shutting down');
+        const task = this.tasks.get(id);
+        if (task?.queuedFollowupId === queuedId && task.spawnAttempted)
+            throw new Error('消息已进入执行队列，请使用停止操作');
+        this.followups.remove(id, queuedId);
+        if (task?.queuedFollowupId === queuedId) {
+            task.preserveFollowups = true;
+            task.controller.abort(new UserStoppedError());
+            if (!this.running.has(task)) {
+                this.queue = this.queue.filter((entry) => entry !== task);
+                void this.finishQueued(task, 'interrupted', '待发送消息已取消');
+            }
+        }
+        const dispatch = this.followupDispatches.get(id);
+        if (dispatch?.id === queuedId)
+            dispatch.controller.abort(new Error('待发送消息已取消'));
+        this.changed();
+    }
+    retryQueuedFollowups(parent, id, expectedRunId) {
+        const worker = this.get(parent, id);
+        this.assertManagedIdle(worker);
+        this.assertCliEnabled(cliOf(worker.preference));
+        if (worker.runId !== expectedRunId)
+            throw new Error('本轮状态已变化，请刷新后重试');
+        if (!worker.conversationId && !isUserInterrupted(worker))
+            throw new Error('尚未收到 CLI 会话标识，无法继续发送');
+        if (this.followupDispatches.has(id))
+            throw new Error('消息正在准备发送，请稍后再试');
+        this.followups.update(id, 'pending');
+        this.changed();
+        this.dispatchFollowup(worker, true);
+    }
+    pauseFollowups(id, reason, throughGeneration = this.followups.generation(id)) {
+        const dispatch = this.followupDispatches.get(id);
+        if (dispatch && dispatch.generation <= throughGeneration)
+            dispatch.controller.abort(new Error(reason));
+        try {
+            this.followups.update(id, 'paused', reason, throughGeneration);
+        }
+        catch (error) {
+            this.blocked = `待发送消息状态保存失败，已暂停执行：${String(error)}`;
+        }
+    }
+    dispatchFollowup(worker, explicitlyRetried = false) {
+        if (this.disposed ||
+            this.blocked ||
+            !this.followupLauncher ||
+            this.followupDispatches.has(worker.id) ||
+            this.preparations.has(worker.id) ||
+            this.latestPriority.has(worker.id) ||
+            this.priorityRunners.has(worker.id) ||
+            this.stopOperations.get(worker.id)?.size ||
+            this.accepting(worker.id))
+            return;
+        if (this.tasks.has(worker.id) ||
+            active(worker.status) ||
+            (!explicitlyRetried && worker.status !== 'completed' && !isUserInterrupted(worker)))
+            return;
+        let item;
+        try {
+            item = this.followups.claim(worker.id);
+        }
+        catch (error) {
+            this.blocked = `待发送消息状态保存失败，已暂停执行：${String(error)}`;
+            this.changed();
+            return;
+        }
+        if (!item)
+            return;
+        const dispatch = {
+            id: item.id,
+            expectedRunId: worker.runId,
+            generation: this.followups.generationOf(worker.id, item.id),
+            controller: new AbortController(),
+        };
+        this.followupDispatches.set(worker.id, dispatch);
+        this.changed();
+        const running = this.followupLauncher(structuredClone(worker), item, dispatch, dispatch.controller.signal)
+            .catch((error) => {
+            if (dispatch.preserveOnAbort && !this.blocked)
+                this.followups.releaseClaim(worker.id, item.id);
+            else if (this.followups.list(worker.id).some((entry) => entry.id === item.id))
+                this.pauseFollowups(worker.id, `发送已暂停：${error instanceof Error ? error.message : String(error)}`, dispatch.generation);
+            this.changed();
+        })
+            .finally(() => {
+            this.followupRuns.delete(running);
+            if (this.followupDispatches.get(worker.id) === dispatch)
+                this.followupDispatches.delete(worker.id);
+            this.changed();
+            const current = this.storage.workers.get(worker.id);
+            if (current && !current.archivedAt)
+                this.dispatchFollowup(current, explicitlyRetried);
+        });
+        this.followupRuns.add(running);
+        dispatch.done = running;
+    }
+    subscribe(callback) {
+        this.listeners.add(callback);
+        return () => {
+            this.listeners.delete(callback);
+        };
+    }
+    changed() {
+        this.revision++;
+        for (const callback of this.listeners)
+            callback();
+    }
+    assertCliEnabled(cli) {
+        if (this.disposed)
+            throw new Error('插件正在关闭');
+        if (this.blocked)
+            throw new Error(this.blocked);
+        if (this.catalogBlocked.has(cli))
+            throw new Error(this.catalogBlocked.get(cli));
+        if (isRetiredCli(cli))
+            throw new Error(RETIRED_HARNESS_NOTICE);
+        if (!this.storage.cliSettings().enabled[cli])
+            throw new Error(`${CLI_LABELS[cli]} 已关闭，请先在 CLI Worker 设置中开启`);
+    }
+    blockOnCleanup(error) {
+        this.markCleanupBlocked(error);
+        this.drain();
+    }
+    /** Read-only metadata owns one CLI's account/cache, never another CLI's admission. */
+    blockCatalogOnCleanup(cli, error) {
+        let message = `${CLI_LABELS[cli]} 元数据进程清理尚未确认，已暂停此 CLI：${error.message}`;
+        this.catalogBlocked.set(cli, message);
+        try {
+            this.storage.blockCleanup(cli);
+        }
+        catch {
+            message += '；清理隔离记录保存失败';
+            this.catalogBlocked.set(cli, message);
+        }
+        this.drain();
+        this.changed();
+    }
+    markCleanupBlocked(error) {
+        this.blocked = `无法确认 CLI 进程已清理，已暂停后续派遣：${error instanceof Error ? error.message : String(error)}`;
+        try {
+            // The private marker contains no CLI output, paths, identities or credentials.
+            this.storage.blockCleanup();
+        }
+        catch {
+            // Keep this Host closed even when its storage cannot record the quarantine.
+            this.blocked += '；清理隔离记录保存失败';
+        }
+    }
+    setCliEnabled(cli, enabled) {
+        if (isRetiredCli(cli))
+            throw new Error(RETIRED_HARNESS_NOTICE);
+        if (this.disposed)
+            throw new Error('插件正在关闭');
+        if (!enabled)
+            this.assertAccountIdle(cli);
+        const settings = this.storage.setCliEnabled(cli, enabled);
+        this.changed();
+        return settings;
+    }
+    /** Account mutation must also respect a prior unconfirmed process cleanup. */
+    assertAccountIdle(cli) {
+        if (this.disposed)
+            throw new Error('插件正在关闭');
+        if (this.blocked)
+            throw new Error(this.blocked);
+        if (this.catalogBlocked.has(cli))
+            throw new Error(this.catalogBlocked.get(cli));
+        if ([...this.storage.workers.values()].some((worker) => !!this.busyReason(worker) && cliOf(worker.preference) === cli))
+            throw new Error('此 CLI 还有运行或排队中的任务，请等待结束后再修改此 CLI 设置或管理账号');
+    }
+    get(parent, id) {
+        const worker = this.storage.workers.get(id) ?? this.stagedForks.get(id);
+        if (!worker || worker.parentSessionId !== parent)
+            throw new Error('Worker does not belong to this conversation');
+        if (worker.archivedAt)
+            throw new Error('此任务已删除，请先恢复');
+        return worker;
+    }
+    /** Exact names are scoped to the owning parent; never select a partial or cross-session match. */
+    resolveWorker(parent, id, name) {
+        if (!id && !name)
+            throw new Error('请指定 worker_id 或 worker_name');
+        const normalized = name === undefined ? undefined : agentNameSchema.parse(name);
+        if (id) {
+            const worker = this.get(parent, id);
+            if (normalized && !this.matchesName(worker, normalized))
+                throw new Error('worker_id 与 worker_name 不匹配');
+            return worker;
+        }
+        const matches = [...this.storage.workers.values()].filter((worker) => worker.parentSessionId === parent && !worker.archivedAt && this.matchesName(worker, normalized));
+        if (matches.length !== 1)
+            throw new Error(matches.length
+                ? '智能体名称不唯一，请使用 worker_id'
+                : '当前对话中没有此名称的智能体，请检查名称或使用 worker_id');
+        return matches[0];
+    }
+    matchesName(worker, name) {
+        return workerName(worker) === name || (worker.nameAliases ?? []).includes(name);
+    }
+    checkAgentName(parent, name, excludingId) {
+        const clean = agentNameSchema.parse(name);
+        if ([...this.storage.workers.values()].some((worker) => worker.parentSessionId === parent &&
+            worker.id !== excludingId &&
+            [workerName(worker), ...(worker.nameAliases ?? [])].some((name) => name.toLocaleLowerCase() === clean.toLocaleLowerCase())))
+            throw new Error('当前对话已有同名智能体，请换一个名称或续用已有智能体');
+        return clean;
+    }
+    renameWorker(parent, id, name) {
+        if (this.disposed)
+            throw new Error('CLI Worker is shutting down');
+        const worker = this.get(parent, id);
+        const agentName = this.checkAgentName(parent, name, id);
+        // Publish the new name only after persistence succeeds. Keep a running task's
+        // shared worker reference in sync so its next process event cannot revert it.
+        this.storage.save({ ...worker, agentName, agentNameOrigin: 'custom' });
+        worker.agentName = agentName;
+        worker.agentNameOrigin = 'custom';
+        this.storage.workers.set(id, worker);
+        this.changed();
+    }
+    renameWorkerTitle(parent, id, title) {
+        if (this.disposed)
+            throw new Error('CLI Worker is shutting down');
+        const worker = this.get(parent, id);
+        const clean = workerTitleSchema.parse(title);
+        this.storage.save({ ...worker, title: clean });
+        worker.title = clean;
+        this.storage.workers.set(id, worker);
+        this.changed();
+    }
+    goalWorker(parent, id, expectedRevision) {
+        if (this.disposed)
+            throw new Error('CLI Worker is shutting down');
+        const worker = this.get(parent, id);
+        if ((worker.goal?.revision ?? worker.goalRevision ?? 0) !== expectedRevision)
+            throw new Error('目标已被修改，请刷新后重试');
+        return worker;
+    }
+    setWorkerGoal(parent, id, objective, expectedRevision) {
+        const worker = this.goalWorker(parent, id, expectedRevision);
+        const clean = objective.trim();
+        if (!clean.length || clean.length > GOAL_OBJECTIVE_LIMIT)
+            throw new Error(`目标须包含 1–${GOAL_OBJECTIVE_LIMIT} 个字符`);
+        return this.saveWorkerGoal(worker, {
+            objective: clean,
+            status: worker.goal?.status ?? 'active',
+            revision: expectedRevision + 1,
+            updatedAt: new Date().toISOString(),
+        });
+    }
+    setWorkerGoalStatus(parent, id, status, expectedRevision) {
+        const worker = this.goalWorker(parent, id, expectedRevision);
+        if (!worker.goal)
+            throw new Error('当前会话尚未设置目标');
+        if (status !== 'active' && status !== 'paused')
+            throw new Error('目标状态无效');
+        return this.saveWorkerGoal(worker, {
+            ...worker.goal,
+            status,
+            revision: expectedRevision + 1,
+            updatedAt: new Date().toISOString(),
+        });
+    }
+    saveWorkerGoal(worker, goal) {
+        this.storage.save({ ...worker, goal, goalRevision: goal.revision });
+        // Keep the in-flight task's shared reference current across process events.
+        worker.goal = goal;
+        worker.goalRevision = goal.revision;
+        this.storage.workers.set(worker.id, worker);
+        this.changed();
+        return structuredClone(goal);
+    }
+    clearWorkerGoal(parent, id, expectedRevision) {
+        const worker = this.goalWorker(parent, id, expectedRevision);
+        // Advance past the cleared revision; a new goal never reuses it.
+        const updated = { ...worker, goalRevision: expectedRevision + 1 };
+        delete updated.goal;
+        this.storage.save(updated);
+        delete worker.goal;
+        worker.goalRevision = updated.goalRevision;
+        this.storage.workers.set(worker.id, worker);
+        this.changed();
+    }
+    /** Management cannot hide an in-flight task or a process whose cleanup is unresolved. */
+    assertManagedIdle(worker, priorityId) {
+        if (this.disposed)
+            throw new Error('CLI Worker is shutting down');
+        if (this.blocked)
+            throw new Error(this.blocked);
+        const blocked = this.catalogBlocked.get(cliOf(worker.preference));
+        if (blocked)
+            throw new Error(blocked);
+        if (active(worker.status) ||
+            this.tasks.has(worker.id) ||
+            this.preparations.has(worker.id) ||
+            (this.latestPriority.has(worker.id) && this.latestPriority.get(worker.id).id !== priorityId))
+            throw new Error('请等待任务结束并完成进程清理后再管理此任务');
+    }
+    assertLegacyRestart(parent, id) {
+        const worker = this.get(parent, id);
+        this.assertManagedIdle(worker);
+        this.assertCliEnabled(cliOf(worker.preference));
+        if (!worker.conversationId || this.storage.accountBinding(id))
+            throw new Error('只有缺少账号记录的历史任务可通过此操作新建对话');
+        return worker;
+    }
+    deleteWorker(parent, id) {
+        const worker = this.get(parent, id);
+        this.assertManagedIdle(worker);
+        this.storage.save({ ...worker, archivedAt: new Date().toISOString() });
+        this.changed();
+    }
+    restoreWorker(parent, id) {
+        const worker = this.storage.workers.get(id);
+        if (!worker || worker.parentSessionId !== parent)
+            throw new Error('Worker does not belong to this conversation');
+        this.assertManagedIdle(worker);
+        if (!worker.archivedAt)
+            throw new Error('此任务尚未删除');
+        const restored = { ...worker };
+        delete restored.archivedAt;
+        this.storage.save(restored);
+        this.changed();
+    }
+    nativeStateDirectory(worker) {
+        const state = readWorkerForkState(this.storage.directory, worker.id);
+        return join(this.storage.directory, 'native', state?.nativeStateWorkerId ?? worker.id);
+    }
+    forkRunSource(worker, runId) {
+        let current = worker.id, conversationId = worker.conversationId;
+        const visited = new Set();
+        while (!existsSync(join(this.storage.directory, `${current}.${runId}.raw.jsonl`))) {
+            if (visited.has(current))
+                throw new Error('分支历史来源循环');
+            visited.add(current);
+            const state = readWorkerForkState(this.storage.directory, current);
+            if (!state?.historySourceWorkerId || !state.historySourceConversationId)
+                throw new Error('原生完成轮日志缺失，无法映射分支截点');
+            current = state.historySourceWorkerId;
+            conversationId = state.historySourceConversationId;
+        }
+        return { workerId: current, conversationId };
+    }
+    /** Metadata only, through the same admitted account, argv builder and owned process backend. */
+    async forkNative(worker, cut, signal) {
+        const cli = cliOf(worker.preference);
+        const sourceId = worker.conversationId;
+        const operation = async (conversationId, action, ownSignal) => {
+            const executable = await resolveCliExecutable(cli, this.backend, this.config, ownSignal);
+            const nativeState = this.nativeStateDirectory(worker);
+            mkdirSync(nativeState, { recursive: true, mode: 0o700 });
+            const prompt = '分支元数据操作（不发送模型任务）';
+            const launch = isExtendedCli(cli)
+                ? await extendedLaunch(cli, executable, worker.project, worker.preference, worker.mode, prompt, nativeState, this.config, conversationId, (argv, env) => captureCatalogMetadata(this.backend, this.config, argv, worker.project, ownSignal, env), { backend: this.backend, signal: ownSignal, graceMs: this.config.graceMs }, true)
+                : await prepareNativeWorker({ argv: workerArguments(executable, worker.project, worker.preference, worker.mode, prompt, this.config.timeoutMs, conversationId, true),
+                    env: { ...firstPartyEnvironment(cli), ...(['qoder', 'qodercn'].includes(cli) ? qoderEnvironment(cli) : {}) } }, { cli, project: worker.project, preference: worker.preference, mode: worker.mode,
+                    prompt, conversationId, stateDirectory: nativeState }, this.config);
+            let output = '', problem;
+            let handle;
+            let createdId;
+            let cleanupUnconfirmed = false;
+            let readers = [];
+            try {
+                const path = launch.argv.at(-1);
+                const request = JSON.parse(readFileSync(path, 'utf8'));
+                writeFileSync(path, JSON.stringify({ ...request, forkOperation: action, forkAt: cut }), { mode: 0o600 });
+                if ('activate' in launch && typeof launch.activate === 'function')
+                    await launch.activate();
+                handle = this.backend.spawn({ argv: launch.argv, cwd: worker.project, env: launch.env,
+                    stdio: { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' }, graceMs: this.config.graceMs,
+                    signal: AbortSignal.any([ownSignal, AbortSignal.timeout(30000)]) });
+                void handle.done.catch(() => undefined);
+                const decoder = new StringDecoder('utf8');
+                let bytes = 0;
+                const consume = async (stream, keep) => {
+                    if (!stream)
+                        return;
+                    for await (const chunk of stream) {
+                        bytes += Buffer.byteLength(chunk);
+                        if (bytes > this.config.maxRunBytes)
+                            throw new Error('分支元数据输出超过限制');
+                        if (keep)
+                            output += decoder.write(chunk);
+                    }
+                    if (keep)
+                        output += decoder.end();
+                };
+                readers = [consume(handle.stdout, true), consume(handle.stderr, false)];
+                await Promise.all(readers);
+                const result = await handle.done;
+                if (result.exitCode !== 0)
+                    throw new Error('原生分支元数据操作失败');
+                ownSignal.throwIfAborted();
+            }
+            catch (error) {
+                problem = error;
+            }
+            finally {
+                if (handle) {
+                    try {
+                        handle.terminate();
+                        if (!await handle.waitForExit())
+                            throw new ProcessCleanupUnconfirmedError();
+                    }
+                    catch (error) {
+                        cleanupUnconfirmed = true;
+                        this.blockCatalogOnCleanup(cli, new ProcessCleanupUnconfirmedError());
+                        problem = new AggregateError([problem, error].filter(Boolean), '分支元数据进程清理未确认；保留私有准备资源');
+                    }
+                }
+                await Promise.allSettled(readers);
+                try {
+                    if (!cleanupUnconfirmed)
+                        await launch.cleanup();
+                }
+                catch (error) {
+                    problem = new AggregateError([problem, error].filter(Boolean), '分支元数据准备资源清理失败');
+                }
+            }
+            const frames = [];
+            for (const line of output.split('\n').filter(Boolean)) {
+                try {
+                    frames.push(JSON.parse(line));
+                }
+                catch (error) {
+                    problem ??= error;
+                }
+            }
+            const created = frames.filter((frame) => frame.type === 'native' && frame.record?.type === 'cliworker.fork_created');
+            if (created.length === 1 && typeof created[0].record.id === 'string' && created[0].record.id !== sourceId)
+                createdId = created[0].record.id;
+            const terminal = frames.filter((frame) => frame.type === 'result').at(-1);
+            if (terminal?.status !== 'SUCCESS')
+                problem ??= new Error(terminal?.error ?? '缺少原生分支完成回执');
+            if (action === 'fork' && !createdId)
+                problem ??= new Error('原生分支没有返回新的会话 ID');
+            if (problem) {
+                if (createdId && action === 'fork' && cleanupUnconfirmed)
+                    throw new AggregateError([problem], `分支进程清理未确认；原生资源 ${createdId} 保留待人工核查`);
+                if (createdId && action === 'fork') {
+                    try {
+                        await operation(createdId, 'delete', AbortSignal.timeout(30000));
+                    }
+                    catch (cleanup) {
+                        throw new AggregateError([problem, cleanup], `分支失败；原生资源 ${createdId} 清理说明：${String(cleanup)}`);
+                    }
+                }
+                throw problem;
+            }
+            const notes = frames.filter((frame) => frame.type === 'native' && frame.record?.type === 'cliworker.fork_cleanup');
+            if (notes.length)
+                throw new Error(notes.map((frame) => frame.record.note).join('；'));
+            return createdId;
+        };
+        const binding = this.storage.accountBinding(worker.id);
+        if (!binding || binding !== await readCliAccountBinding(cli, this.backend, this.config, worker.project, signal))
+            throw new Error(ACCOUNT_CHANGED);
+        const conversationId = (await operation(sourceId, 'fork', signal));
+        return { conversationId, rollback: async () => {
+                try {
+                    await operation(conversationId, 'delete', AbortSignal.timeout(30000));
+                }
+                catch (error) {
+                    throw new Error(`原生分支 ${conversationId} 清理说明：${String(error)}`, { cause: error });
+                }
+            } };
+    }
+    async forkWorker(parent, id, atMessageId, bridge, signal) {
+        const source = this.get(parent.id, id);
+        // Paused queued followups still belong to this conversation and prohibit a fork.
+        if (this.busyReason(source) || this.followups.list(id).length)
+            throw new Error('请等待当前运行结束后再分支');
+        return this.prepareFollowup(parent.id, id, signal, async (ownSignal) => {
+            const created = [];
+            try {
+                return await forkWorkerConversation({
+                    worker: source, workers: () => [...this.storage.workers.values(), ...this.stagedForks.values()],
+                    assertIdle: () => { ownSignal.throwIfAborted(); },
+                    history: (at) => bridge.forkHistory(source, at, ownSignal),
+                    raw: (runId) => readFileSync(join(this.storage.directory, `${this.forkRunSource(source, runId).workerId}.${runId}.raw.jsonl`), 'utf8'),
+                    rawSourceId: (runId) => this.forkRunSource(source, runId).conversationId,
+                    native: (cut) => this.forkNative(source, cut, ownSignal),
+                    stage: (worker) => { this.stagedForks.set(worker.id, worker); created.push(worker.id); },
+                    child: (worker, history) => bridge.createFork(parent, worker, history, ownSignal),
+                    publish: (worker, history, state) => this.publishFork(source, worker, history, state),
+                    remove: (worker) => {
+                        this.storage.workers.delete(worker.id);
+                        this.stagedForks.delete(worker.id);
+                        for (const suffix of ['.worker.json', '.events.jsonl', '.account-binding.json', '.fork.json'])
+                            rmSync(join(this.storage.directory, worker.id + suffix), { force: true });
+                    },
+                    changed: () => this.changed(),
+                    nativeStateWorkerId: readWorkerForkState(this.storage.directory, id)?.nativeStateWorkerId,
+                }, atMessageId, ownSignal);
+            }
+            finally {
+                for (const workerId of created)
+                    this.stagedForks.delete(workerId);
+            }
+        });
+    }
+    publishFork(source, worker, history, state) {
+        const events = this.storage.history(source.id);
+        const cutoff = events.findLastIndex((event) => event.runId === history.runId && event.kind !== 'submission');
+        if (cutoff < 0)
+            throw new Error('分支运行历史缺失');
+        writeFileSync(join(this.storage.directory, `${worker.id}.events.jsonl`), events.slice(0, cutoff + 1)
+            .map((event) => JSON.stringify(event)).join('\n') + '\n', { mode: 0o600, flag: 'wx' });
+        const binding = this.storage.accountBinding(source.id);
+        if (binding)
+            this.storage.bindAccount(worker.id, binding);
+        writeWorkerForkState(this.storage.directory, worker.id, state);
+        this.storage.save(worker);
+    }
+    snapshot(parent, selected) {
+        const owned = [...this.storage.workers.values()]
+            .filter((w) => w.parentSessionId === parent)
+            .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+        const workers = owned.filter((worker) => !worker.archivedAt);
+        const archivedWorkers = owned.filter((worker) => !!worker.archivedAt);
+        const selectedWorker = selected ? this.storage.workers.get(selected) : undefined;
+        if (selected && (!selectedWorker || selectedWorker.parentSessionId !== parent))
+            throw new Error('Worker does not belong to this conversation');
+        const worker = selectedWorker?.archivedAt ? undefined : selectedWorker;
+        const timeline = worker ? this.timeline(worker) : [];
+        const telemetry = worker
+            ? withContextTelemetry(worker, withConversationTelemetry(worker, this.runTelemetry(worker, worker.runId)))
+            : undefined;
+        const context = worker && cliOf(worker.preference) === 'antigravity'
+            ? this.agyContextReader.read(worker.conversationId)
+            : undefined;
+        const { replies: _replies, replyDurations: _replyDurations, finalReply: _finalReply, runUsage: _runUsage, ...publicTelemetry } = telemetry ?? { replies: {} };
+        return {
+            telemetry: telemetry || context
+                ? {
+                    ...publicTelemetry,
+                    ...context,
+                }
+                : undefined,
+            workers,
+            archivedWorkers,
+            selected: worker,
+            selectedBusy: worker ? !!this.busyReason(worker) : false,
+            selectedBusyReason: worker ? this.busyReason(worker) : undefined,
+            queuedFollowups: worker ? this.followups.list(worker.id) : [],
+            runningMessageMode: worker
+                ? this.storage.runningMessageSettings(worker.project, cliOf(worker.preference)).mode === 'steer' &&
+                    !supportsWorkerNativeSteering(worker)
+                    ? 'queue'
+                    : this.storage.runningMessageSettings(worker.project, cliOf(worker.preference)).mode
+                : undefined,
+            runningMessageModeReason: worker &&
+                this.storage.runningMessageSettings(worker.project, cliOf(worker.preference)).mode === 'steer' &&
+                !supportsWorkerNativeSteering(worker)
+                ? '此历史会话使用的通信通路不支持原生引导，当前使用排队；不会更换原生会话协议'
+                : undefined,
+            resumeBlockedReason: worker?.conversationId && !this.storage.accountBinding(worker.id)
+                ? LEGACY_ACCOUNT_RECORD_NOTICE
+                : undefined,
+            timeline: timeline.slice(-this.config.maxTimelineItems),
+            revision: this.revision,
+            truncated: timeline.length > this.config.maxTimelineItems,
+        };
+    }
+    timeline(worker) {
+        const events = this.nativeTimelineReprojector.project(worker, this.storage.history(worker.id), (runId) => join(this.storage.directory, `${worker.id}.${runId}.raw.jsonl`));
+        const rows = foldEvents(events.map((event) => ({
+            ...event,
+            ...projectPublicToolCall(cliOf(worker.preference), event),
+        })), active(worker.status) ? undefined : { runId: worker.runId, status: worker.status }, cliOf(worker.preference));
+        for (const runId of new Set(rows.map((row) => row.id.split(':')[0])))
+            attachTelemetry(rows, runId, this.runTelemetry(worker, runId));
+        return rows;
+    }
+    runTelemetry(worker, runId) {
+        const rawPath = join(this.storage.directory, `${worker.id}.${runId}.raw.jsonl`);
+        const observed = { ...this.telemetryReader.read(rawPath, cliOf(worker.preference), runId === worker.runId
+                ? {
+                    conversationId: worker.conversationId,
+                    model: worker.observedModel ?? worker.preference.model,
+                    project: worker.project,
+                }
+                : undefined), ...this.supplementalContextReader.read({ worker, runId, rawPath, storageDirectory: this.storage.directory,
+                ...(runId === worker.runId ? { currentIdentity: { conversationId: worker.conversationId,
+                        model: worker.observedModel ?? worker.preference.model } } : {}),
+            }) };
+        if (runId === worker.runId && worker.contextInvalidatedRunId === runId)
+            return withoutContextTelemetry(observed);
+        if (runId === worker.runId && cliOf(worker.preference) === 'hermes') {
+            try {
+                const native = worker.transport === 'hermes-http-v1';
+                const session = this.hermesSessionReader.read(native ? join(this.storage.directory, 'native', worker.id, 'hermes-http-home')
+                    : effectiveHermesHome({ ...this.config, stateDirectory: this.storage.directory }), worker.conversationId, native ? 'api_server' : 'oneshot', worker.project);
+                // Session totals replace only the cumulative meter. Exact run receipts
+                // remain separate and are never relabelled as provider responses.
+                if (session)
+                    return { ...observed, ...session };
+            }
+            catch {
+                // Unavailable account/session metadata never changes execution or history.
+            }
+        }
+        return observed;
+    }
+    /** A settled, exact run receipt for the official whole-turn disclosure. */
+    runUsage(parent, id, runId) {
+        const worker = this.get(parent, id);
+        if (!/^[a-f\d]{8}-(?:[a-f\d]{4}-){3}[a-f\d]{12}$/i.test(runId))
+            return;
+        if (worker.runId === runId && this.busyReason(worker))
+            return;
+        const terminal = this.storage.history(id).findLast((event) => event.runId === runId && event.kind === 'status' &&
+            ['completed', 'failed', 'interrupted'].includes(event.state ?? ''));
+        if (!terminal)
+            return;
+        const receipt = this.telemetryReader.read(join(this.storage.directory, `${worker.id}.${runId}.raw.jsonl`), cliOf(worker.preference), { conversationId: worker.conversationId }).runUsage;
+        return receipt?.scope === 'run' ? receipt : undefined;
+    }
+    /** Independent exact-run credits, using the same bounded native identity checks. */
+    runCredits(parent, id, runId) {
+        const worker = this.get(parent, id);
+        if (!['qoder', 'qodercn'].includes(cliOf(worker.preference)) || !/^[a-f\d]{8}-(?:[a-f\d]{4}-){3}[a-f\d]{12}$/i.test(runId) ||
+            (worker.runId === runId && this.busyReason(worker)))
+            return;
+        if (!this.storage.history(id).some(event => event.runId === runId && event.kind === 'status' &&
+            ['completed', 'failed', 'interrupted'].includes(event.state ?? '')))
+            return;
+        return this.runTelemetry(worker, runId).providerCredits;
+    }
+    history(parent, workerId, anchor, direction) {
+        const worker = this.get(parent, workerId);
+        if (direction !== 'before' && direction !== 'after')
+            throw new Error('Invalid history direction');
+        if (!anchor || anchor.length > 256)
+            throw new Error('缺少有效的历史记录位置，请返回实时记录');
+        const timeline = this.timeline(worker);
+        const index = timeline.findIndex((item) => item.id === anchor);
+        if (index < 0)
+            throw new Error('历史记录位置已不可用，请返回实时记录后重试');
+        // Row identity remains stable when later events append or a streamed step grows.
+        const end = direction === 'before' ? index : Math.min(timeline.length, index + 201);
+        const start = direction === 'before' ? Math.max(0, end - 200) : index + 1;
+        return {
+            workerId,
+            items: timeline.slice(start, end),
+            start,
+            end,
+            total: timeline.length,
+            hasOlder: start > 0,
+            hasNewer: end < timeline.length,
+        };
+    }
+    configureWorker(parent, id, preference) {
+        if (this.disposed)
+            throw new Error('CLI Worker is shutting down');
+        const worker = this.get(parent, id);
+        if (isRetiredCli(cliOf(worker.preference)))
+            throw new Error(RETIRED_HARNESS_NOTICE);
+        if (this.busyReason(worker))
+            throw new Error('请等待本轮结束后再修改模型与强度');
+        if (this.followups.list(id).length)
+            throw new Error('请先发送或取消待发送消息（包含已暂停消息），再修改模型与强度');
+        if (cliOf(worker.preference) !== cliOf(preference))
+            throw new Error('已有会话不能切换 CLI');
+        this.assertCliEnabled(cliOf(preference));
+        const updated = { ...worker, preference: { ...preference } };
+        if (worker.preference.model !== preference.model) {
+            updated.contextInvalidatedRunId = worker.runId;
+            updated.contextTelemetry = undefined;
+            updated.observedModel = undefined;
+        }
+        this.storage.save(updated);
+        this.changed();
+        return updated;
+    }
+    configureWorkerPermission(parent, id, mode, preparationId) {
+        if (this.disposed)
+            throw new Error('CLI Worker is shutting down');
+        const worker = this.get(parent, id);
+        if (isRetiredCli(cliOf(worker.preference)))
+            throw new Error(RETIRED_HARNESS_NOTICE);
+        if (!workerPermissionOptions(worker).some((option) => option.value === mode))
+            throw new Error('当前 CLI 通路不支持此权限模式');
+        if (preparationId) {
+            const preparation = this.preparations.get(id);
+            if (preparation?.id !== preparationId)
+                throw new Error('权限修改准备已失效，请重试');
+            preparation.controller.signal.throwIfAborted();
+        }
+        if (this.busyReason(worker, preparationId))
+            throw new Error('请等待本轮结束后再修改权限');
+        if (this.followups.list(id).length)
+            throw new Error('请先发送或取消待发送消息（包含已暂停消息），再修改权限');
+        this.assertCliEnabled(cliOf(worker.preference));
+        const updated = { ...worker, mode };
+        this.storage.save(updated);
+        this.changed();
+        return updated;
+    }
+    /** Capability and readiness of this exact run; never starts or retries a request. */
+    nativeSteeringState(parent, id) {
+        const worker = this.get(parent, id);
+        if (!supportsWorkerNativeSteering(worker))
+            return 'unsupported';
+        const task = this.tasks.get(id);
+        return task?.steer && !task.controller.signal.aborted && worker.status === 'running' ? 'ready' : 'pending';
+    }
+    submit(parent, project, title, prompt, preference, mode, previousId, identity, authorizedBinding, queuedAdmission, preparationId, submissionId, attachments) {
+        if (this.disposed)
+            throw new Error('CLI Worker is shutting down');
+        if (this.blocked)
+            throw new Error(this.blocked);
+        if (!prompt.trim() || prompt.length > 100_000)
+            throw new Error('Task must contain 1–100000 characters');
+        const canonical = projectDirectory(project);
+        const previous = previousId ? this.get(parent, previousId) : undefined;
+        if (attachments?.length && previous?.transport === 'legacy')
+            throw new Error('旧协议会话尚未接通附件，请使用原生 CLI 会话');
+        if (previous && submissionId) {
+            z.uuid().parse(submissionId);
+            if (this.directMessageReceipt(parent, previous.id, prompt, submissionId))
+                throw new Error('这条消息已经受理，请读取原提交回执');
+            const prior = this.followups.receipt(previous.id, prompt, submissionId);
+            if (prior && !queuedAdmission)
+                throw new Error('这条消息已经处理，请刷新会话');
+        }
+        if (previous)
+            usesNativeBridge(previous);
+        const effective = previous?.preference ?? preference;
+        this.assertCliEnabled(cliOf(effective));
+        if (previous &&
+            this.preparations.has(previous.id) &&
+            this.preparations.get(previous.id).id !== preparationId)
+            throw new Error('此会话正在准备发送，请稍后再试');
+        if (previous && (active(previous.status) || this.tasks.has(previous.id)))
+            throw new Error('This CLI conversation already has a running or queued turn');
+        const freshAfterStop = previous && !previous.conversationId && isUserInterrupted(previous);
+        if (previous && !previous.conversationId && !readWorkerForkState(this.storage.directory, previous.id)?.sourceConversationId && !freshAfterStop)
+            throw new Error('No CLI conversation_id was received; start a new worker');
+        if (previous && !this.storage.accountBinding(previous.id) && !freshAfterStop)
+            throw new Error(LEGACY_ACCOUNT_RECORD_NOTICE);
+        if (previous && previous.project !== canonical)
+            throw new Error('Cannot resume a worker in another workspace');
+        const nativeAdmission = previous
+            ? usesNativeBridge(previous)
+            : usesNativeBridge({
+                preference: effective,
+                transport: this.initialTransport(cliOf(effective)),
+            });
+        if (cliOf(effective) === 'kimi' && (previous?.mode ?? mode) === 'plan' && !nativeAdmission)
+            throw new Error('Kimi 非交互模式不支持只读派遣');
+        if (['qoder', 'qodercn'].includes(cliOf(effective)) && (previous?.mode ?? mode) === 'plan')
+            throw new Error('Qoder 当前 ACP 未公开只读规划模式，无法安全执行规划任务');
+        if (previous &&
+            this.latestPriority.has(previous.id) &&
+            (!queuedAdmission?.priority || this.latestPriority.get(previous.id).id !== queuedAdmission.id))
+            throw new Error('此会话正在处理插队消息，请稍后再试');
+        if (queuedAdmission?.priority) {
+            const message = previous && this.latestPriority.get(previous.id);
+            if (!message ||
+                message.id !== queuedAdmission.id ||
+                message.controller.signal.aborted ||
+                message.state !== 'pending' ||
+                previous.runId !== queuedAdmission.expectedRunId)
+                throw new Error('插队消息已取消或已被替换');
+        }
+        else if (queuedAdmission) {
+            const dispatch = previous && this.followupDispatches.get(previous.id);
+            if (!previous ||
+                !dispatch ||
+                dispatch.id !== queuedAdmission.id ||
+                dispatch.expectedRunId !== queuedAdmission.expectedRunId ||
+                previous.runId !== queuedAdmission.expectedRunId ||
+                dispatch.controller.signal.aborted ||
+                this.followups.list(previous.id).find((item) => item.id === queuedAdmission.id)?.state !== 'sending')
+                throw new Error('待发送消息已取消或本轮状态已变化');
+        }
+        else if (previous) {
+            this.pauseFollowups(previous.id, '已手动发送新消息，请确认后继续队列');
+            this.followups.advanceGeneration(previous.id);
+            for (const reservation of this.reservations.get(previous.id)?.values() ?? [])
+                if (!reservation.controller.signal.aborted)
+                    reservation.generation = this.followups.generation(previous.id);
+        }
+        const now = new Date().toISOString();
+        const worker = previous ?? {
+            id: randomUUID(),
+            parentSessionId: parent,
+            project: canonical,
+            title: title.slice(0, 160),
+            agentName: identity?.agentName
+                ? this.checkAgentName(parent, identity.agentName)
+                : availableAgentName(this.storage.workers.values(), parent, CLI_SHORT_NAMES[cliOf(preference)]),
+            agentNameOrigin: identity?.agentName ? 'custom' : 'auto',
+            role: identity?.role ? roleSnapshotSchema.parse(structuredClone(identity.role)) : undefined,
+            preference: { ...preference },
+            transport: this.initialTransport(cliOf(preference)),
+            mode,
+            createdAt: now,
+            updatedAt: now,
+            runId: randomUUID(),
+            status: 'queued',
+        };
+        if (previous) {
+            const telemetry = this.runTelemetry(worker, worker.runId);
+            worker.conversationTelemetry = captureConversationTelemetry(worker, telemetry);
+            worker.lastRunUsageSnapshot = captureLastRunUsageSnapshot(worker, telemetry);
+            worker.contextTelemetry = captureContextTelemetry(worker, telemetry);
+        }
+        worker.runId = randomUUID();
+        worker.contextInvalidatedRunId = undefined;
+        worker.status = 'queued';
+        worker.error = undefined;
+        worker.interruptionReason = undefined;
+        worker.lastResult = undefined;
+        worker.observedModel = undefined;
+        worker.updatedAt = now;
+        worker.jobId = undefined;
+        this.storage.save(worker);
+        if (!queuedAdmission || queuedAdmission.priority) {
+            this.storage.append(worker, {
+                kind: 'user',
+                text: prompt,
+                ...((queuedAdmission?.id ?? submissionId)
+                    ? {
+                        queuedFollowupId: queuedAdmission?.id ?? submissionId,
+                        admittedRunId: worker.runId,
+                    }
+                    : {}),
+            });
+            if (submissionId && !queuedAdmission)
+                this.followups.consume(worker.id, prompt, submissionId);
+        }
+        this.storage.append(worker, {
+            kind: 'status',
+            text: 'queued',
+            state: 'queued',
+        });
+        let settle;
+        const done = new Promise((resolve) => {
+            settle = resolve;
+        });
+        const controller = new AbortController();
+        // Start the own-account read at admission, before this task waits in the queue.
+        const admission = authorizedBinding
+            ? Promise.resolve(authorizedBinding)
+            : readCliAccountBinding(cliOf(effective), this.backend, this.config, canonical, controller.signal);
+        // Freeze the goal when this turn is admitted, so edits during preparation
+        // or execution affect only later turns. Every CLI shares this prompt.
+        const forkSource = readWorkerForkState(this.storage.directory, worker.id)?.sourceConversationId;
+        const cliPrompt = promptForWorker(forkSource ? { ...worker, conversationId: forkSource } : worker, prompt);
+        const task = {
+            worker,
+            ...(attachments?.length ? { attachments: structuredClone(attachments) } : {}),
+            prompt: worker.goal?.status === 'active'
+                ? `【当前目标】\n${worker.goal.objective}\n【目标结束】\n\n${cliPrompt}`
+                : cliPrompt,
+            userPrompt: prompt,
+            controller,
+            done,
+            settle,
+            admission,
+            queuedFollowupId: queuedAdmission?.id,
+            priority: queuedAdmission?.priority,
+            generation: queuedAdmission?.priority
+                ? this.latestPriority.get(worker.id).generation
+                : queuedAdmission
+                    ? this.followupDispatches.get(worker.id).generation
+                    : this.followups.generation(worker.id),
+            submissionId,
+            steering: new Map(),
+            steeringController: new AbortController(),
+        };
+        void admission.catch((error) => {
+            if (!controller.signal.aborted)
+                task.admissionFailure = { error };
+            if (error instanceof ProcessCleanupUnconfirmedError) {
+                task.admissionFailure ??= { error };
+                this.blockCatalogOnCleanup(cliOf(worker.preference), error);
+            }
+        });
+        if (task.priority) {
+            const message = this.latestPriority.get(worker.id);
+            message.runId = worker.runId;
+            this.updatePriority(worker, message, 'admitted');
+        }
+        this.tasks.set(worker.id, task);
+        this.queue.push(task);
+        this.changed();
+        queueMicrotask(() => this.drain());
+        return {
+            worker,
+            done,
+            cancel: () => {
+                if (this.tasks.get(worker.id) === task)
+                    void this.stop(parent, worker.id).catch((error) => {
+                        // The Jobs cancel hook is deliberately synchronous: waiting for a
+                        // follow-up preparation here would await its own launch callback.
+                        // Keep any late persistence failure visible after process cleanup.
+                        this.blocked ??= String(error);
+                        this.changed();
+                    });
+            },
+        };
+    }
+    attachJob(worker, jobId) {
+        worker.jobId = jobId;
+        this.storage.save(worker);
+        this.changed();
+    }
+    stop(parent, id) {
+        this.get(parent, id);
+        const { previous: throughGeneration, persistenceError } = this.followups.revokeGeneration(id);
+        for (const reservation of this.reservations.get(id)?.values() ?? [])
+            if (reservation.generation <= throughGeneration)
+                reservation.controller.abort(new UserStoppedError());
+        const message = this.latestPriority.get(id);
+        if (message) {
+            message.controller.abort(new UserStoppedError());
+            if (!message.spawnAttempted && !deliveryTerminal(message.state))
+                this.updatePriority(this.get(parent, id), message, 'cancelled', '已停止发送');
+            this.latestPriority.delete(id);
+        }
+        const token = Symbol('stop'), operations = this.stopOperations.get(id) ?? new Set();
+        operations.add(token);
+        this.stopOperations.set(id, operations);
+        let stopped = this.stopCurrent(parent, id, false, throughGeneration);
+        if (persistenceError)
+            // Cancellation has already started. The in-memory generation already
+            // revokes earlier items, so only this Stop reports the failed write.
+            stopped = stopped.then(() => {
+                throw new Error(`任务已完成停止清理，但待发送消息状态持久化失败：${String(persistenceError)}`, {
+                    cause: persistenceError,
+                });
+            });
+        this.changed();
+        return stopped.finally(() => {
+            operations.delete(token);
+            if (!operations.size && this.stopOperations.get(id) === operations)
+                this.stopOperations.delete(id);
+            this.changed();
+            const worker = this.storage.workers.get(id);
+            if (worker && !worker.archivedAt)
+                this.dispatchFollowup(worker);
+        });
+    }
+    stopCurrent(parent, id, preserveFollowups = false, throughGeneration = this.followups.generation(id)) {
+        const worker = this.get(parent, id);
+        const before = structuredClone(worker);
+        const preparation = this.preparations.get(id);
+        preparation?.controller.abort(new UserStoppedError());
+        const entry = this.followupDispatches.get(id);
+        const dispatch = entry?.done;
+        if (preserveFollowups && entry) {
+            entry.preserveOnAbort = true;
+            entry.controller.abort(new UserStoppedError());
+            this.followups.releaseClaim(id, entry.id);
+        }
+        else if (!preserveFollowups)
+            this.pauseFollowups(id, '任务已停止，请确认后继续发送', throughGeneration);
+        this.changed();
+        const task = this.tasks.get(id);
+        if (!task)
+            return Promise.all([preparation?.done, dispatch]).then(() => {
+                const blocked = this.blocked ?? this.catalogBlocked.get(cliOf(worker.preference));
+                if (preparation && blocked)
+                    throw new Error(blocked);
+                return before;
+            });
+        let persistenceError;
+        if (worker.status !== 'stopping') {
+            if (preserveFollowups)
+                task.preserveFollowups = true;
+            worker.status = 'stopping';
+            if (task.nativeStop && this.running.has(task)) {
+                task.nativeStopRequested = true;
+                void Promise.resolve()
+                    .then(() => task.nativeStop?.())
+                    .catch(() => undefined)
+                    .finally(() => task.controller.abort(new UserStoppedError()));
+            }
+            else
+                task.controller.abort(new UserStoppedError());
+            // Persisting the stopping state is not a prerequisite for cancelling the
+            // process. A disk failure still crosses the exact task.done barrier.
+            try {
+                this.storage.save(worker);
+            }
+            catch (error) {
+                persistenceError = error;
+            }
+            this.changed();
+            if (!this.running.has(task)) {
+                this.queue = this.queue.filter((t) => t !== task);
+                void this.finishQueued(task, 'interrupted', '用户已取消排队任务');
+            }
+        }
+        return Promise.all([task.done, preparation?.done, dispatch]).then(([result]) => {
+            if (persistenceError) {
+                const failure = new Error(`任务已完成停止清理，但停止状态持久化失败：${String(persistenceError)}`, {
+                    cause: persistenceError,
+                });
+                this.blocked ??= failure.message;
+                throw failure;
+            }
+            return result;
+        });
+    }
+    /** A queued task may already own a native account-query process. */
+    async finishQueued(task, status, reason) {
+        task.controller.abort(new Error(reason));
+        try {
+            await task.admission;
+        }
+        catch (error) {
+            if (error instanceof ProcessCleanupUnconfirmedError) {
+                task.admissionFailure ??= { error };
+                this.blockCatalogOnCleanup(cliOf(task.worker.preference), error);
+            }
+        }
+        const priorFailure = task.admissionFailure;
+        const blocked = this.blocked ?? this.catalogBlocked.get(cliOf(task.worker.preference));
+        const stopped = status === 'interrupted' && !priorFailure && task.controller.signal.reason instanceof UserStoppedError;
+        this.finish(task, blocked || priorFailure ? 'failed' : status, blocked ?? (priorFailure ? String(priorFailure.error) : stopped ? undefined : reason), stopped && !blocked ? 'user' : undefined);
+    }
+    drain() {
+        if (this.disposed)
+            return;
+        if (this.blocked) {
+            const queued = this.queue.splice(0);
+            for (const task of queued) {
+                task.worker.status = 'stopping';
+                void this.finishQueued(task, 'failed', this.blocked);
+            }
+            return;
+        }
+        for (const task of [...this.queue]) {
+            const blocked = this.catalogBlocked.get(cliOf(task.worker.preference));
+            if (blocked) {
+                this.queue.splice(this.queue.indexOf(task), 1);
+                task.worker.status = 'stopping';
+                void this.finishQueued(task, 'failed', blocked);
+                continue;
+            }
+            if (this.running.size >= this.config.maxConcurrent)
+                break;
+            const conflicts = (other) => other.worker.project === task.worker.project &&
+                (other.worker.mode === 'accept-edits' || task.worker.mode === 'accept-edits');
+            if ([...this.running].some(conflicts) || this.queue.slice(0, this.queue.indexOf(task)).some(conflicts))
+                continue;
+            this.queue.splice(this.queue.indexOf(task), 1);
+            this.running.add(task);
+            void this.run(task).catch((error) => {
+                this.finish(task, 'failed', String(error));
+            });
+        }
+    }
+    finish(task, status, error, interruptionReason) {
+        const worker = task.worker;
+        worker.status = status;
+        worker.error = error;
+        worker.interruptionReason = interruptionReason;
+        worker.updatedAt = new Date().toISOString();
+        try {
+            const telemetry = this.runTelemetry(worker, worker.runId);
+            worker.conversationTelemetry = captureConversationTelemetry(worker, telemetry);
+            worker.lastRunUsageSnapshot = captureLastRunUsageSnapshot(worker, telemetry);
+            worker.contextTelemetry = captureContextTelemetry(worker, telemetry);
+            if (task.priority) {
+                const message = this.priorityHistory.get(worker.id)?.get(task.queuedFollowupId);
+                if (message && !deliveryTerminal(message.state))
+                    this.updatePriority(worker, message, status === 'completed' ? 'completed' : interruptionReason === 'user' ? 'cancelled' : 'failed', error ??
+                        (interruptionReason === 'user'
+                            ? message.spawnAttempted
+                                ? '已停止'
+                                : '已停止发送'
+                            : undefined));
+            }
+            this.storage.save(worker);
+            this.storage.append(worker, {
+                kind: 'status',
+                text: error ?? (interruptionReason === 'user' ? '已停止' : status),
+                state: status,
+            });
+        }
+        catch (error) {
+            worker.status = 'failed';
+            worker.error = `状态持久化失败：${String(error)}`;
+            worker.interruptionReason = undefined;
+            this.blocked = worker.error;
+        }
+        finally {
+            if (this.tasks.get(worker.id) === task)
+                this.tasks.delete(worker.id);
+            this.running.delete(task);
+            if (worker.status !== 'completed' && !task.preserveFollowups)
+                this.pauseFollowups(worker.id, isUserInterrupted(worker)
+                    ? '任务已停止，请确认后继续发送'
+                    : worker.status === 'uncertain'
+                        ? '结果待核实，请核查后继续发送'
+                        : '前轮未正常完成，请确认后继续发送', task.generation);
+            const outcome = structuredClone(worker);
+            this.changed();
+            // A later followup mutates the live worker. Completion consumers must retain
+            // the exact outcome of this run, including its runId and response.
+            task.settle(outcome);
+            this.drain();
+            if (worker.status === 'completed')
+                this.dispatchFollowup(worker);
+        }
+    }
+    async run(task) {
+        const { worker, controller } = task;
+        let handle;
+        let readers = [];
+        let harnessLease;
+        let stderr = '';
+        let totalBytes = 0;
+        const timeout = setTimeout(() => controller.abort(new Error('任务超时')), this.config.timeoutMs);
+        const pendingFork = readWorkerForkState(this.storage.directory, worker.id);
+        const resumeConversation = worker.conversationId ?? pendingFork?.sourceConversationId;
+        const expectedConversation = worker.conversationId;
+        const nativeTransport = usesNativeBridge(worker);
+        const createProtocol = nativeTransport
+            ? (_cli, emit, identify, limit) => new BridgeProtocol(emit, identify, limit)
+            : protocolFor;
+        const protocol = createProtocol(cliOf(worker.preference), (event) => {
+            if (event.observedModel) {
+                worker.observedModel = event.observedModel;
+                this.storage.save(worker);
+            }
+            this.storage.append(worker, projectPublicToolCall(cliOf(worker.preference), event));
+            this.changed();
+        }, (id) => {
+            if (expectedConversation && id !== expectedConversation)
+                throw new Error('Resume conversation_id does not match the requested conversation');
+            if (pendingFork?.sourceConversationId === id)
+                throw new Error('原生分支没有创建新的会话 ID');
+            worker.conversationId = id;
+            this.storage.save(worker);
+            if (pendingFork?.sourceConversationId) {
+                const { sourceConversationId: _source, sourceMessageId: _cut, ...settled } = pendingFork;
+                writeWorkerForkState(this.storage.directory, worker.id, settled);
+            }
+        }, this.config.maxLineBytes, worker.preference.model);
+        let failure;
+        let failureBeforeStop = false;
+        let releaseFailed = false;
+        let summaryConflict;
+        let release;
+        let quiescent = false;
+        let metadataReady = false;
+        try {
+            const admitted = await task.admission;
+            controller.signal.throwIfAborted();
+            const previousBinding = this.storage.accountBinding(worker.id);
+            if (previousBinding && previousBinding !== admitted)
+                throw new Error(ACCOUNT_CHANGED);
+            const { binding, preference: authorizedPreference } = await authorizeSelection(worker.preference, this.backend, this.config, worker.project, controller.signal, admitted);
+            if (authorizedPreference.model !== worker.preference.model)
+                throw new Error('模型与思考强度不匹配，请重新选择');
+            controller.signal.throwIfAborted();
+            this.assertCliEnabled(cliOf(worker.preference));
+            const executable = await resolveCliExecutable(cliOf(worker.preference), this.backend, this.config, controller.signal);
+            controller.signal.throwIfAborted();
+            await assertFirstPartyConfiguration(cliOf(worker.preference), worker.project, controller.signal);
+            metadataReady = true;
+            harnessLease = await this.harnessPreparation?.(worker, controller.signal, { submissionId: task.submissionId });
+            const executionConfig = { ...this.config,
+                ...(task.attachments?.length ? { attachments: task.attachments } : {}),
+                ...(harnessLease?.connection ? { harnessTools: harnessLease.connection } : {}),
+            };
+            worker.status = 'running';
+            this.storage.save(worker);
+            this.changed();
+            const selectedClaudeRoute = cliOf(worker.preference) === 'claude'
+                ? await readClaudeOwnRoute(worker.project, controller.signal)
+                : undefined;
+            // Bind the exact prepared snapshot as well as the current source. A -> B -> A
+            // configuration changes must not authorize launching B under A's admission.
+            if (selectedClaudeRoute &&
+                binding !==
+                    (await readCliAccountBinding('claude', this.backend, executionConfig, worker.project, controller.signal, selectedClaudeRoute)))
+                throw new Error(ACCOUNT_CHANGED);
+            const launch = isExtendedCli(cliOf(worker.preference))
+                ? await extendedLaunch(cliOf(worker.preference), executable, worker.project, worker.preference, worker.mode, task.prompt, this.nativeStateDirectory(worker), executionConfig, resumeConversation, (argv, env) => captureCatalogMetadata(this.backend, this.config, argv, worker.project, controller.signal, env), {
+                    backend: this.backend,
+                    signal: controller.signal,
+                    graceMs: this.config.graceMs,
+                }, nativeTransport)
+                : cliOf(worker.preference) === 'claude'
+                    ? await prepareClaudeWorkerLaunch(selectedClaudeRoute, workerArguments(executable, worker.project, worker.preference, worker.mode, task.prompt, this.config.timeoutMs, resumeConversation, nativeTransport), this.storage.directory, controller.signal)
+                    : {
+                        env: {
+                            ...firstPartyEnvironment(cliOf(worker.preference)),
+                            ...agyBackgroundEnvironment(cliOf(worker.preference)),
+                            ...(['qoder', 'qodercn'].includes(cliOf(worker.preference)) ? qoderEnvironment(cliOf(worker.preference)) : {}),
+                        },
+                        argv: workerArguments(executable, worker.project, worker.preference, worker.mode, task.prompt, this.config.timeoutMs, resumeConversation, nativeTransport),
+                    };
+            // Preparation can already own a private credential snapshot. Retain its
+            // cleanup before any later filesystem or native-bridge setup can fail.
+            release = 'cleanup' in launch ? launch.cleanup : undefined;
+            const nativeState = this.nativeStateDirectory(worker);
+            if (nativeTransport)
+                mkdirSync(nativeState, { recursive: true, mode: 0o700 });
+            const execution = nativeTransport && !isExtendedCli(cliOf(worker.preference))
+                ? await prepareNativeWorker(launch, {
+                    cli: cliOf(worker.preference),
+                    project: worker.project,
+                    preference: worker.preference,
+                    mode: worker.mode,
+                    prompt: task.prompt,
+                    conversationId: expectedConversation,
+                    ...(pendingFork?.sourceConversationId ? { forkSource: { conversationId: pendingFork.sourceConversationId, messageId: pendingFork.sourceMessageId } } : {}),
+                    stateDirectory: nativeState,
+                    ...(task.attachments?.length ? { attachments: task.attachments } : {}),
+                    ...(harnessLease?.connection ? { harnessTools: harnessLease.connection } : {}),
+                    ...(selectedClaudeRoute?.source
+                        ? {
+                            claudeModelCandidates: selectedClaudeRoute.source.nativeModels
+                                .filter(({ choice }) => choice.id === worker.preference.model)
+                                .map(({ choice, remoteId }) => ({
+                                value: choice.id,
+                                resolvedModel: remoteId,
+                            })),
+                        }
+                        : {}),
+                }, executionConfig)
+                : launch;
+            release = 'cleanup' in execution ? execution.cleanup : undefined;
+            controller.signal.throwIfAborted();
+            if (binding !==
+                (await readCliAccountBinding(cliOf(worker.preference), this.backend, this.config, worker.project, controller.signal)))
+                throw new Error(ACCOUNT_CHANGED);
+            controller.signal.throwIfAborted();
+            if ('activate' in execution && typeof execution.activate === 'function')
+                await execution.activate();
+            controller.signal.throwIfAborted();
+            if (task.queuedFollowupId)
+                this.queuedExecutionGuard?.(worker);
+            this.storage.bindAccount(worker.id, binding);
+            if (task.queuedFollowupId && !task.priority) {
+                if (this.tasks.get(worker.id) !== task ||
+                    this.followups.list(worker.id).find((item) => item.id === task.queuedFollowupId)?.state !==
+                        'sending')
+                    throw new UserStoppedError();
+            }
+            if (task.priority) {
+                const message = this.latestPriority.get(worker.id);
+                if (!message || message.id !== task.queuedFollowupId || message.controller.signal.aborted)
+                    throw new UserStoppedError();
+                // No await separates this ownership check from the native spawn attempt.
+                message.spawnAttempted = true;
+            }
+            task.spawnAttempted = true;
+            handle = await spawnManagedAgent(this.backend, {
+                argv: execution.argv,
+                env: 'env' in execution ? execution.env : undefined,
+                cwd: worker.project,
+                stdio: { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' },
+                graceMs: this.config.graceMs,
+                signal: controller.signal,
+            });
+            if (task.queuedFollowupId && !task.priority) {
+                this.storage.append(worker, {
+                    kind: 'user',
+                    text: task.userPrompt,
+                    queuedFollowupId: task.queuedFollowupId,
+                    admittedRunId: worker.runId,
+                });
+                this.followups.remove(worker.id, task.queuedFollowupId);
+                this.changed();
+            }
+            if (task.priority) {
+                const message = this.priorityHistory.get(worker.id).get(task.queuedFollowupId);
+                this.updatePriority(worker, message, 'running');
+            }
+            // Observe spawn rejection immediately even while draining protocol streams.
+            void handle.done.catch(() => undefined);
+            controller.signal.throwIfAborted();
+            if ('steer' in execution && typeof execution.steer === 'function') {
+                task.steer = execution.steer;
+                this.changed();
+            }
+            if ('stop' in execution && typeof execution.stop === 'function')
+                task.nativeStop = execution.stop;
+            // Before a CLI process is actually launched, a rejected account/model or
+            // permission check must leave the original outbox message recoverable.
+            const capture = async (stream, isError) => {
+                if (!stream)
+                    throw new Error('CLI pipe unavailable');
+                const decoder = new StringDecoder('utf8');
+                for await (const chunk of stream) {
+                    totalBytes += Buffer.byteLength(chunk);
+                    if (totalBytes > this.config.maxRunBytes)
+                        throw new Error('CLI output exceeded the configured per-run limit');
+                    appendFileSync(this.storage.rawPath(worker) + (isError ? '.stderr' : ''), chunk, { mode: 0o600 });
+                    if (isError)
+                        stderr = (stderr + decoder.write(chunk)).slice(-8192);
+                    else
+                        protocol.feed(chunk);
+                }
+                if (isError)
+                    stderr = (stderr + decoder.end()).slice(-8192);
+            };
+            readers = [capture(handle.stdout, false), capture(handle.stderr, true)];
+            await Promise.all(readers);
+            const outcome = await handle.done;
+            controller.signal.throwIfAborted();
+            protocol.end();
+            // Native cancellation may close its bridge before the mailbox sender has
+            // polled the receipt and aborted the outer Host range. Warnings on stderr
+            // must not replace this exact, run-scoped cancellation evidence.
+            if (task.nativeStopRequested &&
+                protocol.result?.status === 'ERROR' &&
+                protocol.result.error === '任务已停止')
+                throw new UserStoppedError();
+            if (outcome.exitCode !== 0)
+                throw new Error(`CLI exited with ${outcome.exitCode}: ${stderr || protocol.result?.response || 'no diagnostic'}`);
+            if (!protocol.result)
+                throw new Error('CLI exited without a final result');
+            if (protocol instanceof AgyProtocol &&
+                expectedConversation &&
+                protocol.result.conversationId === expectedConversation &&
+                protocol.result.status === 'ERROR' &&
+                protocol.result.completedStepResponse)
+                summaryConflict = `CLI 汇总状态冲突，结果待核实：本轮回复及已观察步骤均为 DONE，但 CLI 最终报告 ERROR。请核查本轮输出和实际产物，不要自动重试。原始汇总错误：${protocol.result.error || '未提供错误详情'}`;
+            else if (nativeTransport && protocol.result.status === 'UNCERTAIN')
+                summaryConflict =
+                    protocol.result.error || 'CLI 汇总状态冲突，结果待核实，请先核查实际产物，不要自动重试';
+            else if (protocol.result.status !== 'SUCCESS')
+                throw new Error(`CLI ${protocol.result.status}: ${protocol.result.error || protocol.result.response || stderr || '请检查 CLI 认证及模型/强度兼容性'}`);
+        }
+        catch (error) {
+            failure = error;
+            failureBeforeStop =
+                !!task.admissionFailure ||
+                    (!controller.signal.aborted &&
+                        !(task.nativeStopRequested &&
+                            (error instanceof UserStoppedError || String(error).includes('任务已停止'))));
+            if (error instanceof ProcessCleanupUnconfirmedError) {
+                if (!metadataReady)
+                    this.blockCatalogOnCleanup(cliOf(worker.preference), error);
+                else
+                    this.markCleanupBlocked(error);
+            }
+        }
+        finally {
+            clearTimeout(timeout);
+            task.steer = undefined;
+            task.nativeStop = undefined;
+            task.steeringController.abort(new Error('当前运行已结束，引导通路已关闭'));
+            if (handle) {
+                handle.terminate();
+                try {
+                    if (!(await handle.waitForExit()))
+                        throw new Error('CLI cleanup did not reach quiescence');
+                    quiescent = true;
+                }
+                catch (error) {
+                    failure = error;
+                    this.markCleanupBlocked(error);
+                }
+                await Promise.allSettled([...readers, handle.done]);
+            }
+            // Preserve only this process's observed AGY text when its aggregate is
+            // unsuccessful or absent. Native result text can include older turns.
+            if (protocol instanceof AgyProtocol)
+                worker.lastResult =
+                    protocol.result?.status === 'SUCCESS'
+                        ? protocol.result.response
+                        : protocol.currentTurnResponse || undefined;
+            else if (protocol.result)
+                worker.lastResult = protocol.result.response;
+        }
+        await Promise.allSettled([...task.steering.values()].map((entry) => entry.done));
+        try {
+            await harnessLease?.close();
+        }
+        catch (error) {
+            failure = error;
+            releaseFailed = true;
+        }
+        try {
+            if ((!handle || quiescent) && !this.blocked)
+                await release?.();
+        }
+        catch (error) {
+            failure = error;
+            releaseFailed = true;
+            if (error instanceof ProcessCleanupUnconfirmedError)
+                this.markCleanupBlocked(error);
+        }
+        if (stderr.trim())
+            this.storage.append(worker, {
+                kind: 'diagnostic',
+                text: 'CLI 诊断',
+                detail: stderr,
+            });
+        let status = 'completed';
+        let error;
+        let interruptionReason;
+        if (this.blocked) {
+            status = 'failed';
+            error = this.blocked;
+        }
+        else if (failureBeforeStop || releaseFailed) {
+            status = 'failed';
+            error = String(failure);
+        }
+        else if (summaryConflict) {
+            status = 'uncertain';
+            error = summaryConflict;
+        }
+        else if (controller.signal.aborted || task.nativeStopRequested) {
+            status = 'interrupted';
+            if (controller.signal.reason instanceof UserStoppedError || task.nativeStopRequested)
+                interruptionReason = 'user';
+            else
+                error = String(controller.signal.reason);
+        }
+        else if (failure) {
+            status = 'failed';
+            error = String(failure);
+        }
+        this.finish(task, status, error, interruptionReason);
+    }
+    async close() {
+        if (this.disposed)
+            return;
+        this.disposed = true;
+        for (const worker of this.storage.workers.values())
+            this.pauseFollowups(worker.id, 'Host 已关闭，请确认后继续发送');
+        const workers = new Set([
+            ...this.tasks.keys(),
+            ...this.preparations.keys(),
+            ...this.latestPriority.keys(),
+            ...this.reservations.keys(),
+            ...this.followupDispatches.keys(),
+        ]);
+        const interruptions = [...this.priorityRunners.values()];
+        await Promise.allSettled(
+        // A synchronous failure in one stop must not abort the others or skip
+        // releasing the store below.
+        [...workers].map((id) => Promise.resolve().then(() => {
+            const worker = this.storage.workers.get(id);
+            return this.stop(worker.parentSessionId, id);
+        })));
+        await Promise.allSettled(interruptions);
+        await Promise.allSettled([...this.followupRuns]);
+        this.listeners.clear();
+        this.supplementalContextReader.clear();
+        this.storage.close();
+    }
+}
+//# sourceMappingURL=runtime.js.map

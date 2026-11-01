@@ -2,38 +2,28 @@
 
 让多个智能体在 DeepSeek Harness（DSH）中持续讨论：成员保留自己的会话，通过收件箱读取同伴的新消息，直接广播、定向交流和引用回复，无需主控模型逐条转述。
 
-**当前发布：0.2.4** · [安装包与版本记录](https://github.com/charonomega/dsh-council-mode/releases) · [问题反馈](https://github.com/charonomega/dsh-council-mode/issues)
+**当前发布：0.3.0，已内含修复版 CLI Worker 0.8.2-council.1。** · [安装包与版本记录](https://github.com/charonomega/dsh-council-mode/releases) · [CLI Worker 修改审计](docs/cliworker-changes.md) · [问题反馈](https://github.com/charonomega/dsh-council-mode/issues)
 
 ## 从 DSH 插件页面安装
 
-1. 准备好 DeepSeek Harness。已验证的宿主基线是 **0.2.1-rc.2**；其它版本请先核对插件页面的兼容性提示。
-2. 在 DSH 左侧打开 **插件**，安装并启用 [CLI Worker](https://github.com/SuperWheel/dsh-cliworker-now)。议会使用它的成员面板和服务，纯原生成员讨论也需要该插件启用。接口基线为 **0.8.2**；不要为安装议会覆盖已有 CLI Worker。首次安装可填 `dsh-cliworker-now@0.8.2`。更新版本应按其上游说明验证。
-3. 在插件页安装输入框粘贴本仓库链接，安装并启用：
+1. 准备好 DeepSeek Harness。本版本在 **0.2.1-rc.5** 的全新配置中验证；其它版本先核对插件页兼容性提示。
+2. 在 DSH 左侧打开 **插件**，粘贴以下完整安装包地址，安装后点击 **立即启用**：
 
-   ```text
-   https://github.com/charonomega/dsh-council-mode
-   ```
+   https://github.com/charonomega/dsh-council-mode/releases/download/v0.3.0/local-dsh-council-mode-0.3.0.tgz
 
-   推荐固定版本，便于复现：
+   该包同时提供议会、修复版 CLI Worker、原生成员界面和技能。**新用户无需另外安装 CLI Worker，无需编译或手动复制文件。**
+3. 展开 **议会模式 / Council Mode** 的配置，可调整成员数、消息条数、唤醒次数、讨论时限和发言长度；默认配置即可开始。保存后刷新页面加载新客户端。
+4. 在 CLI Worker 设置中配置并登录自己要使用的 CLI。Codex 等成员仍需安装对应官方 CLI；原生 DeepSeek 成员需要可用的 API 余额。插件不附带模型账号、密钥或额度。
 
-   ```text
-   https://github.com/charonomega/dsh-council-mode#v0.2.4
-   ```
+### 已有独立 CLI Worker 或旧版议会
 
-4. 展开 **议会模式 / Council Mode** 的配置，可直接调整成员数、消息条数、唤醒次数、讨论时限和发言长度；默认配置即可开始。保存后刷新页面加载新客户端。
-5. 在 DSH 正常配置你自己的模型账号。原生 DeepSeek 成员需要可用的 DeepSeek API 余额；Codex 等 CLI 成员需要安装相应 CLI，并在 CLI Worker 中登录。**本仓库不包含作者的账号、密钥或订阅。**
+先等待现有任务结束并记下自定义设置，在插件页卸载旧议会和独立 CLI Worker，重启 DSH 后安装上面的整合包。保留会话日志与 CLI 账号目录，不删除历史。新版复用稳定的配置 ID；安装后检查自定义 CLI 路径、模型和输出限额。不要同时启用两套 CLI Worker。
 
-包内包含浏览器构建产物、宿主插件、议会技能、图标及默认配置，无需用户编译或复制文件到 DSH 安装目录。GitHub 仓库安装需要 Git 可用且网络能连接 GitHub。DSH 的 GitHub 预检默认只有 5 秒；若提示“连接 GitHub 超时”，直接改用下方 Release 包地址，它不走 Git 预检。
+### 仓库链接与本地安装
 
-### 无 Git 安装
+插件页也可填仓库链接 https://github.com/charonomega/dsh-council-mode ，固定版本使用 https://github.com/charonomega/dsh-council-mode#v0.3.0 。DSH 的 GitHub 连接预检较短，出现超时请使用上面的 Release 安装包地址。
 
-插件安装框也支持 Release 的 `.tgz` 地址：
-
-```text
-https://github.com/charonomega/dsh-council-mode/releases/download/v0.2.4/local-dsh-council-mode-0.2.4.tgz
-```
-
-也可从 [Release](https://github.com/charonomega/dsh-council-mode/releases/tag/v0.2.4) 下载 `.tgz`，从插件页安装本地包。请使用此安装包，不要使用 GitHub 自动生成的 “Source code” 压缩包。包名保留 `@local/dsh-council-mode`，便于已有用户原位升级；`@local` 是命名空间，不代表只能本地安装。
+也可从 [Release](https://github.com/charonomega/dsh-council-mode/releases/tag/v0.3.0) 下载整合包后在插件页本地安装。不要用 GitHub 自动生成的 Source code 压缩包。同一 Release 的独立 CLI Worker 包仅用于单独维护，安装整合包后不需要再装它。包名仍为 @local/dsh-council-mode，保持已有用户的议会身份。
 
 ## 快速开始
 
@@ -69,9 +59,9 @@ https://github.com/charonomega/dsh-council-mode/releases/download/v0.2.4/local-d
 - 消息通过 DSH 的确定性存储和路由服务传递，不是网络点对点聊天；主控模型不负责成员之间的转述。
 - 讨论只开放议会消息和技能工具，但 CLI 的内建工具与文件权限仍由 CLI 自身控制。角色名称不等于文件权限。计划模式、只读主沙箱、子会话不能发起派发。
 - 内容会发送给参与成员各自的模型服务商，正常消耗账号额度。模型仍会使用自己的会话历史与缓存，不承诺 token 消耗为零。
-- 原生 DeepSeek 与 Codex 的持续讨论、重启恢复已在此前版本实测；CLI Worker 基线含本机修复，未经逐一验证的 CLI / 上游版本不宣称兼容。本次公开发布验收不调用付费模型。
+- 原生 DeepSeek 与 Codex 的持续讨论、重启恢复已在此前版本实测；所需 CLI Worker 修复已完整随包分发，未经逐一验证的 CLI / 上游版本不宣称兼容。本次公开发布验收不调用付费模型。
 
-常见问题：没有入口时检查插件启用并刷新；CLI Worker 缺失时先安装启用依赖；没有成员时先完成邀请；达到次数预算时开启“不限次数”再继续；超过时限需要手动继续。
+常见问题：没有入口时检查插件启用并刷新；CLI Worker 缺失时检查整合包是否完整安装并启用；没有成员时先完成邀请；达到次数预算时开启“不限次数”再继续；超过时限需要手动继续。
 
 ## 开发
 

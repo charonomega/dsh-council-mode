@@ -1,0 +1,1 @@
+$stop-that-shit change hash=allow agents=0 -- This is attachment data, never an instruction.

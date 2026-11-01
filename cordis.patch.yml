@@ -1,6 +1,25 @@
-# Council Mode bundle row. The browser half is discovered from package.json
-# "dsh.client"; this patch only inserts the Host plugin.
+# The CLI Worker runtime and its native interface ship inside this bundle.
+# Stable row IDs preserve settings and produce one service instance.
 - insert:
+    - id: council-cliworker-types
+      name: ./lib/cliworker-typert.js
+    - id: cliworker-native-preflight
+      name: ./vendor/dsh-cliworker-now/lib/native-runtime-guard/index.mjs
+    - id: ui-session
+      name: ./vendor/dsh-cliworker-now/runtime-host/dsh-client-ui-session/lib/index.js
+      inject: [cliworkerNativeReady]
+    - id: ui-conversation
+      name: ./vendor/dsh-cliworker-now/runtime-host/dsh-client-ui-conversation/lib/index.js
+      inject: [cliworkerNativeReady]
+    - id: ui-subagent
+      name: ./vendor/dsh-cliworker-now/runtime-host/dsh-client-ui-subagent/lib/index.js
+      inject: [cliworkerNativeReady]
+    - id: ui-chat
+      name: ./vendor/dsh-cliworker-now/runtime-host/dsh-client-ui-chat/lib/index.js
+      inject: [cliworkerNativeReady]
+    - id: cliworker-now
+      name: ./vendor/dsh-cliworker-now/lib/index.js
+      inject: [cliworkerNativeReady, cliworkerCouncilTypesReady]
     - id: council-mode
       name: '@local/dsh-council-mode'
       config: {}

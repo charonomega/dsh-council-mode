@@ -1,0 +1,153 @@
+/** Guard only one verified CLI child occurrence, never another Session or body portals. */
+export function installHarnessDomGuard(root, binding, onTargets, forks) {
+    const saved = new Map();
+    const feature = (button) => {
+        const held = saved.get(button);
+        if (held)
+            return held.feature;
+        const label = button.getAttribute('aria-label') ?? '';
+        if (['在新对话中分支', 'Branch into a new conversation'].includes(label))
+            return 'fork';
+        if (!binding.capabilities.attachments &&
+            ['添加文件或调用指令', 'Add files or run commands'].includes(label))
+            return 'attachments';
+        return undefined;
+    };
+    const restore = (button, previous) => {
+        if (previous.feature !== 'attachments')
+            button.disabled = previous.disabled;
+        for (const [name, old] of [
+            ['title', previous.title],
+            ...(previous.feature !== 'attachments' ? [['aria-disabled', previous.ariaDisabled]] : []),
+            ['aria-label', previous.ariaLabel],
+            ...(previous.feature !== 'attachments' ? [
+                ['data-unavailable', previous.unavailable],
+                ['aria-describedby', previous.describedBy],
+            ] : []),
+        ])
+            if (old === null)
+                button.removeAttribute(name);
+            else
+                button.setAttribute(name, old);
+    };
+    const scan = () => {
+        const targets = [];
+        for (const button of root.querySelectorAll('button[aria-label]')) {
+            const capability = feature(button);
+            if (!capability)
+                continue;
+            if (!saved.has(button))
+                saved.set(button, {
+                    feature: capability,
+                    disabled: button.disabled,
+                    title: button.getAttribute('title'),
+                    ariaDisabled: button.getAttribute('aria-disabled'),
+                    ariaLabel: button.getAttribute('aria-label'),
+                    unavailable: button.getAttribute('data-unavailable'),
+                    describedBy: button.getAttribute('aria-describedby'),
+                });
+            const reason = capability === 'fork'
+                ? forks ? forks.reason(button) : binding.reasons?.fork || 'CLI 子会话尚未接通原生分支，操作不可用。'
+                : `${binding.reasons?.attachments || '此 CLI 子会话尚未接通文件和图片附件'}。仍可打开此菜单调用可用指令。`;
+            if (capability !== 'attachments') {
+                if (button.disabled !== !!reason)
+                    button.disabled = !!reason;
+                if (button.getAttribute('aria-disabled') !== String(!!reason))
+                    button.setAttribute('aria-disabled', String(!!reason));
+                if (reason) {
+                    if (button.getAttribute('data-unavailable') === null)
+                        button.setAttribute('data-unavailable', '');
+                }
+                else
+                    button.removeAttribute('data-unavailable');
+                button.removeAttribute('aria-describedby');
+            }
+            // One tooltip only: the overlay shows the reason; a title attribute would add a browser tooltip.
+            const title = saved.get(button).title;
+            if (title === null)
+                button.removeAttribute('title');
+            else if (button.getAttribute('title') !== title)
+                button.setAttribute('title', title);
+            if (capability === 'attachments' && button.getAttribute('aria-label') !== '调用指令（附件不可用）')
+                button.setAttribute('aria-label', '调用指令（附件不可用）');
+            // An available fork keeps the native button's own tooltip.
+            if (reason)
+                targets.push({ element: button, feature: capability, reason });
+        }
+        onTargets?.(targets);
+    };
+    const capture = (event) => {
+        const target = event.target;
+        const button = target?.closest?.('button[aria-label]');
+        const capability = button && root.contains(button) ? feature(button) : undefined;
+        if (capability && capability !== 'attachments') {
+            if (event.type === 'keydown' && !['Enter', ' '].includes(event.key))
+                return;
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            if (forks && !forks.reason(button))
+                forks.fork(button);
+        }
+    };
+    const Observer = root.ownerDocument.defaultView?.MutationObserver;
+    const observer = Observer ? new Observer(scan) : undefined;
+    observer?.observe(root, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+        attributes: true,
+        attributeFilter: ['aria-label', 'disabled', 'aria-disabled', 'data-unavailable', 'aria-describedby'],
+    });
+    root.addEventListener('click', capture, true);
+    root.addEventListener('keydown', capture, true);
+    scan();
+    return () => {
+        observer?.disconnect();
+        root.removeEventListener('click', capture, true);
+        root.removeEventListener('keydown', capture, true);
+        for (const [button, previous] of saved)
+            restore(button, previous);
+        saved.clear();
+    };
+}
+/** Locate native occurrences by their exact public Session identity, including the main frame. */
+export function installHarnessSessionDomGuard(document, binding, onTargets, forks) {
+    const roots = new Map();
+    const publish = () => onTargets([...roots.values()].flatMap((entry) => entry.targets));
+    const sync = () => {
+        const present = new Set([
+            ...document.querySelectorAll('[data-conversation-content][data-conversation-session]'),
+        ].filter((root) => root.getAttribute('data-conversation-session') === binding.sessionId));
+        for (const [root, entry] of roots)
+            if (!present.has(root)) {
+                roots.delete(root);
+                entry.release();
+            }
+        for (const root of present)
+            if (!roots.has(root)) {
+                const entry = { release: () => { }, targets: [] };
+                roots.set(root, entry);
+                entry.release = installHarnessDomGuard(root, binding, (targets) => {
+                    entry.targets = targets;
+                    publish();
+                }, forks);
+            }
+        publish();
+    };
+    const Observer = document.defaultView?.MutationObserver;
+    const observer = Observer ? new Observer(sync) : undefined;
+    observer?.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['data-conversation-session'],
+    });
+    sync();
+    return () => {
+        observer?.disconnect();
+        for (const entry of roots.values())
+            entry.release();
+        roots.clear();
+    };
+}
+//# sourceMappingURL=harness-dom-guard.js.map

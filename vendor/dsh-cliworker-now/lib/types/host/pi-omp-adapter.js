@@ -1,0 +1,219 @@
+import { mkdir, mkdtemp, realpath, writeFile, lstat, open, rename, rm, chmod } from 'node:fs/promises';
+import { constants, existsSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { dirname, join, resolve, toNamespacedPath } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { EFFORTS } from "../shared/types.js";
+import { ProcessCleanupUnconfirmedError } from "./process.js";
+import { snapshotPiOmpNative, safePiOmpAncestors } from "./pi-omp-native.js";
+import { finishPiOmpRefresh } from './pi-omp-refresh.mjs';
+import { acquireOwnAccountLease } from './own-account-lease.mjs';
+import { assertPiOmpRefreshSources, assertPiOmpRefreshCache } from './pi-omp-refresh.mjs';
+import { createPiOmpControl, createNativeStopControl } from './pi-omp-control.mjs';
+import { buildNativeHarnessInjection } from './native-harness-injection.mjs';
+const bridgePath = () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    for (const candidate of [join(here, 'pi-omp-bridge.mjs'), resolve(here, '../../pi-omp-bridge.mjs')])
+        if (existsSync(candidate))
+            return candidate;
+    throw new Error('Pi/OMP bridge 未安装，请重新构建插件');
+};
+async function privateDirectory(path) {
+    await safePiOmpAncestors(path);
+    await mkdir(path, { recursive: true, mode: 0o700 });
+    const info = await lstat(path);
+    if (info.isSymbolicLink() || !info.isDirectory())
+        throw new Error('Unsafe Pi/OMP state directory symlink');
+    if (process.platform === 'win32') {
+        // Node's POSIX directory descriptor/chmod path is not supported on Windows.
+        // Match account preparation: pin the path and inode around the path-based operation.
+        const canonical = await realpath(path);
+        await chmod(path, 0o700);
+        const current = await lstat(path);
+        if (current.isSymbolicLink() ||
+            !current.isDirectory() ||
+            info.dev !== current.dev ||
+            info.ino !== current.ino ||
+            (await realpath(path)) !== canonical)
+            throw new Error('Pi/OMP state directory changed while opening');
+        return canonical;
+    }
+    const handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    try {
+        const opened = await handle.stat();
+        if (info.dev !== opened.dev || info.ino !== opened.ino)
+            throw new Error('Pi/OMP state directory changed while opening');
+        await handle.chmod(0o700);
+    }
+    finally {
+        await handle.close();
+    }
+    return realpath(path);
+}
+async function contextFor(input) {
+    const stateDirectory = resolve(input.stateDirectory);
+    const root = await privateDirectory(stateDirectory);
+    const identity = 'discover' in input
+        ? 'catalog'
+        : createHash('sha256')
+            .update(await realpath(input.project))
+            .digest('hex');
+    const cliDirectory = await privateDirectory(join(root, input.cli));
+    const isolated = await privateDirectory(join(cliDirectory, identity));
+    const agent = await privateDirectory(join(isolated, 'agent'));
+    // Rebuild from this CLI's current sources, including on continuation.
+    const native = await snapshotPiOmpNative(input.cli, agent, {
+        accountRoot: input.accountRoot ?? stateDirectory,
+        nativeHome: input.nativeHome,
+        signal: input.signal,
+        sharedOAuth: true,
+    });
+    const request = async (extra = {}) => {
+        const leaseNonce = randomUUID();
+        const requestDirectory = await mkdtemp(toNamespacedPath(join(isolated, 'request-')));
+        const requestPath = join(requestDirectory, 'request.json');
+        let control;
+        let stopControl;
+        const temporary = join(requestDirectory, `.request-${randomUUID()}.tmp`);
+        const injection = buildNativeHarnessInjection({ cli: input.cli, argv: [input.executable], env: native.env,
+            connection: !('discover' in input) && !extra.metadataPhase ? input.harnessTools : undefined });
+        try {
+            if (!('discover' in input) && !extra.metadataPhase) {
+                control = await createPiOmpControl(join(requestDirectory, 'control'));
+                stopControl = await createNativeStopControl(join(requestDirectory, 'stop'));
+            }
+            await writeFile(temporary, JSON.stringify({
+                ...input,
+                ...extra,
+                // The run capability is child-process environment only, never a
+                // persisted request or native account snapshot.
+                harnessTools: undefined,
+                ...(control ? { controlNonce: control.nonce } : {}),
+                ...(stopControl
+                    ? { stopNonce: stopControl.nonce, stopDirectory: join(requestDirectory, 'stop') }
+                    : {}),
+                stateDirectory: isolated,
+                nativeRoot: native.directory,
+                ...(native.leaseDirectory
+                    ? { leaseDirectory: native.leaseDirectory, leaseNonce, refreshReceipt: native.receipt }
+                    : {}),
+                ...('project' in input ? { project: await realpath(input.project) } : {}),
+            }), { flag: 'wx', mode: 0o600 });
+            await rename(temporary, requestPath);
+        }
+        catch (error) {
+            await control?.close();
+            await stopControl?.close();
+            await rm(requestDirectory, { recursive: true, force: true });
+            throw error;
+        }
+        finally {
+            await rm(temporary, { force: true });
+        }
+        return {
+            argv: [process.execPath, bridgePath(), requestPath],
+            env: injection.env,
+            leaseDirectory: native.leaseDirectory,
+            ...(control ? { steer: control.steer } : {}),
+            ...(stopControl ? { stop: stopControl.stop } : {}),
+            activate: async () => {
+                if (native.leaseDirectory) {
+                    await acquireOwnAccountLease(native.leaseDirectory, leaseNonce);
+                    await assertPiOmpRefreshSources(native.leaseDirectory, native.receipt);
+                    await assertPiOmpRefreshCache(native.leaseDirectory, native.receipt);
+                }
+            },
+            cleanup: async () => {
+                await control?.close();
+                await stopControl?.close();
+                if (native.leaseDirectory)
+                    await finishPiOmpRefresh(native.leaseDirectory, leaseNonce, input.executable, native.receipt);
+                if (control)
+                    await rm(requestDirectory, { recursive: true, force: true });
+            },
+        };
+    };
+    return { request };
+}
+async function confirmedCatalog(context, capture) {
+    for (const phase of ['native-candidates', 'account-scope']) {
+        const launch = await context.request({ metadataPhase: phase });
+        let raw;
+        let cleanupUnconfirmed = false;
+        try {
+            await launch.activate();
+            raw = JSON.parse(await capture(launch.argv, launch.env, phase, { leaseDirectory: launch.leaseDirectory }));
+        }
+        catch (error) {
+            if (error instanceof ProcessCleanupUnconfirmedError) {
+                cleanupUnconfirmed = true;
+                throw error;
+            }
+            throw new Error('无法读取 Pi/OMP 原生模型目录，请检查本机配置');
+        }
+        finally {
+            if (!cleanupUnconfirmed)
+                await launch.cleanup();
+        }
+        if (phase === 'account-scope')
+            return parseCatalog(raw);
+        if (!raw ||
+            typeof raw !== 'object' ||
+            raw.phase !== phase ||
+            !Number.isSafeInteger(raw.count) ||
+            raw.count < 0)
+            throw new Error('Invalid Pi/OMP candidate phase result');
+    }
+    throw new Error('Missing Pi/OMP account scope');
+}
+/** The bridge validates exact native model capabilities before sending any prompt. */
+export async function preparePiOmp(input, capture) {
+    if (input.cli !== 'pi' && input.cli !== 'omp')
+        throw new Error('Unsupported Pi/OMP CLI');
+    if (!/^[A-Za-z0-9_.:-]+\/[^\s\x00-\x1f]+$/.test(input.preference.model))
+        throw new Error('Pi/OMP 需要原生 provider/model 选型');
+    if (!EFFORTS.includes(input.preference.effort))
+        throw new Error('Unsupported native model effort');
+    if (!['plan', 'accept-edits'].includes(input.mode))
+        throw new Error('Unsupported task mode');
+    if (!input.prompt.trim())
+        throw new Error('Prompt must not be empty');
+    const context = await contextFor(input);
+    // Preparing a request is reversible. Execution requires the Host's two
+    // captures on this exact snapshot; an unconfirmed request cannot send prompts.
+    const catalog = capture ? await confirmedCatalog(context, capture) : undefined;
+    return context.request(catalog ? { confirmedCatalog: catalog } : {});
+}
+export async function discoverPiOmp(cli, executable, capture, stateDirectory, options = {}) {
+    if (cli !== 'pi' && cli !== 'omp')
+        throw new Error('Unsupported Pi/OMP CLI');
+    const context = await contextFor({ cli, executable, stateDirectory, discover: true, ...options });
+    return confirmedCatalog(context, capture);
+}
+function parseCatalog(raw) {
+    if (!Array.isArray(raw))
+        throw new Error('Invalid Pi/OMP model catalog');
+    const ids = new Set();
+    return raw.map((model) => {
+        if (!model ||
+            typeof model !== 'object' ||
+            typeof model.id !== 'string' ||
+            !/^[A-Za-z0-9_.:-]+\/[^\s\x00-\x1f]+$/.test(model.id) ||
+            typeof model.label !== 'string' ||
+            !Array.isArray(model.efforts) ||
+            !model.efforts.length ||
+            model.efforts.some((effort) => !EFFORTS.includes(effort)) ||
+            ids.has(model.id))
+            throw new Error('Invalid Pi/OMP native model entry');
+        ids.add(model.id);
+        return {
+            id: model.id,
+            label: model.label,
+            efforts: [...new Set(model.efforts)],
+            ...(model.cost === 'free' || model.cost === 'paid' || model.cost === 'unknown'
+                ? { cost: model.cost }
+                : {}),
+        };
+    });
+}
+//# sourceMappingURL=pi-omp-adapter.js.map

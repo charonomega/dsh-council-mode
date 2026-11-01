@@ -1,0 +1,351 @@
+import { IconBranchOutlineRegular, IconDataOutlineRegular, IconGoalOutlineRegular, IconPaperPlaneOutlineRegular, IconPlanOutlineRegular, PermissionIconFullAccessRegular, rankByName, } from '@deepseek-ai/dsh-client-ui-primitives';
+import { active, cliOf, effortLabel, CLI_LABELS, } from "../shared/types.js";
+import { visibleModelChoices } from "../shared/model-presentation.js";
+import { value } from "./workers.js";
+import { harnessFeatureReason, harnessPermissionReason } from "./harness-feature-support.js";
+import { openHarnessWorkerGoal } from "./harness-goal-editor.js";
+export const HARNESS_COMMAND_SOURCE = 'cliworker-settings';
+// Capture service faces only from the scope declaring their injection. React
+// renderers may live in an outer scope that must never read those properties.
+const installedSources = new WeakMap();
+const sourceListeners = new WeakMap();
+export const harnessNativeCommandServices = (bindings) => installedSources.get(bindings);
+export function subscribeHarnessNativeCommands(bindings, listener) {
+    let listeners = sourceListeners.get(bindings);
+    if (!listeners)
+        sourceListeners.set(bindings, (listeners = new Set()));
+    listeners.add(listener);
+    return () => {
+        listeners.delete(listener);
+    };
+}
+function publishCommandServices(bindings, services) {
+    if (services)
+        installedSources.set(bindings, services);
+    else
+        installedSources.delete(bindings);
+    for (const listener of sourceListeners.get(bindings) ?? [])
+        listener();
+}
+// Native '/' menu faces: the same rows, glyphs and section order as DSH's own
+// command menu (ui-commands presentation and ui-model-selection), so a CLI child
+// reads like the root composer. Fork is CLI-only and closes the Commands section.
+const commands = [
+    { name: 'goal', label: '目标', section: 'add', icon: IconGoalOutlineRegular, description: '设置或编辑当前 CLI 的目标' },
+    { name: 'plan', label: '计划', section: 'add', icon: IconPlanOutlineRegular, description: '切换当前 CLI 的计划模式' },
+    { name: 'feedback', label: '反馈', section: 'add', icon: IconPaperPlaneOutlineRegular, description: '向当前 Harness 子会话提交反馈' },
+    { name: 'permission', label: '权限', section: 'commands', icon: PermissionIconFullAccessRegular, description: '选择当前 CLI 的权限模式' },
+    { name: 'model', label: '模型', section: 'commands', icon: IconDataOutlineRegular, description: '选择当前 CLI 的模型和思考强度' },
+    { name: 'fork', label: '分支', section: 'commands', icon: IconBranchOutlineRegular, description: '从最新完成轮创建 CLI 子会话分支' },
+];
+const commandOf = (text) => commands.find((command) => command.name === text || command.label === text || (text === '规划' && command.name === 'plan'));
+/** The native `command` dictionary's section headings, so the language follows DSH. */
+function sectionTitles(ctx) {
+    const locale = ctx.get?.('locale');
+    const t = locale?.bind('command');
+    const title = (key, fallback) => {
+        const text = t?.(key);
+        return text && text !== key ? text : fallback;
+    };
+    return { add: title('section.add', '添加'), commands: title('section.commands', '指令') };
+}
+const sameBinding = (left, right) => left?.sessionId === right.sessionId &&
+    left.parentSessionId === right.parentSessionId &&
+    left.workerId === right.workerId;
+/** One bounded read through the same Gateway stream used by the Worker view. */
+async function snapshotFor(api, binding, signal) {
+    signal.throwIfAborted();
+    const stream = api.$stream({
+        name: `CLI Worker command ${binding.workerId}`,
+        open: (lifetime) => api.cliworker.watch(binding.parentSessionId, binding.workerId, lifetime),
+        ended: () => new Error('任务连接已结束'),
+    });
+    const abort = () => {
+        void stream.dispose().catch(() => undefined);
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    try {
+        for await (const item of stream) {
+            signal.throwIfAborted();
+            const snapshot = JSON.parse(item.value);
+            item.accept();
+            return snapshot;
+        }
+        throw new Error('未收到当前任务的记录');
+    }
+    finally {
+        signal.removeEventListener('abort', abort);
+        await stream.dispose();
+    }
+}
+function ownedWorker(snapshot, binding) {
+    const worker = snapshot.selected;
+    if (!worker ||
+        worker.id !== binding.workerId ||
+        worker.parentSessionId !== binding.parentSessionId ||
+        worker.harnessConversation?.sessionId !== binding.sessionId ||
+        worker.harnessConversation.parentSessionId !== binding.parentSessionId)
+        throw new Error('收到不匹配的 CLI 子会话记录');
+    if (snapshot.selectedBusy || active(worker.status) || snapshot.configuring)
+        throw new Error('请等待本轮结束后再修改设置');
+    if (snapshot.queuedFollowups?.length)
+        throw new Error('请发送或移除待发消息后再修改设置');
+    if (snapshot.resumeBlockedReason)
+        throw new Error(snapshot.resumeBlockedReason);
+    return worker;
+}
+/**
+ * Data-only source for owned CLI children. DSH owns trigger detection, menu,
+ * PopupSelectView, keyboard, token CAS and focus through its existing session
+ * controller. No original source, command contribution or component is replaced.
+ */
+export function installHarnessNativeCommands(ctx, bindings, api, attachments, features = {}) {
+    let disposed = false;
+    const openings = new Map();
+    const owned = (session) => {
+        if (disposed)
+            return;
+        const binding = bindings.get(session.sessionId);
+        if (!binding?.workerId || binding.parentSessionId === session.sessionId)
+            return;
+        const address = ctx.sessions.subagentAddress(session.sessionId);
+        if (address?.parentSessionId !== binding.parentSessionId || address.childSessionId !== session.sessionId)
+            return;
+        if (!ctx.sessions.binding(session.sessionId))
+            return;
+        return binding;
+    };
+    const reasonFor = (binding, command) => harnessFeatureReason(binding, command) || (command === 'permission' ? harnessPermissionReason(binding) : undefined) ||
+        (command === 'feedback' && !features.openFeedback ? 'Harness 反馈服务尚未就绪' : undefined) ||
+        (command === 'fork' ? features.forkReason?.(binding.sessionId) || (!features.fork ? 'CLI 分支入口尚未就绪' : undefined) : undefined);
+    const open = (session, command, segment) => {
+        const binding = owned(session);
+        if (!binding || reasonFor(binding, command))
+            return;
+        const scope = ctx.sessions.binding(session.sessionId);
+        const popup = ctx.commandUi.popupFor(scope.ctx);
+        openings.get(session.sessionId)?.close();
+        const lifetime = new AbortController();
+        let popupSignal;
+        let releaseScope;
+        let releaseState;
+        let closed = false;
+        const finish = () => {
+            if (closed)
+                return;
+            closed = true;
+            lifetime.abort();
+            popupSignal?.removeEventListener('abort', finish);
+            releaseState?.();
+            releaseScope?.();
+            if (openings.get(session.sessionId)?.close === close)
+                openings.delete(session.sessionId);
+        };
+        const close = () => {
+            if (closed)
+                return;
+            finish();
+            popup.dismiss();
+        };
+        openings.set(session.sessionId, { binding, command, close });
+        releaseScope = scope.ctx.effect(() => () => close(), 'cliworker: native command opening');
+        releaseState = popup.state.subscribe(() => {
+            if (!popup.state.getSnapshot().open)
+                finish();
+        });
+        const check = () => {
+            lifetime.signal.throwIfAborted();
+            if (!sameBinding(owned(session), binding) ||
+                !owned(session)?.capabilities[command] ||
+                ctx.sessions.binding(session.sessionId) !== scope)
+                throw new Error('会话已切换，请重新打开设置');
+            const state = scope.session.getSnapshot();
+            const inbox = scope.session.projections.faceOf('inbox').getSnapshot();
+            if (state.openState !== 'open')
+                throw new Error('原生会话尚未就绪');
+            if (state.running ||
+                state.pendingSubmissions.length ||
+                inbox?.['next-turn']?.length ||
+                inbox?.['next-step']?.length)
+                throw new Error('请等待原生对话结束，并发送或移除待发消息后再修改设置');
+        };
+        let worker;
+        let selections = new Map();
+        let modes = new Set();
+        popup.open(command, {
+            searchMode: command === 'model' ? 'fuzzy-label' : 'substring',
+            options: async (_session, signal) => {
+                popupSignal = signal;
+                signal.addEventListener('abort', finish, { once: true });
+                if (signal.aborted)
+                    finish();
+                check();
+                worker = ownedWorker(await snapshotFor(api, binding, lifetime.signal), binding);
+                check();
+                if (command === 'model') {
+                    const cli = cliOf(worker.preference);
+                    const catalog = JSON.parse(value(await api.cliworker.catalogForWorker(binding.parentSessionId, binding.workerId, lifetime.signal)));
+                    check();
+                    if (catalog.cli !== cli || !Array.isArray(catalog.models))
+                        throw new Error('收到不匹配的 CLI 模型目录');
+                    const current = worker.preference;
+                    selections = new Map();
+                    const options = [];
+                    for (const model of visibleModelChoices(catalog.models, current.model)) {
+                        for (const effort of model.efforts ?? []) {
+                            const id = JSON.stringify([cli, model.id, effort]);
+                            if (selections.has(id))
+                                continue;
+                            selections.set(id, { cli, model: model.id, effort });
+                            options.push({
+                                id,
+                                label: `${model.label} · ${effortLabel(effort)}`,
+                                detail: model.id,
+                                group: { name: cli, label: CLI_LABELS[cli] },
+                                active: (model.id === current.model ||
+                                    Object.values(model.variants ?? {}).includes(current.model)) &&
+                                    effort === current.effort,
+                            });
+                        }
+                    }
+                    if (!options.length)
+                        throw new Error(catalog.notice || '当前 CLI 未返回可用的模型和思考强度');
+                    return options;
+                }
+                if (!api.cliworker.permissionForWorker || !api.cliworker.configureWorkerPermission)
+                    throw new Error('Host 尚未提供 CLI 权限设置');
+                const permission = JSON.parse(value(await api.cliworker.permissionForWorker(binding.parentSessionId, binding.workerId, lifetime.signal)));
+                check();
+                if (!permission.writable)
+                    throw new Error(permission.reason || '当前任务暂不可修改权限');
+                if (command === 'plan' && !permission.options.some((option) => option.value === 'plan'))
+                    throw new Error('当前 CLI 不支持规划模式');
+                modes = new Set(permission.options.map((option) => option.value));
+                return permission.options.map((option) => ({
+                    id: option.value,
+                    label: option.name,
+                    detail: option.description,
+                    active: option.value === permission.currentValue,
+                }));
+            },
+            onSelect: async (option) => {
+                check();
+                const current = ownedWorker(await snapshotFor(api, binding, lifetime.signal), binding);
+                check();
+                if (!worker ||
+                    cliOf(current.preference) !== cliOf(worker.preference) ||
+                    current.conversationId !== worker.conversationId)
+                    throw new Error('任务身份已改变，请重新打开设置');
+                let saved;
+                if (command === 'model') {
+                    const preference = selections.get(option.id);
+                    if (!preference || cliOf(preference) !== cliOf(current.preference))
+                        throw new Error('只能选择当前 CLI 真实目录中的模型和思考强度');
+                    saved = JSON.parse(value(await api.cliworker.configureWorker(binding.parentSessionId, binding.workerId, JSON.stringify(preference), lifetime.signal)));
+                }
+                else {
+                    if (!modes.has(option.id) ||
+                        (option.id !== 'plan' && option.id !== 'accept-edits') ||
+                        !api.cliworker.configureWorkerPermission)
+                        throw new Error('当前 CLI 不支持此权限模式');
+                    saved = JSON.parse(value(await api.cliworker.configureWorkerPermission(binding.parentSessionId, binding.workerId, option.id, lifetime.signal)));
+                }
+                check();
+                if (saved.id !== binding.workerId ||
+                    saved.parentSessionId !== binding.parentSessionId ||
+                    saved.harnessConversation?.sessionId !== binding.sessionId ||
+                    cliOf(saved.preference) !== cliOf(current.preference) ||
+                    saved.conversationId !== current.conversationId)
+                    throw new Error('收到不匹配的 Worker 设置');
+            },
+        }, session, segment);
+    };
+    const execute = (session, command, segment) => {
+        const binding = owned(session);
+        if (!binding || reasonFor(binding, command))
+            return;
+        if (command === 'goal')
+            openHarnessWorkerGoal(bindings, binding.sessionId);
+        else if (command === 'feedback')
+            features.openFeedback?.(binding.sessionId);
+        else if (command === 'fork')
+            features.fork?.(binding.sessionId);
+        else
+            open(session, command, segment);
+    };
+    const source = {
+        trigger: '/',
+        name: HARNESS_COMMAND_SOURCE,
+        showGroupTitle: false,
+        candidates: async (session, req) => {
+            req.signal.throwIfAborted();
+            const binding = owned(session);
+            if (!binding)
+                return [];
+            const rows = [
+                ...(attachments?.candidates(session.sessionId) ?? []),
+                ...commands.map(({ section, ...command }) => ({
+                    ...command,
+                    section,
+                    description: reasonFor(binding, command.name) || command.description,
+                })),
+            ];
+            // Like the native menu: sections for an empty query, shared name-and-label ranking otherwise.
+            if (req.query)
+                return rankByName(rows, req.query).map(({ section: _, ...row }) => row);
+            const titles = sectionTitles(ctx);
+            return ['add', 'commands'].flatMap((section) => rows.filter((row) => row.section === section).map((row) => ({ ...row, section: titles[section] })));
+        },
+        onPick: (pick) => {
+            if (!owned(pick.session))
+                return;
+            if (attachments?.pick(pick))
+                return 'handled';
+            const command = commandOf(pick.candidate.name);
+            if (!command)
+                return;
+            execute(pick.session, command.name, { via: 'menu', span: pick.span });
+            return 'handled';
+        },
+        matchEnter: async (session, line, signal, envelope) => {
+            const binding = owned(session);
+            if (!binding)
+                return;
+            const [token, ...args] = line.trim().split(/\s+/u);
+            if (!token?.startsWith('/'))
+                return;
+            const command = commandOf(token.slice(1));
+            if (!command)
+                return;
+            signal.throwIfAborted();
+            if (reasonFor(binding, command.name))
+                return 'handled';
+            if (args.length)
+                throw new Error(`请通过 /${command.name} 的原生选项修改设置`);
+            if (envelope.attachments)
+                throw new Error('设置命令不接受附件，请保留附件并单独打开设置');
+            execute(session, command.name, { via: 'enter', token });
+            return 'handled';
+        },
+    };
+    const unregister = ctx.inputTriggers.registerSource(source);
+    publishCommandServices(bindings, { sessions: ctx.sessions, inputTriggers: ctx.inputTriggers });
+    const unsubscribe = bindings.subscribe(() => {
+        for (const { binding, command, close } of openings.values()) {
+            if (!sameBinding(bindings.get(binding.sessionId), binding) ||
+                !bindings.get(binding.sessionId)?.capabilities[command])
+                close();
+        }
+    });
+    return () => {
+        if (disposed)
+            return;
+        disposed = true;
+        publishCommandServices(bindings);
+        unregister();
+        unsubscribe();
+        for (const opening of [...openings.values()])
+            opening.close();
+    };
+}
+//# sourceMappingURL=harness-native-commands.js.map

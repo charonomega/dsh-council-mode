@@ -1,2 +1,5 @@
 * text=auto eol=lf
 *.png binary
+
+# Preserve upstream bytes: runtime-host verifies SHA-256 at activation.
+vendor/** -text

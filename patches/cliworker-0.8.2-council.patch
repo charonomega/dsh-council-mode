@@ -1,0 +1,261 @@
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -9562,7 +9562,9 @@
+ 	signal.throwIfAborted();
+ 	const env = options.env ?? process.env, system = env.SystemRoot || env.WINDIR || "C:\\Windows";
+ 	if (!/^[a-z]:[\\/]/i.test(system) || system.includes("\0")) throw new Error("Windows 系统目录配置无效");
+-	const raw = await capture([
++	let raw;
++	try {
++		raw = await capture([
+ 		win32.join(system, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+ 		"-NoLogo",
+ 		"-NoProfile",
+@@ -9570,6 +9572,13 @@
+ 		"-EncodedCommand",
+ 		Buffer.from(WINDOWS_PATH_QUERY, "utf16le").toString("base64")
+ 	], options.home ?? homedir());
++	} catch (error) {
++		if (!(error instanceof ProcessCleanupUnconfirmedError)) throw error;
++		// The fixed system PATH query never opens the requested CLI or its account.
++		throw Object.assign(new Error("Windows CLI 安装路径探测暂时失败，请刷新重试", { cause: error }), {
++			code: "CLI_PATH_DISCOVERY_FAILED"
++		});
++	}
+ 	signal.throwIfAborted();
+ 	if (raw.length > 131072) throw new Error("Windows PATH 探测结果过大");
+ 	const value = JSON.parse(raw.replace(/^\uFEFF/, "").trim());
+@@ -24439,6 +24448,9 @@
+ 			}
+ 			if (signal.aborted || this.controller.signal.aborted) throw new Error("账号状态查询已取消");
+ 			const code = error?.code;
++			if (code === "CLI_PATH_DISCOVERY_FAILED") return {
++				cli, installed: false, state: "unavailable", summary: error.message, actions: []
++			};
+ 			if (error instanceof WindowsCliNotFoundError) return {
+ 				cli,
+ 				installed: false,
+--- a/lib/native-codex.mjs
++++ b/lib/native-codex.mjs
+@@ -1,5 +1,6 @@
+ import { resolve } from 'node:path'
+ import { CodexRunUsage } from './codex-run-usage.mjs'
++import { createProgressPreviews } from './codex-progress-preview.mjs'
+ 
+ const object = (value) => value && typeof value === 'object' && !Array.isArray(value)
+ const string = (value) => typeof value === 'string' && value.trim().length > 0
+@@ -54,10 +55,11 @@
+ 
+ export async function runNativeCodex(config, io) {
+   const peer = await io.openStdio(nativeCodexArgv(config), { env: config.env, cwd: config.project })
+-  let threadId, turnId, response = '', failure, completed = false, started = false
++  let threadId, turnId, response = '', failure, completed = false, started = false, failedTools = 0
+   const steps = new Map(), messages = new Map(), summaries = new Map(), finished = new Set(), tools = new Set(), receipts = new Map()
+   const steerReceipts = new Map(), toolItems = new Map(), toolOutput = new Map()
+   const runUsage = new CodexRunUsage(config.conversationId)
++  const previews = createProgressPreviews(event => io.event(event))
+   const step = (id) => {
+     if (!steps.has(id)) steps.set(id, steps.size)
+     return steps.get(id)
+@@ -111,14 +113,18 @@
+       messages.set(item.id, item.text)
+       if (item.text.trim()) response = item.text
+     } else if (item.type === 'reasoning') {
++      for (const key of summaries.keys()) if (key.startsWith(`reasoning:${item.id}:`)) previews.finish(key)
+       if (Array.isArray(item.summary)) item.summary.forEach((summary, index) => {
+         if (typeof summary === 'string') io.event({ kind: 'reasoning', step: step(`reasoning:${item.id}:${index}`), text: 'Codex 思考摘要', detail: summary, state: 'COMPLETED' })
+       })
+     } else if (toolTypes.has(item.type)) {
++      previews.finish(item.id)
+       tools.delete(item.id)
+       // Every typed tool except webSearch has an explicit native completion status.
+       const failed = (item.type !== 'webSearch' && item.status !== 'completed') || item.success === false || !!item.error || !!item.failure || (typeof item.exitCode === 'number' && item.exitCode !== 0)
+-      if (failed) markFailure('原生工具失败或权限被拒绝')
++      // Tool failures are conversation items: Codex can recover or report them.
++      // Only native turn/transport failures determine the overall run status.
++      if (failed) failedTools++
+       io.event({ kind: 'tool', step: step(item.id), text: item.command ?? item.tool ?? item.type, state: failed ? 'FAILED' : 'COMPLETED', detail: JSON.stringify(safeItem(item)), toolCall: { ...publicTool(item),
+         ...(item.type === 'commandExecution' && item.aggregatedOutput == null && toolOutput.has(item.id) ? { output: toolOutput.get(item.id) } : {}) } })
+     }
+@@ -168,7 +174,7 @@
+       if (!string(params.itemId) || typeof params.delta !== 'string' || finished.has(params.itemId) || (params.summaryIndex !== undefined && (!Number.isSafeInteger(params.summaryIndex) || params.summaryIndex < 0))) throw fail('无效或迟到的公开摘要增量')
+       const key = `reasoning:${params.itemId}:${params.summaryIndex ?? 0}`
+       summaries.set(key, (summaries.get(key) ?? '') + params.delta)
+-      io.event({ kind: 'reasoning', step: step(key), text: 'Codex 思考摘要', detail: summaries.get(key), state: 'RUNNING' })
++      previews.update(key, { kind: 'reasoning', step: step(key), text: 'Codex 思考摘要', detail: summaries.get(key), state: 'RUNNING' })
+     } else if (message.method === 'item/commandExecution/outputDelta' || message.method === 'item/mcpToolCall/progress') {
+       const item = toolItems.get(params.itemId)
+       const command = message.method === 'item/commandExecution/outputDelta'
+@@ -179,7 +185,7 @@
+         item.type !== (command ? 'commandExecution' : 'mcpToolCall') || typeof delta !== 'string') return
+       const output = command ? (toolOutput.get(params.itemId) ?? '') + delta : delta
+       toolOutput.set(params.itemId, output)
+-      io.event({ kind: 'tool', step: step(item.id), text: item.command ?? item.tool ?? item.type,
++      previews.update(item.id, { kind: 'tool', step: step(item.id), text: item.command ?? item.tool ?? item.type,
+         state: 'RUNNING', detail: output, toolCall: { ...publicTool(item), output } })
+       io.native(message)
+     } else if (message.method === 'item/started' || message.method === 'item/completed') {
+@@ -204,9 +210,12 @@
+     } else if (message.method === 'turn/completed') {
+       if (!object(params.turn) || !Array.isArray(params.turn.items)) throw fail('无效的轮次终态')
+       for (const item of params.turn.items) completeItem(item)
++      previews.flush()
+       completed = true
+       if (params.turn.status !== 'completed') markFailure(typeof params.turn.error?.message === 'string' ? params.turn.error.message : `原生轮次 ${params.turn.status}`)
+       if (tools.size) markFailure('原生轮次结束时仍有未完成工具')
++      if (params.turn.status === 'completed' && failedTools)
++        io.event({ kind: 'diagnostic', text: `Codex 原生轮次已完成；期间有 ${failedTools} 次工具调用失败或被拒绝，详情见工具记录和最终回复。`, state: 'COMPLETED' })
+       io.native({ method: message.method, params: { threadId, turn: { id: turnId, status: params.turn.status, error: params.turn.error } } })
+     }
+   })
+@@ -244,7 +253,8 @@
+     completion.catch(() => {})
+     const turn = await peer.request('turn/start', {
+       threadId,
+-      input: await nativeAttachmentInput('codex', `任务：\n${config.prompt}`, config.attachments, io.signal),
++      // Preserve first-line directives for UserPromptSubmit hooks (for example STS).
++      input: await nativeAttachmentInput('codex', config.prompt, config.attachments, io.signal),
+       model: config.preference.model,
+       ...(config.preference.effort !== 'default' ? { effort: config.preference.effort } : {}),
+       // Public summaries are opt-in (some models default to none). Never request raw reasoning.
+@@ -268,7 +278,7 @@
+     releaseSteer?.()
+     io.signal?.removeEventListener('abort', abort)
+     unsubscribe()
+-    await peer.close()
++    try { previews.flush() } finally { await peer.close() }
+   }
+ }
+ import { nativeAttachmentInput } from './native-attachments.mjs'
+--- a/lib/types/host/accounts.js
++++ b/lib/types/host/accounts.js
+@@ -440,6 +440,8 @@
+             if (signal.aborted || this.controller.signal.aborted)
+                 throw new Error('账号状态查询已取消');
+             const code = error?.code;
++            if (code === 'CLI_PATH_DISCOVERY_FAILED')
++                return { cli, installed: false, state: 'unavailable', summary: error.message, actions: [] };
+             if (error instanceof WindowsCliNotFoundError)
+                 return { cli, installed: false, state: 'unconfigured', summary: error.message, actions: [] };
+             if (error instanceof WindowsCliInstallationError)
+@@ -996,4 +998,4 @@
+         return this.closing;
+     }
+ }
+-//# sourceMappingURL=accounts.js.map
+\ No newline at end of file
++//# sourceMappingURL=accounts.js.map
+--- a/lib/types/host/windows-cli-path.js
++++ b/lib/types/host/windows-cli-path.js
+@@ -1,6 +1,7 @@
+ import { lstatSync } from 'node:fs';
+ import { homedir } from 'node:os';
+ import { isAbsolute, join, sep, win32 } from 'node:path';
++import { ProcessCleanupUnconfirmedError } from './process.js';
+ /** Common installer bins only. No recursive search, arbitrary drive scan, or version selection. */
+ export function windowsCommonBinDirectories(options = {}) {
+     const env = options.env ?? process.env, home = options.home ?? homedir();
+@@ -64,8 +65,21 @@
+     const env = options.env ?? process.env, system = env.SystemRoot || env.WINDIR || 'C:\\Windows';
+     if (!/^[a-z]:[\\/]/i.test(system) || system.includes('\0'))
+         throw new Error('Windows 系统目录配置无效');
+-    const raw = await capture([win32.join(system, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+-        '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(WINDOWS_PATH_QUERY, 'utf16le').toString('base64')], options.home ?? homedir());
++    let raw;
++    try {
++        raw = await capture([win32.join(system, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
++            '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(WINDOWS_PATH_QUERY, 'utf16le').toString('base64')], options.home ?? homedir());
++    }
++    catch (error) {
++        if (!(error instanceof ProcessCleanupUnconfirmedError))
++            throw error;
++        // This fixed, read-only system query has not launched the requested CLI
++        // or opened its account. Keep the discovery failure retryable instead of
++        // permanently quarantining an unrelated (possibly absent) CLI.
++        throw Object.assign(new Error('Windows CLI 安装路径探测暂时失败，请刷新重试', { cause: error }), {
++            code: 'CLI_PATH_DISCOVERY_FAILED',
++        });
++    }
+     signal.throwIfAborted();
+     if (raw.length > 131_072)
+         throw new Error('Windows PATH 探测结果过大');
+@@ -79,4 +93,4 @@
+     const directories = windowsPathDirectories([env.PATH ?? env.Path ?? '', record.user ?? '', record.machine ?? '']);
+     return firstPresentWindowsPath(windowsCommandCandidates(commands, directories, env));
+ }
+-//# sourceMappingURL=windows-cli-path.js.map
+\ No newline at end of file
++//# sourceMappingURL=windows-cli-path.js.map
+--- a/package.json
++++ b/package.json
+@@ -1,7 +1,7 @@
+ {
+   "name": "dsh-cliworker-now",
+-  "version": "0.8.2",
+-  "description": "Multiple agent CLI conversations in the DeepSeek Harness sidebar",
++  "version": "0.8.2-council.1",
++  "description": "Council distribution of CLI Worker 0.8.2 with Codex streaming, prompt, completion and Windows PATH fixes",
+   "type": "module",
+   "license": "MIT",
+   "engines": {
+@@ -112,12 +112,13 @@
+   "private": false,
+   "repository": {
+     "type": "git",
+-    "url": "git+https://github.com/SuperWheel/dsh-cliworker-now.git"
++    "url": "git+https://github.com/charonomega/dsh-council-mode.git",
++    "directory": "vendor/dsh-cliworker-now"
+   },
+   "bugs": {
+-    "url": "https://github.com/SuperWheel/dsh-cliworker-now/issues"
++    "url": "https://github.com/charonomega/dsh-council-mode/issues"
+   },
+-  "homepage": "https://github.com/SuperWheel/dsh-cliworker-now#readme",
++  "homepage": "https://github.com/charonomega/dsh-council-mode#readme",
+   "publishConfig": {
+     "access": "public",
+     "registry": "https://registry.npmjs.org/"
+--- /dev/null
++++ b/lib/codex-progress-preview.mjs
+@@ -0,0 +1,41 @@
++// Public progress is a snapshot. Keep native deltas and terminal items intact.
++const MAX_BYTES = 4096
++const MARKER = '[预览已截断，仅显示末尾；完整输出见原生记录]\n'
++export function progressPreview(text) {
++  const bytes = Buffer.from(text)
++  if (bytes.length <= MAX_BYTES) return text
++  let start = bytes.length - (MAX_BYTES - Buffer.byteLength(MARKER))
++  while ((bytes[start] & 0xc0) === 0x80) start++
++  return MARKER + bytes.subarray(start).toString('utf8')
++}
++
++// Event-driven coalescing avoids timer callbacks surviving a closed bridge.
++// Pending progress flushes on the next eligible delta or at completion/cleanup.
++export function createProgressPreviews(emit, now = () => performance.now()) {
++  const entries = new Map()
++  const send = entry => {
++    if (!entry.pending) return
++    const event = entry.pending
++    entry.pending = undefined
++    const signature = JSON.stringify(event)
++    if (signature === entry.sent) return
++    emit(event)
++    entry.sent = signature
++    entry.at = now()
++  }
++  return {
++    update(key, event) {
++      let entry = entries.get(key)
++      if (!entry) entries.set(key, entry = { at: -Infinity })
++      const detail = progressPreview(event.detail)
++      entry.pending = { ...event, detail,
++        ...(event.toolCall ? { toolCall: { ...event.toolCall, output: detail } } : {}) }
++      if (now() - entry.at >= 250) send(entry)
++    },
++    finish(key) {
++      const entry = entries.get(key)
++      if (entry) { send(entry); entries.delete(key) }
++    },
++    flush() { for (const entry of entries.values()) send(entry) },
++  }
++}
