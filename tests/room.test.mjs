@@ -18,7 +18,8 @@ import {
   userText,
 } from '../lib/client-room.js';
 
-const now = Date.parse('2026-10-23T12:30:00+08:00');
+// Clock labels use the viewer's local timezone on every platform.
+const now = new Date(2026, 9, 23, 12, 30).getTime();
 
 test('text extraction and final opinion marker', () => {
   assert.equal(
