@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-council-mode",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": false,
   "description": "Council Mode: a WeChat-like multi-agent meeting room for DeepSeek Harness and CLI Worker agents.",
   "type": "module",
@@ -23,7 +23,8 @@
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-session",
-        "@deepseek-ai/dsh-client-ui-chat"
+        "@deepseek-ai/dsh-client-ui-chat",
+        "@deepseek-ai/dsh-client-ui-settings"
       ]
     }
   },

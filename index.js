@@ -13,7 +13,7 @@ import { createRelayLog } from './lib/relay-log.js';
 import { createUserMessage } from './lib/create-message.js';
 import { createCliWorkerAdapter } from './lib/adapter.js';
 import { CLIS, CLI_IDS, ROLE_BY_ID, ROLE_IDS_TEXT, cliLabel } from './lib/catalog.js';
-import { resolveConfig } from './lib/config.js';
+import { liveCouncilConfig } from './lib/config-schema.js';
 import { createCouncilEngine } from './lib/engine.js';
 import { COUNCIL_POLICY, buildInviteRequest, uniqueAgentName } from './lib/prompt.js';
 import { COUNCIL_PROJECTION_KEY, createCouncilProjection, emptyCouncilState } from './lib/projection.js';
@@ -58,7 +58,7 @@ function usage() {
  * @param {Record<string, unknown>} rawConfig
  */
 export function apply(ctx, rawConfig = {}) {
-  const config = resolveConfig(rawConfig);
+  const config = liveCouncilConfig(rawConfig);
   const owner = randomUUID();
   const projection = createCouncilProjection(config, owner);
   ctx.sessionProjections.register(projection);

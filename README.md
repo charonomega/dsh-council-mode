@@ -2,7 +2,7 @@
 
 让多个智能体在 DeepSeek Harness（DSH）中持续讨论：成员保留自己的会话，通过收件箱读取同伴的新消息，直接广播、定向交流和引用回复，无需主控模型逐条转述。
 
-**当前发布：0.2.3** · [安装包与版本记录](https://github.com/charonomega/dsh-council-mode/releases) · [问题反馈](https://github.com/charonomega/dsh-council-mode/issues)
+**当前发布：0.2.4** · [安装包与版本记录](https://github.com/charonomega/dsh-council-mode/releases) · [问题反馈](https://github.com/charonomega/dsh-council-mode/issues)
 
 ## 从 DSH 插件页面安装
 
@@ -17,7 +17,7 @@
    推荐固定版本，便于复现：
 
    ```text
-   https://github.com/charonomega/dsh-council-mode#v0.2.3
+   https://github.com/charonomega/dsh-council-mode#v0.2.4
    ```
 
 4. 展开 **议会模式 / Council Mode** 的配置，可直接调整成员数、消息条数、唤醒次数、讨论时限和发言长度；默认配置即可开始。保存后刷新页面加载新客户端。
@@ -30,10 +30,10 @@
 插件安装框也支持 Release 的 `.tgz` 地址：
 
 ```text
-https://github.com/charonomega/dsh-council-mode/releases/download/v0.2.3/local-dsh-council-mode-0.2.3.tgz
+https://github.com/charonomega/dsh-council-mode/releases/download/v0.2.4/local-dsh-council-mode-0.2.4.tgz
 ```
 
-也可从 [Release](https://github.com/charonomega/dsh-council-mode/releases/tag/v0.2.3) 下载 `.tgz`，从插件页安装本地包。请使用此安装包，不要使用 GitHub 自动生成的 “Source code” 压缩包。包名保留 `@local/dsh-council-mode`，便于已有用户原位升级；`@local` 是命名空间，不代表只能本地安装。
+也可从 [Release](https://github.com/charonomega/dsh-council-mode/releases/tag/v0.2.4) 下载 `.tgz`，从插件页安装本地包。请使用此安装包，不要使用 GitHub 自动生成的 “Source code” 压缩包。包名保留 `@local/dsh-council-mode`，便于已有用户原位升级；`@local` 是命名空间，不代表只能本地安装。
 
 ## 快速开始
 

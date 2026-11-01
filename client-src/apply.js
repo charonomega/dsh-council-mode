@@ -17,6 +17,14 @@ function apply(ctx) {
   ctx.effect(() => ctx.locale.register(NS, { zh: ZH, en: EN }), 'council: dictionaries');
   ctx.effect(installStyles, 'council: styles');
 
+  ctx.inject(['configForms'], (scope) => {
+    const form = scope.configForms.get('council-mode');
+    scope.slots.inject('plugins.bundle.config', () => scope.slots.register({
+      name: 'plugins.bundle.config', key: '@local/dsh-council-mode',
+      inject: () => ({ form }),
+    }, CouncilConfigSettings));
+  });
+
   ctx.inject(['remote.cliworker'], (scope) => {
     setCliWorkerApi({ remote: scope.remote, cliworker: scope.remote.cliworker });
     scope.effect(() => () => setCliWorkerApi(null), 'council: cliworker api');
