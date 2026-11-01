@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "议会模式 / Council Mode",
+    "description": "像微信群聊一样召集 CLI Worker 成员讨论议题、形成最终意见，并按能力分配执行任务。"
+  }
+}

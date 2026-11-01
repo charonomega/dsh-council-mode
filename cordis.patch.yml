@@ -1,0 +1,6 @@
+# Council Mode bundle row. The browser half is discovered from package.json
+# "dsh.client"; this patch only inserts the Host plugin.
+- insert:
+    - id: council-mode
+      name: '@local/dsh-council-mode'
+      config: {}

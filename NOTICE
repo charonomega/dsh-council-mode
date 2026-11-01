@@ -1,0 +1,16 @@
+# NOTICE
+
+## CLI brand marks
+
+`assets/avatars/*.png` and the corresponding data URLs in
+`client-src/avatar-data.js` are derived from the client assets shipped with
+`dsh-cliworker-now` (MIT License, https://github.com/SuperWheel/dsh-cliworker-now).
+They were downscaled to 72x72 for use as chat avatars.
+
+The marks identify third-party CLI products and remain trademarks of their
+respective owners. This community plugin is not affiliated with or endorsed by
+DeepSeek Harness, OpenAI Codex, Anthropic Claude, Moonshot Kimi, Z.ai ZCode,
+xAI Grok, Qoder, Pi, Oh My Pi, Hermes, OpenCode, Xiaomi MiMo, or Antigravity.
+
+The source MIT license is reproduced in THIRD_PARTY_LICENSES. Brand marks
+are used solely to identify compatible products.

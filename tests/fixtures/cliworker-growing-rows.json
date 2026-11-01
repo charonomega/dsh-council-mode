@@ -1,0 +1,796 @@
+{
+  "source": "Scrubbed structural snapshots from CLI Worker 0.8.2; original text removed",
+  "events": 563,
+  "snapshots": [
+    {
+      "revision": 1,
+      "truncated": false,
+      "selected": {
+        "id": "fixture-worker",
+        "runId": "fbea456a-a97c-45bb-b0ea-88aad34f821f",
+        "status": "running",
+        "preference": {
+          "cli": "codex"
+        }
+      },
+      "timeline": [
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:1",
+          "kind": "user",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "fixture prompt"
+        }
+      ]
+    },
+    {
+      "revision": 51,
+      "truncated": false,
+      "selected": {
+        "id": "fixture-worker",
+        "runId": "fbea456a-a97c-45bb-b0ea-88aad34f821f",
+        "status": "queued",
+        "preference": {
+          "cli": "codex"
+        }
+      },
+      "timeline": [
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:1",
+          "kind": "user",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "fixture prompt"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:2",
+          "kind": "status",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:3",
+          "kind": "status",
+          "time": "2026-10-23T14:34:12.677Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:assistant:0",
+          "kind": "assistant",
+          "time": "2026-10-23T14:34:21.358Z",
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      ]
+    },
+    {
+      "revision": 101,
+      "truncated": false,
+      "selected": {
+        "id": "fixture-worker",
+        "runId": "fbea456a-a97c-45bb-b0ea-88aad34f821f",
+        "status": "queued",
+        "preference": {
+          "cli": "codex"
+        }
+      },
+      "timeline": [
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:1",
+          "kind": "user",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "fixture prompt"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:2",
+          "kind": "status",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:3",
+          "kind": "status",
+          "time": "2026-10-23T14:34:12.677Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:assistant:0",
+          "kind": "assistant",
+          "time": "2026-10-23T14:34:21.358Z",
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      ]
+    },
+    {
+      "revision": 151,
+      "truncated": false,
+      "selected": {
+        "id": "fixture-worker",
+        "runId": "fbea456a-a97c-45bb-b0ea-88aad34f821f",
+        "status": "queued",
+        "preference": {
+          "cli": "codex"
+        }
+      },
+      "timeline": [
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:1",
+          "kind": "user",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "fixture prompt"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:2",
+          "kind": "status",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:3",
+          "kind": "status",
+          "time": "2026-10-23T14:34:12.677Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:assistant:0",
+          "kind": "assistant",
+          "time": "2026-10-23T14:34:21.358Z",
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      ]
+    },
+    {
+      "revision": 201,
+      "truncated": false,
+      "selected": {
+        "id": "fixture-worker",
+        "runId": "fbea456a-a97c-45bb-b0ea-88aad34f821f",
+        "status": "queued",
+        "preference": {
+          "cli": "codex"
+        }
+      },
+      "timeline": [
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:1",
+          "kind": "user",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "fixture prompt"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:2",
+          "kind": "status",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:3",
+          "kind": "status",
+          "time": "2026-10-23T14:34:12.677Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:assistant:0",
+          "kind": "assistant",
+          "time": "2026-10-23T14:34:21.358Z",
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      ]
+    },
+    {
+      "revision": 251,
+      "truncated": false,
+      "selected": {
+        "id": "fixture-worker",
+        "runId": "fbea456a-a97c-45bb-b0ea-88aad34f821f",
+        "status": "queued",
+        "preference": {
+          "cli": "codex"
+        }
+      },
+      "timeline": [
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:1",
+          "kind": "user",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "fixture prompt"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:2",
+          "kind": "status",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:3",
+          "kind": "status",
+          "time": "2026-10-23T14:34:12.677Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:assistant:0",
+          "kind": "assistant",
+          "time": "2026-10-23T14:34:21.358Z",
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      ]
+    },
+    {
+      "revision": 274,
+      "truncated": false,
+      "selected": {
+        "id": "fixture-worker",
+        "runId": "fbea456a-a97c-45bb-b0ea-88aad34f821f",
+        "status": "completed",
+        "preference": {
+          "cli": "codex"
+        }
+      },
+      "timeline": [
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:1",
+          "kind": "user",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "fixture prompt"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:2",
+          "kind": "status",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:3",
+          "kind": "status",
+          "time": "2026-10-23T14:34:12.677Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:assistant:0",
+          "kind": "assistant",
+          "time": "2026-10-23T14:34:21.358Z",
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:273",
+          "kind": "diagnostic",
+          "time": "2026-10-23T14:34:42.243Z",
+          "text": "diagnostic"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:274",
+          "kind": "status",
+          "time": "2026-10-23T14:34:42.245Z",
+          "text": "status"
+        }
+      ]
+    },
+    {
+      "revision": 301,
+      "truncated": false,
+      "selected": {
+        "id": "fixture-worker",
+        "runId": "c244267d-4779-497a-8351-8f351ef4d925",
+        "status": "queued",
+        "preference": {
+          "cli": "codex"
+        }
+      },
+      "timeline": [
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:1",
+          "kind": "user",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "fixture prompt"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:2",
+          "kind": "status",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:3",
+          "kind": "status",
+          "time": "2026-10-23T14:34:12.677Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:assistant:0",
+          "kind": "assistant",
+          "time": "2026-10-23T14:34:21.358Z",
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:273",
+          "kind": "diagnostic",
+          "time": "2026-10-23T14:34:42.243Z",
+          "text": "diagnostic"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:274",
+          "kind": "status",
+          "time": "2026-10-23T14:34:42.245Z",
+          "text": "status"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:event:275",
+          "kind": "user",
+          "time": "2026-10-23T14:35:09.084Z",
+          "text": "fixture prompt"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:event:276",
+          "kind": "status",
+          "time": "2026-10-23T14:35:09.085Z",
+          "text": "status"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:event:277",
+          "kind": "status",
+          "time": "2026-10-23T14:35:13.363Z",
+          "text": "status"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:assistant:0",
+          "kind": "assistant",
+          "time": "2026-10-23T14:35:24.775Z",
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      ]
+    },
+    {
+      "revision": 351,
+      "truncated": false,
+      "selected": {
+        "id": "fixture-worker",
+        "runId": "c244267d-4779-497a-8351-8f351ef4d925",
+        "status": "queued",
+        "preference": {
+          "cli": "codex"
+        }
+      },
+      "timeline": [
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:1",
+          "kind": "user",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "fixture prompt"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:2",
+          "kind": "status",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:3",
+          "kind": "status",
+          "time": "2026-10-23T14:34:12.677Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:assistant:0",
+          "kind": "assistant",
+          "time": "2026-10-23T14:34:21.358Z",
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:273",
+          "kind": "diagnostic",
+          "time": "2026-10-23T14:34:42.243Z",
+          "text": "diagnostic"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:274",
+          "kind": "status",
+          "time": "2026-10-23T14:34:42.245Z",
+          "text": "status"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:event:275",
+          "kind": "user",
+          "time": "2026-10-23T14:35:09.084Z",
+          "text": "fixture prompt"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:event:276",
+          "kind": "status",
+          "time": "2026-10-23T14:35:09.085Z",
+          "text": "status"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:event:277",
+          "kind": "status",
+          "time": "2026-10-23T14:35:13.363Z",
+          "text": "status"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:assistant:0",
+          "kind": "assistant",
+          "time": "2026-10-23T14:35:24.775Z",
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      ]
+    },
+    {
+      "revision": 401,
+      "truncated": false,
+      "selected": {
+        "id": "fixture-worker",
+        "runId": "c244267d-4779-497a-8351-8f351ef4d925",
+        "status": "queued",
+        "preference": {
+          "cli": "codex"
+        }
+      },
+      "timeline": [
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:1",
+          "kind": "user",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "fixture prompt"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:2",
+          "kind": "status",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:3",
+          "kind": "status",
+          "time": "2026-10-23T14:34:12.677Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:assistant:0",
+          "kind": "assistant",
+          "time": "2026-10-23T14:34:21.358Z",
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:273",
+          "kind": "diagnostic",
+          "time": "2026-10-23T14:34:42.243Z",
+          "text": "diagnostic"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:274",
+          "kind": "status",
+          "time": "2026-10-23T14:34:42.245Z",
+          "text": "status"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:event:275",
+          "kind": "user",
+          "time": "2026-10-23T14:35:09.084Z",
+          "text": "fixture prompt"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:event:276",
+          "kind": "status",
+          "time": "2026-10-23T14:35:09.085Z",
+          "text": "status"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:event:277",
+          "kind": "status",
+          "time": "2026-10-23T14:35:13.363Z",
+          "text": "status"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:assistant:0",
+          "kind": "assistant",
+          "time": "2026-10-23T14:35:24.775Z",
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      ]
+    },
+    {
+      "revision": 451,
+      "truncated": false,
+      "selected": {
+        "id": "fixture-worker",
+        "runId": "c244267d-4779-497a-8351-8f351ef4d925",
+        "status": "queued",
+        "preference": {
+          "cli": "codex"
+        }
+      },
+      "timeline": [
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:1",
+          "kind": "user",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "fixture prompt"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:2",
+          "kind": "status",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:3",
+          "kind": "status",
+          "time": "2026-10-23T14:34:12.677Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:assistant:0",
+          "kind": "assistant",
+          "time": "2026-10-23T14:34:21.358Z",
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:273",
+          "kind": "diagnostic",
+          "time": "2026-10-23T14:34:42.243Z",
+          "text": "diagnostic"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:274",
+          "kind": "status",
+          "time": "2026-10-23T14:34:42.245Z",
+          "text": "status"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:event:275",
+          "kind": "user",
+          "time": "2026-10-23T14:35:09.084Z",
+          "text": "fixture prompt"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:event:276",
+          "kind": "status",
+          "time": "2026-10-23T14:35:09.085Z",
+          "text": "status"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:event:277",
+          "kind": "status",
+          "time": "2026-10-23T14:35:13.363Z",
+          "text": "status"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:assistant:0",
+          "kind": "assistant",
+          "time": "2026-10-23T14:35:24.775Z",
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      ]
+    },
+    {
+      "revision": 501,
+      "truncated": false,
+      "selected": {
+        "id": "fixture-worker",
+        "runId": "c244267d-4779-497a-8351-8f351ef4d925",
+        "status": "queued",
+        "preference": {
+          "cli": "codex"
+        }
+      },
+      "timeline": [
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:1",
+          "kind": "user",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "fixture prompt"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:2",
+          "kind": "status",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:3",
+          "kind": "status",
+          "time": "2026-10-23T14:34:12.677Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:assistant:0",
+          "kind": "assistant",
+          "time": "2026-10-23T14:34:21.358Z",
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:273",
+          "kind": "diagnostic",
+          "time": "2026-10-23T14:34:42.243Z",
+          "text": "diagnostic"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:274",
+          "kind": "status",
+          "time": "2026-10-23T14:34:42.245Z",
+          "text": "status"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:event:275",
+          "kind": "user",
+          "time": "2026-10-23T14:35:09.084Z",
+          "text": "fixture prompt"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:event:276",
+          "kind": "status",
+          "time": "2026-10-23T14:35:09.085Z",
+          "text": "status"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:event:277",
+          "kind": "status",
+          "time": "2026-10-23T14:35:13.363Z",
+          "text": "status"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:assistant:0",
+          "kind": "assistant",
+          "time": "2026-10-23T14:35:24.775Z",
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      ]
+    },
+    {
+      "revision": 551,
+      "truncated": false,
+      "selected": {
+        "id": "fixture-worker",
+        "runId": "c244267d-4779-497a-8351-8f351ef4d925",
+        "status": "queued",
+        "preference": {
+          "cli": "codex"
+        }
+      },
+      "timeline": [
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:1",
+          "kind": "user",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "fixture prompt"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:2",
+          "kind": "status",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:3",
+          "kind": "status",
+          "time": "2026-10-23T14:34:12.677Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:assistant:0",
+          "kind": "assistant",
+          "time": "2026-10-23T14:34:21.358Z",
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:273",
+          "kind": "diagnostic",
+          "time": "2026-10-23T14:34:42.243Z",
+          "text": "diagnostic"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:274",
+          "kind": "status",
+          "time": "2026-10-23T14:34:42.245Z",
+          "text": "status"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:event:275",
+          "kind": "user",
+          "time": "2026-10-23T14:35:09.084Z",
+          "text": "fixture prompt"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:event:276",
+          "kind": "status",
+          "time": "2026-10-23T14:35:09.085Z",
+          "text": "status"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:event:277",
+          "kind": "status",
+          "time": "2026-10-23T14:35:13.363Z",
+          "text": "status"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:assistant:0",
+          "kind": "assistant",
+          "time": "2026-10-23T14:35:24.775Z",
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      ]
+    },
+    {
+      "revision": 563,
+      "truncated": false,
+      "selected": {
+        "id": "fixture-worker",
+        "runId": "c244267d-4779-497a-8351-8f351ef4d925",
+        "status": "completed",
+        "preference": {
+          "cli": "codex"
+        }
+      },
+      "timeline": [
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:1",
+          "kind": "user",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "fixture prompt"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:2",
+          "kind": "status",
+          "time": "2026-10-23T14:34:09.019Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:3",
+          "kind": "status",
+          "time": "2026-10-23T14:34:12.677Z",
+          "text": "status"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:assistant:0",
+          "kind": "assistant",
+          "time": "2026-10-23T14:34:21.358Z",
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:273",
+          "kind": "diagnostic",
+          "time": "2026-10-23T14:34:42.243Z",
+          "text": "diagnostic"
+        },
+        {
+          "id": "fbea456a-a97c-45bb-b0ea-88aad34f821f:event:274",
+          "kind": "status",
+          "time": "2026-10-23T14:34:42.245Z",
+          "text": "status"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:event:275",
+          "kind": "user",
+          "time": "2026-10-23T14:35:09.084Z",
+          "text": "fixture prompt"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:event:276",
+          "kind": "status",
+          "time": "2026-10-23T14:35:09.085Z",
+          "text": "status"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:event:277",
+          "kind": "status",
+          "time": "2026-10-23T14:35:13.363Z",
+          "text": "status"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:assistant:0",
+          "kind": "assistant",
+          "time": "2026-10-23T14:35:24.775Z",
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:event:562",
+          "kind": "diagnostic",
+          "time": "2026-10-23T14:35:50.872Z",
+          "text": "diagnostic"
+        },
+        {
+          "id": "c244267d-4779-497a-8351-8f351ef4d925:event:563",
+          "kind": "status",
+          "time": "2026-10-23T14:35:50.874Z",
+          "text": "status"
+        }
+      ]
+    }
+  ]
+}

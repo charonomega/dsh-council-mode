@@ -1,0 +1,23 @@
+name: Check plugin
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts --legacy-peer-deps
+      - run: npm test
+      - run: npm run build
+      - run: git diff --exit-code -- client.js
+      - run: npm run check
+      - run: mkdir -p artifacts && npm pack --pack-destination artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: council-plugin
+          path: artifacts/*.tgz
