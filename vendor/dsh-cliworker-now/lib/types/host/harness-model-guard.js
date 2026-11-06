@@ -4,6 +4,12 @@ const executions = new AsyncLocalStorage();
 export function withinCliTool(runId, execute) {
     return executions.run(runId, execute);
 }
+/** Only the authorized sibling job publisher uses this boundary. Its background
+ * native conversation is a new run, not an auxiliary model call of the source tool.
+ * The calling tool keeps its attribution; each new run's tools enter their own guard. */
+export function publishSiblingOutsideTool(publish) {
+    return executions.exit(publish);
+}
 export function installHarnessModelGuard(ctx) {
     return ctx.on('llm/stream', async function* (_options, next) {
         if (executions.getStore())

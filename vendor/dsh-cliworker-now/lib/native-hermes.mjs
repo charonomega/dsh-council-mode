@@ -3,6 +3,7 @@ import { constants } from 'node:fs'
 import { lstat, open } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createToolOutcomes } from './native-tool-outcomes.mjs'
 import {
   commandPrefix,
   closeServer,
@@ -218,8 +219,20 @@ function validateIdentity(status, runID, sessionID) {
     throw new Error('Hermes 运行或会话身份不一致')
 }
 
+/** Only a native session grant; `always` would also write the permanent allowlist. */
+export const hermesSessionGrant = (event) => Array.isArray(event.choices) && event.choices.includes('session')
+/** Public summary of one Hermes approval.request (command already redacted by Hermes). */
+export function hermesApprovalRequest(event) {
+  return {
+    kind: 'command',
+    summary: (string(event.description) ? event.description : '执行危险命令').slice(0, 500),
+    ...(string(event.command) ? { detail: event.command.slice(0, 4000) } : {}),
+    allowSession: hermesSessionGrant(event),
+  }
+}
+
 export async function runNativeHermes(config, io) {
-  if (config.mode !== 'accept-edits') throw new Error('Hermes 当前原生通路不支持只读派遣')
+  if (config.mode !== 'accept-edits' || config.access === 'read-only') throw new Error('Hermes 当前原生通路不支持询问或只读派遣')
   const selection = selected(config),
     limit = httpLimits(config)
   const key = randomBytes(32).toString('hex'),
@@ -233,7 +246,7 @@ export async function runNativeHermes(config, io) {
     streamTask,
     terminal,
     permissionDenied = false,
-    toolFailed = false
+    toolOutcomes = createToolOutcomes()
   let releaseSteer, stopObserverPolling, acceptedGuidance = false
   let response = '',
     stopped = false,
@@ -361,6 +374,7 @@ export async function runNativeHermes(config, io) {
       if (event.event === 'message.delta') {
         if (typeof event.delta !== 'string') throw new Error('Hermes 文本增量无效')
         response += event.delta
+        if (event.delta.trim()) toolOutcomes.succeeded()
         assistant(event.delta)
       } else if (event.event === 'message.interim') {
         if (typeof event.text !== 'string') throw new Error('Hermes 公开进度无效')
@@ -370,19 +384,19 @@ export async function runNativeHermes(config, io) {
         if (typeof event.text !== 'string') throw new Error('Hermes 公开思考格式无效')
         if (event.text) {
           reasoningStep ??= ++toolStep
-          reasoningDetail += (reasoningDetail ? '\n' : '') + event.text
+          const delta = (reasoningDetail ? '\n' : '') + event.text
+          reasoningDetail += delta
           io.event({
             kind: 'reasoning',
             step: reasoningStep,
             text: 'Hermes 公开思考',
-            detail: reasoningDetail,
+            delta,
             state: 'RUNNING',
           })
         }
       } else if (['tool.started', 'tool.completed', 'tool.failed'].includes(event.event)) {
         assistantSegmentOpen = false
         if (!string(event.tool)) throw new Error('Hermes 工具事件缺少名称')
-        if (event.error === true || event.event === 'tool.failed') toolFailed = true
         const queue = activeTools.get(event.tool) ?? []
         let step
         if (event.event === 'tool.started') {
@@ -393,6 +407,11 @@ export async function runNativeHermes(config, io) {
           if (step === undefined) throw new Error('Hermes 工具结束事件缺少开始记录')
         }
         activeTools.set(event.tool, queue)
+        if (event.event !== 'tool.started') {
+          if (event.error === true || event.event === 'tool.failed') toolOutcomes.failed(step)
+          else toolOutcomes.succeeded()
+        }
+        const { result, output, arguments: input, ...metadata } = event
         io.event({
           kind: 'tool',
           step,
@@ -403,18 +422,25 @@ export async function runNativeHermes(config, io) {
               : event.error === true || event.event === 'tool.failed'
                 ? 'FAILED'
                 : 'COMPLETED',
-          detail: JSON.stringify(event),
+          detail: JSON.stringify(metadata),
           toolCall: { name: event.tool,
+            ...(input !== undefined ? { input } : {}),
+            ...(output !== undefined || result !== undefined ? { output: output ?? result } : {}),
             ...(typeof event.tool_call_id === 'string' ? { callId: event.tool_call_id } : {}) },
         })
       } else if (event.event === 'approval.request') {
         const requestID = event.request_id ?? event.prompt_id
         if (!string(requestID)) throw new Error('Hermes 审批请求缺少身份')
-        permissionDenied = true
-        io.event({ kind: 'diagnostic', text: 'Hermes 额外授权已拒绝', detail: JSON.stringify(event) })
+        // The run waits on this request; the Host decides from the DSH preset and user.
+        const answer = await io.approval(hermesApprovalRequest(event))
+        const choice = answer.decision === 'deny' ? 'deny' : answer.decision === 'allow-session' && hermesSessionGrant(event) ? 'session' : 'once'
+        if (choice === 'deny') {
+          permissionDenied = true
+          io.event({ kind: 'diagnostic', text: 'Hermes 额外授权已拒绝', detail: JSON.stringify(event) })
+        } else io.event({ kind: 'diagnostic', text: 'Hermes 额外授权已批准' })
         await request(`/v1/runs/${encodeURIComponent(runID)}/approval`, 'POST', {
           request_id: requestID,
-          choice: 'deny',
+          choice,
           ...(Number.isSafeInteger(event.execution_generation)
             ? { execution_generation: event.execution_generation }
             : {}),
@@ -456,11 +482,9 @@ export async function runNativeHermes(config, io) {
       throw new Error('Hermes 实际执行模型与明确选型不一致')
     if (typeof final.output !== 'string') throw new Error('Hermes 运行结果缺失')
     if ([...activeTools.values()].some((queue) => queue.length)) throw new Error('Hermes 工具缺少完成事件')
-    if (permissionDenied || toolFailed)
-      throw new Error(permissionDenied ? 'Hermes 额外授权已拒绝' : 'Hermes 工具执行失败')
     if (!assistantSegmentOpen && final.output) assistant(final.output)
     response = final.output
-    io.result('SUCCESS', response, undefined, 'response')
+    toolOutcomes.settle(io, response, 'response', permissionDenied)
   } catch (error) {
     if (runID && !terminal) await stopRun()
     throw error

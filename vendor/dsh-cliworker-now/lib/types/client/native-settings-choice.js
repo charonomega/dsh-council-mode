@@ -1,6 +1,7 @@
 import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
 import { useEffect, useId, useRef, useState } from 'react';
 import { Button, Menu, IconChevronDownOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives';
+import { t } from "./i18n.js";
 export function NativeChoice({ label, selected, choices, disabled, onChange, placeholder, describedBy, }) {
     const [open, setOpen] = useState(false);
     const anchor = useRef(null);
@@ -38,6 +39,6 @@ export function NativeChoice({ label, selected, choices, disabled, onChange, pla
                         setOpen((old) => !old);
                     }, children: [_jsx("span", { children: choices.find((choice) => choice.id === selected)?.label ??
                                 placeholder ??
-                                (label === '默认思考强度' ? '选择强度' : '选择模型') }), _jsx(IconChevronDownOutlineRegular, { size: 14 })] }) })] }));
+                                (label === t('默认思考强度') ? t('选择强度') : t('选择模型')) }), _jsx(IconChevronDownOutlineRegular, { size: 14 })] }) })] }));
 }
 //# sourceMappingURL=native-settings-choice.js.map

@@ -5,6 +5,7 @@ import { harnessComposerBlock, retainHarnessComposerBlock } from "./harness-conv
 import { installHarnessSessionDomGuard } from "./harness-dom-guard.js";
 import { HarnessNativeTooltips } from "./harness-native-tooltip.js";
 import { useWorkers } from "./workers.js";
+import { t } from "./i18n.js";
 export function HarnessNativeSessionSupports({ bindings, conversation, forks, api, }) {
     const known = useSyncExternalStore(bindings.subscribe, bindings.getSnapshot);
     return (_jsx(_Fragment, { children: known.map((binding) => (_jsx(HarnessNativeSessionSupport, { sessionId: binding.sessionId, bindings: bindings, conversation: conversation, forks: forks, api: api }, binding.sessionId))) }));
@@ -25,7 +26,7 @@ export function HarnessNativeSessionSupport({ sessionId, bindings, conversation,
             return;
         const cut = (button) => {
             const turn = button.closest('[data-turn-tail]')?.getAttribute('data-turn-tail');
-            return turn == null ? { atMessageId: '', reason: '只能从已完成的助手轮次分支' } : forks.cut(sessionId, { turn: Number(turn) });
+            return turn == null ? { atMessageId: '', reason: t('只能从已完成的助手轮次分支') } : forks.cut(sessionId, { turn: Number(turn) });
         };
         return installHarnessSessionDomGuard(document, binding, (next) => setTargets((previous) => previous.length === next.length &&
             previous.every((target, index) => target.element === next[index]?.element && target.reason === next[index]?.reason)

@@ -1,11 +1,12 @@
 {
   "name": "dsh-cliworker-now",
-  "version": "0.8.2-council.1",
-  "description": "Council distribution of CLI Worker 0.8.2 with Codex streaming, prompt, completion and Windows PATH fixes",
+  "version": "0.8.7-council.1",
+  "description": "Council distribution of CLI Worker 0.8.7 with first-line prompt and Windows PATH fixes",
   "type": "module",
   "license": "MIT",
   "engines": {
-    "node": ">=22.19.0"
+    "node": ">=22.19.0",
+    "dsh": "0.2.2-rc.1"
   },
   "main": "./lib/index.js",
   "types": "./lib/types/host/index.d.ts",
@@ -57,14 +58,13 @@
     "zod": "4.4.3"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "4.0.4 || 4.0.5",
+    "@deepseek-ai/cordis": "4.0.4 || 4.0.5 || ~4.1.0",
     "@deepseek-ai/dsh-agent": "*",
     "@deepseek-ai/dsh-api-gateway": "*",
     "@deepseek-ai/dsh-api-remotes": "*",
     "@deepseek-ai/dsh-api-session-controller": "*",
     "@deepseek-ai/dsh-brand": "*",
     "@deepseek-ai/dsh-client-locale": "*",
-    "@deepseek-ai/dsh-client-store": "*",
     "@deepseek-ai/dsh-client-ui-conversation": "*",
     "@deepseek-ai/dsh-client-ui-primitives": "*",
     "@deepseek-ai/dsh-client-ui-renderer": "*",

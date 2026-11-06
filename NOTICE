@@ -2,11 +2,12 @@
 
 ## Included CLI Worker distribution
 
-`vendor/dsh-cliworker-now` contains the complete MIT-licensed CLI Worker 0.8.2
-runtime by SuperWheel, redistributed as 0.8.2-council.1 with local fixes.
+The complete bundle includes `vendor/dsh-cliworker-now`, the MIT-licensed
+CLI Worker 0.8.7 runtime by SuperWheel, redistributed as 0.8.7-council.1
+with local fixes. The council-only variant uses a separately installed CLI Worker.
 Original copyright notices and LICENSE files, including those for the bundled
 DeepSeek Harness native UI modules, are retained in their original directories.
-See docs/cliworker-changes.md and patches/cliworker-0.8.2-council.patch for changes.
+See docs/cliworker-changes.md and patches/cliworker-0.8.7-council.patch for changes.
 This distribution is maintained by charonomega and is not an upstream release.
 
 ## CLI brand marks

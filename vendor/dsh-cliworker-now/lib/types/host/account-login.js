@@ -17,9 +17,9 @@ const providerNames = {
     'zai-coding-plan': 'Z.AI',
     zhipu: '智谱',
     zhipuai: '智谱',
-    'zai-coding-cn': 'zai.cn',
-    'zhipu-coding-plan': 'zai.cn',
-    'zhipuai-coding-plan': 'zai.cn',
+    'zai-coding-cn': '智谱 BigModel Coding（中国）',
+    'zhipu-coding-plan': '智谱 BigModel Coding（中国）',
+    'zhipuai-coding-plan': '智谱 BigModel Coding（中国）',
     minimax: 'MiniMax',
     'minimax-cn': 'MiniMax',
     'minimax-coding-plan': 'MiniMax',
@@ -77,7 +77,7 @@ function endpointName(url) {
     };
     if (url.protocol === 'https:' && !url.port && !url.username && !url.password) {
         if (url.hostname === 'open.bigmodel.cn')
-            return url.pathname.startsWith('/api/coding/') ? 'zai.cn' : '智谱';
+            return url.pathname.startsWith('/api/coding/') ? '智谱 BigModel Coding（中国）' : '智谱';
         if (Object.hasOwn(names, url.hostname))
             return names[url.hostname];
     }
@@ -105,7 +105,8 @@ export function usableNativeApiKey(value) {
 export function authenticatedAccountLogins(input) {
     const seen = new Set();
     const logins = input.filter((login) => {
-        const key = JSON.stringify([login.providerLabel, login.authMethod, login.accountLabel]);
+        // Separate removable credentials stay separate rows, even with the same display.
+        const key = JSON.stringify([login.providerLabel, login.authMethod, login.accountLabel, login.id]);
         if (seen.has(key))
             return false;
         seen.add(key);

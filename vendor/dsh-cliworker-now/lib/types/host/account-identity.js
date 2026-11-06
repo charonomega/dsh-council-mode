@@ -34,6 +34,28 @@ export function localTokenExpired(value, now = Date.now()) {
     const expiry = idTokenClaims(value)?.exp;
     return typeof expiry === 'number' && Number.isFinite(expiry) && expiry * 1000 <= now;
 }
+/** Shared by the Linux token file and the macOS keychain item: both hold the same native JSON. */
+export function agyIdentityFromCredential(value) {
+    if (value.auth_method !== 'consumer' || !record(value.token))
+        return {
+            state: 'unknown',
+            verification: 'local',
+            summary: '登录格式未知，请打开账号终端',
+        };
+    const refreshable = credentialPresent(value.token.refresh_token);
+    const expiry = typeof value.token.expiry === 'string' ? Date.parse(value.token.expiry) : NaN;
+    const active = credentialPresent(value.token.access_token) && Number.isFinite(expiry) && expiry > Date.now();
+    if (!refreshable && !active)
+        return { state: 'unauthenticated', verification: 'local', summary: '本地登录已过期，请重新登录' };
+    return {
+        state: 'authenticated',
+        authMethod: 'oauth',
+        verification: 'local',
+        // AGY 1.4.x may keep only id_token_email instead of the full ID token.
+        accountLabel: accountEmail(idTokenClaims(value.id_token)?.email) ?? accountEmail(value.id_token_email),
+        summary: '已登录 Antigravity',
+    };
+}
 /**
  * This format/path is verified from the installed AGY CLI. Reading is
  * bounded and ephemeral. No credential leaves this function; ID tokens are decoded
@@ -88,24 +110,7 @@ export function localAccountIdentity(options = {}) {
             signal.throwIfAborted();
             if (!record(value))
                 throw new Error('Invalid account metadata');
-            if (value.auth_method !== 'consumer' || !record(value.token))
-                return {
-                    state: 'unknown',
-                    verification: 'local',
-                    summary: '登录格式未知，请打开账号终端',
-                };
-            const refreshable = credentialPresent(value.token.refresh_token);
-            const expiry = typeof value.token.expiry === 'string' ? Date.parse(value.token.expiry) : NaN;
-            const active = credentialPresent(value.token.access_token) && Number.isFinite(expiry) && expiry > Date.now();
-            if (!refreshable && !active)
-                return { state: 'unauthenticated', verification: 'local', summary: '本地登录已过期，请重新登录' };
-            return {
-                state: 'authenticated',
-                authMethod: 'oauth',
-                verification: 'local',
-                accountLabel: accountEmail(idTokenClaims(value.id_token)?.email),
-                summary: '已登录 Antigravity',
-            };
+            return agyIdentityFromCredential(value);
         }
         catch (error) {
             signal.throwIfAborted();

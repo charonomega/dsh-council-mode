@@ -1,4 +1,5 @@
 import { operationMessage } from "./operation-error.js";
+import { t } from "./i18n.js";
 let receiptVersion = 0;
 /** Capture before a metadata request, so an older read cannot erase a later save receipt. */
 export function preferenceReadVersion() { return receiptVersion; }
@@ -79,7 +80,7 @@ export class SettingsPreferenceSaves {
             catch (error) {
                 if (current() && slot.draft === draft)
                     this.publish(slot, { status: 'failed', saving: true, preference: draft.preference,
-                        error: `${operationMessage(error)}；离开此页或关闭设置时重试` });
+                        error: t('{error}；离开此页或关闭设置时重试', { error: operationMessage(error) }) });
             }
         }).finally(() => {
             slot.active = undefined;

@@ -5,13 +5,15 @@ import { RUNNING_MESSAGE_LABELS, } from "../shared/running-message.js";
 import { NativeChoice } from "./native-settings-choice.js";
 import { operationMessage } from "./operation-error.js";
 import { value } from "./workers.js";
+import { t, useT } from "./i18n.js";
+import { hostText } from "./operation-error.js";
 function readSettings(raw, cli) {
     const next = JSON.parse(raw);
     if (next?.cli !== cli ||
         !['steer', 'interrupt', 'queue'].includes(next.mode) ||
         typeof next.canSteer !== 'boolean' ||
         (next.mode === 'steer' && !next.canSteer))
-        throw new Error('收到不匹配的运行中发送设置，请重试');
+        throw new Error(t('收到不匹配的运行中发送设置，请重试'));
     return next;
 }
 const descriptions = {
@@ -21,11 +23,11 @@ const descriptions = {
 };
 /** Keyed by project session and CLI in the parent: late reads/writes cannot cross settings pages. */
 export function RunningMessageChoice({ api, sessionId, cli, expanded, blocked, onBusyChange, }) {
+    useT();
     const [settings, setSettings] = useState();
     const [selected, setSelected] = useState();
     const [loading, setLoading] = useState(false);
     const [saving, setSaving] = useState(false);
-    const [saved, setSaved] = useState(false);
     const [error, setError] = useState('');
     const [attempt, retry] = useState(0);
     const hintId = useId();
@@ -73,7 +75,6 @@ export function RunningMessageChoice({ api, sessionId, cli, expanded, blocked, o
         request.current = controller;
         setSelected(mode);
         setSaving(true);
-        setSaved(false);
         setError('');
         busyCallback.current(true);
         try {
@@ -81,9 +82,8 @@ export function RunningMessageChoice({ api, sessionId, cli, expanded, blocked, o
             if (controller.signal.aborted)
                 return;
             if (next.mode !== mode)
-                throw new Error('发送方式未保存，请重新选择重试');
+                throw new Error(t('发送方式未保存，请重新选择重试'));
             setSettings(next);
-            setSaved(true);
         }
         catch (error) {
             if (!controller.signal.aborted)
@@ -97,10 +97,10 @@ export function RunningMessageChoice({ api, sessionId, cli, expanded, blocked, o
             }
         }
     }
-    return (_jsxs("div", { className: "cwn-settings-form cwn-running-message-settings", children: [_jsxs("div", { className: "cwn-setting-row", children: [_jsxs("span", { className: "cwn-setting-row-text", children: [_jsx("span", { children: "\u8FD0\u884C\u4E2D\u53D1\u9001" }), _jsxs("span", { className: "cwn-setting-description", id: hintId, children: [selected ? descriptions[selected] : '选择对话运行中发送新消息的方式。', settings && !settings.canSteer ? ' 当前 CLI 不支持引导。' : ''] })] }), _jsx(NativeChoice, { label: "\u8FD0\u884C\u4E2D\u53D1\u9001", describedBy: hintId, selected: selected ?? '', placeholder: loading ? '正在读取…' : '选择发送方式', choices: [
-                            { id: 'steer', label: RUNNING_MESSAGE_LABELS.steer, disabled: !settings?.canSteer },
-                            { id: 'interrupt', label: RUNNING_MESSAGE_LABELS.interrupt },
-                            { id: 'queue', label: RUNNING_MESSAGE_LABELS.queue },
-                        ], disabled: blocked || loading || saving || !settings, onChange: (mode) => void save(mode) })] }), (loading || saving || saved || error) && (_jsxs("div", { className: "cwn-settings-save", children: [_jsxs("span", { className: "cwn-settings-feedback-slot", role: "status", children: [(loading || saving) && _jsx(StateDot, { state: "ongoing", size: 14 }), error || (loading ? '正在读取发送方式…' : saving ? '正在保存发送方式…' : '发送方式已保存')] }), error && !settings && (_jsx(Button, { type: "button", size: "sm", variant: "ghost", disabled: blocked || loading, onClick: () => retry((old) => old + 1), children: "\u91CD\u8BD5\u8BFB\u53D6\u53D1\u9001\u65B9\u5F0F" }))] }))] }));
+    return (_jsxs("div", { className: "cwn-settings-form cwn-running-message-settings", children: [_jsxs("div", { className: "cwn-setting-row", children: [_jsxs("span", { className: "cwn-setting-row-text", children: [_jsx("span", { children: t('运行中发送') }), _jsxs("span", { className: "cwn-setting-description", id: hintId, children: [selected ? t(descriptions[selected]) : t('选择对话运行中发送新消息的方式。'), settings && !settings.canSteer ? t(' 当前 CLI 不支持引导。') : ''] })] }), _jsx(NativeChoice, { label: t('运行中发送'), describedBy: hintId, selected: selected ?? '', placeholder: loading ? t('正在读取…') : t('选择发送方式'), choices: [
+                            { id: 'steer', label: hostText(RUNNING_MESSAGE_LABELS.steer), disabled: !settings?.canSteer },
+                            { id: 'interrupt', label: hostText(RUNNING_MESSAGE_LABELS.interrupt) },
+                            { id: 'queue', label: hostText(RUNNING_MESSAGE_LABELS.queue) },
+                        ], disabled: blocked || loading || saving || !settings, onChange: (mode) => void save(mode) })] }), (loading || saving || error) && (_jsxs("div", { className: "cwn-settings-save", children: [_jsxs("span", { className: "cwn-settings-feedback-slot", role: "status", children: [(loading || saving) && _jsx(StateDot, { state: "ongoing", size: 14 }), error || (loading ? t('正在读取发送方式…') : t('正在保存发送方式…'))] }), error && !settings && (_jsx(Button, { type: "button", size: "sm", variant: "ghost", disabled: blocked || loading, onClick: () => retry((old) => old + 1), children: t('重试读取发送方式') }))] }))] }));
 }
 //# sourceMappingURL=running-message-settings.js.map

@@ -1,12 +1,24 @@
 import { ToolCallRecovery } from '@deepseek-ai/dsh-session';
 import { ToolCallId, AssistantStreamAccumulator, createAssistantMessage, createToolResultMessage, createUserMessage, } from '@deepseek-ai/dsh-llm';
-import { cliOf, foldEvents, isUserInterrupted, } from "../shared/types.js";
-import { HarnessObservedTools } from "./harness-observed-tools.js";
+import { cliOf, foldEvents, isUserInterrupted, truncationNote, } from "../shared/types.js";
+import { HarnessObservedTools, observedToolInput } from "./harness-observed-tools.js";
 const terminalTool = (state) => /^(?:COMPLETED|COMPLETE|DONE|SUCCESS|FAILED|ERROR|CANCELLED|CANCELED)$/u.test(state ?? '');
 const failedTool = (state) => /^(?:FAILED|ERROR|CANCELLED|CANCELED)$/u.test(state ?? '');
 const json = (value) => JSON.stringify(value) ?? 'null';
 const textOf = (row) => (row.kind === 'reasoning' ? (row.detail ?? row.text) : row.text);
+/** DSH Chat hides notice-form context, so a CLI Worker action in this run (an
+ * automatic follow-up) shows as a completed passive tool row; it is never dispatched. */
+const noticeRow = (item) => ({
+    id: item.id,
+    kind: 'tool',
+    text: 'cliworker_auto_followup',
+    time: item.time,
+    state: 'COMPLETED',
+    toolCall: { callId: `notice:${item.id}`, name: 'cliworker_auto_followup', input: { 说明: item.text }, output: item.text },
+});
 /** One CLI run consumed once across native steps. It never calls an LLM or executes a tool. */
+/** The CLI finished its turn; an unverified result still needs the user's check, not a retry. */
+const endsNormally = (outcome) => outcome.status === 'completed' || outcome.status === 'uncertain';
 export class HarnessConversationStream {
     record;
     run;
@@ -89,12 +101,15 @@ export class HarnessConversationStream {
             this.seq = event.seq;
         }
         const initialUser = this.history.find((event) => event.kind === 'user');
-        return foldEvents(this.history, undefined, cliOf(this.deps.getWorker(this.record.parentSessionId, this.record.workerId).preference)).filter((item) => item.kind === 'assistant' ||
+        return foldEvents(this.history, undefined, cliOf(this.deps.getWorker(this.record.parentSessionId, this.record.workerId).preference))
+            .filter((item) => item.kind === 'assistant' ||
             item.kind === 'reasoning' ||
             item.kind === 'tool' ||
+            (item.kind === 'diagnostic' && item.notice === true) ||
             (item.kind === 'user' &&
                 item.id.startsWith(`${this.run.runId}:event:`) &&
-                item.id !== `${this.run.runId}:event:${initialUser?.seq}`));
+                item.id !== `${this.run.runId}:event:${initialUser?.seq}`))
+            .map((item) => (item.kind === 'diagnostic' ? noticeRow(item) : item));
     }
     notify() {
         for (const wake of this.waiters)
@@ -148,7 +163,9 @@ export class HarnessConversationStream {
             throw new Error('CLI 运行尚未完成清理');
         if (outcome.runId !== this.run.runId)
             throw new Error('CLI 运行终态身份不匹配');
-        if (outcome.status === 'completed')
+        // An unverified outcome is not a failed request: the plugin's own notice
+        // carries its 结果待核实 wording, so Harness must not add a failure card.
+        if (endsNormally(outcome))
             return { type: 'finish', reason: { kind: 'stop' } };
         if (isUserInterrupted(outcome)) {
             // rc.2 treats an aborted model finish as a failed request unless the
@@ -225,7 +242,7 @@ export class HarnessConversationStream {
                         },
                         stop: () => this.stop(),
                     });
-                    const block = this.observedTools.declare(row);
+                    const block = await this.observedTools.declare(row);
                     const previous = tools.get(identity.blockId);
                     if (previous) {
                         if (previous.index !== identity.index || previous.serialized !== json(block))
@@ -303,7 +320,7 @@ export class HarnessConversationStream {
         if (this.outcome || this.issue)
             await this.nativeInputs?.settled();
         const rows = this.rows();
-        if (rows[this.row] || !this.outcome || this.outcome.status !== 'completed' || this.issue) {
+        if (rows[this.row] || !this.outcome || !endsNormally(this.outcome) || this.issue) {
             this.continuation(agent);
             yield { type: 'finish', reason: { kind: 'stop' } };
         }
@@ -351,11 +368,12 @@ export class HarnessConversationStream {
                 // These are already executed CLI operations. A passive log entry is not
                 // a tool-call stream chunk, so AgentLoop cannot dispatch it a second time.
                 const callId = ToolCallId(`cliworker:${this.run.runId}:${first.toolCall?.callId ?? first.id}`);
+                const input = first.toolCall && observedToolInput(first.toolCall);
                 const block = {
                     type: 'tool-call',
                     id: callId,
                     name: first.toolCall?.name || first.text || 'CLI 工具',
-                    arguments: first.toolCall?.input === undefined ? '' : json(first.toolCall.input),
+                    arguments: input === undefined ? '' : json(input),
                 };
                 // Released Session v4 requires a model-advertised call before a call
                 // lifecycle. Append this observed CLI declaration directly, with a
@@ -409,11 +427,12 @@ export class HarnessConversationStream {
                             content: [
                                 {
                                     type: 'text',
-                                    text: output === undefined
+                                    // A cut preview names itself, so the main agent never mistakes it for the whole output.
+                                    text: (output === undefined
                                         ? (current.detail ?? current.text)
                                         : typeof output === 'string'
                                             ? output
-                                            : json(output),
+                                            : json(output)) + (current.truncated ? `\n\n[${truncationNote(current)}]` : ''),
                                 },
                             ],
                         }),
@@ -507,7 +526,7 @@ export class HarnessConversationStream {
             if (this.outcome || this.issue)
                 await this.nativeInputs?.settled();
             rows = this.rows();
-            if (rows[this.row] || !this.outcome || this.outcome.status !== 'completed' || this.issue) {
+            if (rows[this.row] || !this.outcome || !endsNormally(this.outcome) || this.issue) {
                 // Settle the observed public prefix before reporting a terminal error
                 // in a separate empty attempt. AgentLoop does not put error-attempt
                 // blocks on its durable surface, so combining them would lose text.

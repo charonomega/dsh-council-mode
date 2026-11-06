@@ -1,7 +1,9 @@
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import { type ContentBlock } from '@deepseek-ai/dsh-llm';
-import type { TimelineItem } from '../shared/types.ts';
+import { type TimelineItem } from '../shared/types.ts';
 import type { HarnessConversationDependencies, HarnessConversationRecord } from './harness-conversation-types.ts';
+/** Call arguments of an observed CLI tool; a command-only entry (Codex commandExecution) shows its command. */
+export declare function observedToolInput(toolCall: NonNullable<TimelineItem['toolCall']>): unknown;
 /** AgentLoop receives an existing CLI receipt; this registry cannot execute a tool. */
 export declare class HarnessObservedTools {
     private readonly agent;
@@ -27,8 +29,8 @@ export declare class HarnessObservedTools {
     });
     private receipt;
     private readReceipt;
-    declare(row: TimelineItem): Extract<ContentBlock, {
+    declare(row: TimelineItem): Promise<Extract<ContentBlock, {
         type: 'tool-call';
-    }>;
+    }>>;
     close(): void;
 }

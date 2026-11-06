@@ -1,4 +1,5 @@
 import { chmodSync, closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, writeFileSync, } from 'node:fs';
+import { isIP } from 'node:net';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { hermesHomeDirectory, validateHermesHomeDirectory } from "./hermes-adapter.js";
@@ -84,8 +85,35 @@ export function prepareHermesAccountHome(config) {
     return validateHermesHomeDirectory(own.home);
 }
 /** Native account selectors must not inherit a Host-managed overlay or secret helper. */
+/** The bare IPv6 literal for a bracketed or CIDR IPv6 NO_PROXY entry, else undefined. */
+function bareIpv6(entry) {
+    const match = /^\[([0-9A-Fa-f:.]+)\](?:[/:].*)?$/.exec(entry) ?? /^([0-9A-Fa-f:.]+)\/\d+$/.exec(entry);
+    return match && isIP(match[1]) === 6 ? match[1] : undefined;
+}
+/** DSH publishes `[::1]`-style NO_PROXY entries to its children. Hermes' httpx 0.28.1
+ * cannot compile a bracketed IPv6 bypass (InvalidURL "Invalid port: ':1]'"), which broke
+ * Nous login checks and renewal. Hand Hermes the bare literal, as its own sanitizer does. */
+export function hermesNoProxyEnvironment(env = process.env) {
+    const result = {};
+    // Windows environment names ignore case: both spellings are the same variable.
+    for (const key of process.platform === 'win32' ? ['NO_PROXY'] : ['NO_PROXY', 'no_proxy']) {
+        const entries = (env[key] ?? '').split(/[\s,]+/).filter(Boolean);
+        if (!entries.length || entries.includes('*'))
+            continue;
+        const rewritten = [];
+        for (const entry of entries) {
+            const value = bareIpv6(entry) ?? entry;
+            if (!rewritten.includes(value))
+                rewritten.push(value);
+        }
+        if (rewritten.join(',') !== entries.join(','))
+            result[key] = rewritten.join(',');
+    }
+    return result;
+}
 export function hermesAccountEnvironment(home) {
     return {
+        ...hermesNoProxyEnvironment(),
         HERMES_HOME: home,
         HERMES_MANAGED_DIR: join(home, '.cliworker-managed'),
         HERMES_PROFILE: '',

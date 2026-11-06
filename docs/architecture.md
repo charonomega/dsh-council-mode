@@ -1,6 +1,6 @@
 # 议会模式 / Council Mode
 
-当前分发版本：**0.3.0**，内含修复版 CLI Worker **0.8.2-council.1**。本次在 DeepSeek Harness **0.2.1-rc.5** 全新配置验证安装、8 个组件、RPC 和配置表单；安装说明见 [README](../README.md)，CLI 修复见 [修改审计](cliworker-changes.md)。
+当前分发版本为 **0.3.1**。完整包内含 CLI Worker **0.8.7-council.1**，仅议会包连接独立 CLI Worker。已声明的宿主版本为 **DSH 0.2.2-rc.1**。安装说明见 [README](../README.md)，升级边界见 [兼容性维护](compatibility.md)，CLI 修复见 [修改审计](cliworker-changes.md)。
 
 成员在同一个持久房间中直接广播、定向交流和引用回复。后台只负责验证身份、保存消息、调度成员；不运行主控模型来转述、选择发言人或总结。主控用于邀请/登记成员、接纳用户议题，以及用户明确要求的总结或任务分配。
 
@@ -61,15 +61,15 @@
 
 ## 开发与安装
 
-源码、测试和构建脚本在本目录。修改客户端后先用 DSH Node 24 执行 `scripts/build-client.mjs`，再执行 `--check client.js`、`--check index.js` 与 `--test tests/*.test.mjs`（当前 156 项）。
+源码、测试和构建脚本在本目录。修改客户端后先用 DSH Node 24 执行 `scripts/build-client.mjs`，再执行 `--check client.js`、`--check index.js` 与 `--test tests/*.test.mjs`。最终测试数量以当次发布记录为准。
 
-使用原生插件管理器从**项目外的 tgz** 安装，当前包名 `local-dsh-council-mode-0.3.0.tgz`。不要对指向开发目录的本地 bundle 执行 remove；插件管理器可能清理链接目标。升级前备份现有包，等待运行中的任务结束，安装后刷新客户端；不要直接写 DSH 配置或 CLI Worker 包。
+使用原生插件管理器从**项目外的 tgz** 安装，当前包名 `local-dsh-council-mode-0.3.1.tgz`。不要对指向开发目录的本地 bundle 执行 remove；插件管理器可能清理链接目标。升级前备份现有包，等待运行中的任务结束，安装后刷新客户端；不要直接写 DSH 配置或 CLI Worker 包。
 
 本项目代码 MIT，CLI 品牌图标出处见 [NOTICE](../NOTICE)。
 
 ## 历史修复记录
 
-下面是对应版本当时的机制和恢复命令，不覆盖上文 0.3.0 自主议会协议。
+下面是对应版本当时的机制和恢复命令，不覆盖上文自主议会协议。
 
 ## 0.1.12 重启后会话恢复修复
 

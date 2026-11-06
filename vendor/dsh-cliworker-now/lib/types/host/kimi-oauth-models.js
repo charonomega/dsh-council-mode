@@ -1,6 +1,7 @@
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { readKimiOwnToken } from "./kimi-accounts.js";
+import { hostFetch } from './host-fetch.mjs';
 const record = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
 const id = (value) => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(value);
 const BASES = new Set(['https://api.kimi.com/coding/v1', 'https://api.kimi.ai/coding/v1']);
@@ -186,7 +187,7 @@ export async function probeKimiOAuthModels(source, options = {}) {
     const control = AbortSignal.any([signal, cancel.signal, AbortSignal.timeout(options.timeoutMs ?? 8_000)]);
     const request = async (name) => {
         try {
-            const response = await (options.fetch ?? fetch)(`${source.baseUrl}/${name}`, {
+            const response = await (options.fetch ?? hostFetch)(`${source.baseUrl}/${name}`, {
                 headers: { Authorization: `Bearer ${source.credential.access}`, Accept: 'application/json' },
                 redirect: 'error',
                 signal: control,

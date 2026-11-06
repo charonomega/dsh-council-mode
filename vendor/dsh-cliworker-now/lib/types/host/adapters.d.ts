@@ -6,6 +6,7 @@ import { BridgeProtocol } from './bridge-protocol.ts';
 import { type CliId, type ModelChoice, type Preference, type TaskMode } from '../shared/types.ts';
 import { AgyProtocol, type EventInput } from './protocol.ts';
 import { CliProtocol } from './cli-protocol.ts';
+import type { NativeAccess } from './native-approval-policy.ts';
 import { type ProcessBackend, type RuntimeConfig } from './process.ts';
 export interface Catalog {
     cli: CliId;
@@ -19,8 +20,10 @@ export declare function catalogFor(cli: CliId, backend: ProcessBackend, config: 
 /** Official models --verbose prints provider/model followed by a pretty JSON object. */
 export declare function parseMimoModels(output: string): ModelChoice[];
 export declare function validatePreference(preference: Preference, catalog: Catalog): void;
-export declare function workerArguments(executable: string, project: string, preference: Preference, mode: TaskMode, prompt: string, timeoutMs: number, conversationId?: string, nativeTransport?: boolean): string[];
-export declare function protocolFor(cli: CliId, emit: (event: EventInput) => void, identify: (id: string) => void, maxLineBytes: number, expectedModel?: string): AgyProtocol | ZCodeProtocol | OpenCodeProtocol | HermesProtocol | GrokProtocol | BridgeProtocol | CliProtocol;
+export declare function workerArguments(executable: string, project: string, preference: Preference, mode: TaskMode, prompt: string, timeoutMs: number, conversationId?: string, nativeTransport?: boolean, 
+/** DSH permission tier for this run; absent keeps the historical workspace mapping. */
+access?: NativeAccess): string[];
+export declare function protocolFor(cli: CliId, emit: (event: EventInput) => void, identify: (id: string) => void, maxLineBytes: number, expectedModel?: string): AgyProtocol | OpenCodeProtocol | HermesProtocol | ZCodeProtocol | GrokProtocol | BridgeProtocol | CliProtocol;
 export declare function configuredCliExecutable(cli: CliId, config: RuntimeConfig): string | undefined;
 /** Reuse a verified location; discovery never overwrites a later manual choice. */
 export declare function resolveCliExecutable(cli: CliId, backend: ProcessBackend, config: RuntimeConfig, signal?: AbortSignal): Promise<string>;

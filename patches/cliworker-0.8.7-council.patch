@@ -1,0 +1,133 @@
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -13163,14 +13163,23 @@
+ 	signal.throwIfAborted();
+ 	const env = options.env ?? process.env, system = env.SystemRoot || env.WINDIR || "C:\\Windows";
+ 	if (!/^[a-z]:[\\/]/i.test(system) || system.includes("\0")) throw new Error("Windows 系统目录配置无效");
+-	const raw = await capture([
+-		win32.join(system, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+-		"-NoLogo",
+-		"-NoProfile",
+-		"-NonInteractive",
+-		"-EncodedCommand",
+-		Buffer.from(WINDOWS_PATH_QUERY, "utf16le").toString("base64")
+-	], options.home ?? homedir());
++	let raw;
++	try {
++		raw = await capture([
++			win32.join(system, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
++			"-NoLogo",
++			"-NoProfile",
++			"-NonInteractive",
++			"-EncodedCommand",
++			Buffer.from(WINDOWS_PATH_QUERY, "utf16le").toString("base64")
++		], options.home ?? homedir());
++	} catch (error) {
++		if (!(error instanceof ProcessCleanupUnconfirmedError)) throw error;
++		// This fixed system PATH query has not launched the requested CLI or opened its account.
++		throw Object.assign(new Error("Windows CLI 安装路径探测暂时失败，请刷新重试", { cause: error }), {
++			code: "CLI_PATH_DISCOVERY_FAILED"
++		});
++	}
+ 	signal.throwIfAborted();
+ 	if (raw.length > 131072) throw new Error("Windows PATH 探测结果过大");
+ 	const value = JSON.parse(raw.replace(/^\uFEFF/, "").trim());
+@@ -31249,6 +31258,9 @@
+ 			}
+ 			if (signal.aborted || this.controller.signal.aborted) throw new Error("账号状态查询已取消");
+ 			const code = error?.code;
++			if (code === "CLI_PATH_DISCOVERY_FAILED") return {
++				cli, installed: false, state: "unavailable", summary: error.message, actions: []
++			};
+ 			if (error instanceof WindowsCliNotFoundError) return {
+ 				cli,
+ 				installed: false,
+--- a/lib/native-codex.mjs
++++ b/lib/native-codex.mjs
+@@ -375,7 +375,7 @@
+     completion.catch(() => {})
+     const turn = await peer.request('turn/start', {
+       threadId,
+-      input: await nativeAttachmentInput('codex', `任务：\n${config.prompt}`, config.attachments, io.signal),
++      input: await nativeAttachmentInput('codex', config.prompt, config.attachments, io.signal),
+       model: config.preference.model,
+       ...(config.preference.effort !== 'default' ? { effort: config.preference.effort } : {}),
+       // Public summaries are opt-in (some models default to none). Never request raw reasoning.
+--- a/lib/types/host/accounts.js
++++ b/lib/types/host/accounts.js
+@@ -526,6 +526,8 @@
+             if (signal.aborted || this.controller.signal.aborted)
+                 throw new Error('账号状态查询已取消');
+             const code = error?.code;
++            if (code === 'CLI_PATH_DISCOVERY_FAILED')
++                return { cli, installed: false, state: 'unavailable', summary: error.message, actions: [] };
+             if (error instanceof WindowsCliNotFoundError)
+                 return { cli, installed: false, state: 'unconfigured', summary: error.message, actions: [] };
+             if (error instanceof WindowsCliInstallationError)
+--- a/lib/types/host/windows-cli-path.js
++++ b/lib/types/host/windows-cli-path.js
+@@ -1,6 +1,7 @@
+ import { lstatSync } from 'node:fs';
+ import { homedir } from 'node:os';
+ import { isAbsolute, join, sep, win32 } from 'node:path';
++import { ProcessCleanupUnconfirmedError } from './process.js';
+ /** Common installer bins only. No recursive search, arbitrary drive scan, or version selection. */
+ export function windowsCommonBinDirectories(options = {}) {
+     const env = options.env ?? process.env, home = options.home ?? homedir();
+@@ -64,8 +65,19 @@
+     const env = options.env ?? process.env, system = env.SystemRoot || env.WINDIR || 'C:\\Windows';
+     if (!/^[a-z]:[\\/]/i.test(system) || system.includes('\0'))
+         throw new Error('Windows 系统目录配置无效');
+-    const raw = await capture([win32.join(system, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+-        '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(WINDOWS_PATH_QUERY, 'utf16le').toString('base64')], options.home ?? homedir());
++    let raw;
++    try {
++        raw = await capture([win32.join(system, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
++            '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(WINDOWS_PATH_QUERY, 'utf16le').toString('base64')], options.home ?? homedir());
++    }
++    catch (error) {
++        if (!(error instanceof ProcessCleanupUnconfirmedError))
++            throw error;
++        // This fixed system PATH query has not launched the requested CLI or opened its account.
++        throw Object.assign(new Error('Windows CLI 安装路径探测暂时失败，请刷新重试', { cause: error }), {
++            code: 'CLI_PATH_DISCOVERY_FAILED',
++        });
++    }
+     signal.throwIfAborted();
+     if (raw.length > 131_072)
+         throw new Error('Windows PATH 探测结果过大');
+--- a/package.json
++++ b/package.json
+@@ -1,11 +1,12 @@
+ {
+   "name": "dsh-cliworker-now",
+-  "version": "0.8.7",
+-  "description": "Multiple agent CLI conversations in the DeepSeek Harness sidebar",
++  "version": "0.8.7-council.1",
++  "description": "Council distribution of CLI Worker 0.8.7 with first-line prompt and Windows PATH fixes",
+   "type": "module",
+   "license": "MIT",
+   "engines": {
+-    "node": ">=22.19.0"
++    "node": ">=22.19.0",
++    "dsh": "0.2.2-rc.1"
+   },
+   "main": "./lib/index.js",
+   "types": "./lib/types/host/index.d.ts",
+@@ -111,12 +112,13 @@
+   "private": false,
+   "repository": {
+     "type": "git",
+-    "url": "git+https://github.com/SuperWheel/dsh-cliworker-now.git"
++    "url": "git+https://github.com/charonomega/dsh-council-mode.git",
++    "directory": "vendor/dsh-cliworker-now"
+   },
+   "bugs": {
+-    "url": "https://github.com/SuperWheel/dsh-cliworker-now/issues"
++    "url": "https://github.com/charonomega/dsh-council-mode/issues"
+   },
+-  "homepage": "https://github.com/SuperWheel/dsh-cliworker-now#readme",
++  "homepage": "https://github.com/charonomega/dsh-council-mode#readme",
+   "publishConfig": {
+     "access": "public",
+     "registry": "https://registry.npmjs.org/"

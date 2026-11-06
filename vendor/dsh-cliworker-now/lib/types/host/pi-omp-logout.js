@@ -3,6 +3,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readPiOmpLogoutSources, safePiOmpAncestors } from "./pi-omp-native.js";
 import { projectDirectory } from "./process.js";
+import { parseAccountLoginId } from "../shared/account-links.js";
 import { ompConfigurationEnvironment } from './pi-omp-environment.mjs';
 /** No snapshot, migration or credential deletion here: only native user-operated menus. */
 export async function preparePiOmpLogout(input) {
@@ -10,8 +11,13 @@ export async function preparePiOmpLogout(input) {
     signal?.throwIfAborted();
     projectDirectory(input.project);
     const sources = await readPiOmpLogoutSources(cli, input.stateDirectory, signal ?? new AbortController().signal, { nativeHome: input.nativeHome });
-    const source = input.source
-        ? sources.find((item) => item.id === input.source)
+    // One login of the account window names its own location: `native`, or `plugin.<row>`.
+    const target = input.login ? parseAccountLoginId(input.login) : undefined;
+    if (input.login && (!target || target.cli !== cli || !target.entry))
+        throw new Error('不支持单独退出该账号');
+    const place = target?.entry?.split('.')[0] ?? input.source;
+    const source = place
+        ? sources.find((item) => item.id === place)
         : sources.length === 1
             ? sources[0]
             : undefined;
@@ -76,6 +82,7 @@ export async function preparePiOmpLogout(input) {
                 input.executable,
                 'logout',
                 auth,
+                ...(target ? [target.provider] : []),
             ];
             env.PI_OFFLINE = '1';
             env.PI_TELEMETRY = '0';

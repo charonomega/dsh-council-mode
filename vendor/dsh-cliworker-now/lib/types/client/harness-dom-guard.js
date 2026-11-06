@@ -1,3 +1,7 @@
+import { t } from "./i18n.js";
+import { hostText } from "./operation-error.js";
+/** Marks a native button whose own adjacent tooltip bubble is hidden while the plugin's reason shows. */
+export const HARNESS_REASON_TOOLTIP = 'data-cwn-reason-tooltip';
 /** Guard only one verified CLI child occurrence, never another Session or body portals. */
 export function installHarnessDomGuard(root, binding, onTargets, forks) {
     const saved = new Map();
@@ -14,6 +18,7 @@ export function installHarnessDomGuard(root, binding, onTargets, forks) {
         return undefined;
     };
     const restore = (button, previous) => {
+        button.removeAttribute(HARNESS_REASON_TOOLTIP);
         if (previous.feature !== 'attachments')
             button.disabled = previous.disabled;
         for (const [name, old] of [
@@ -47,8 +52,8 @@ export function installHarnessDomGuard(root, binding, onTargets, forks) {
                     describedBy: button.getAttribute('aria-describedby'),
                 });
             const reason = capability === 'fork'
-                ? forks ? forks.reason(button) : binding.reasons?.fork || 'CLI 子会话尚未接通原生分支，操作不可用。'
-                : `${binding.reasons?.attachments || '此 CLI 子会话尚未接通文件和图片附件'}。仍可打开此菜单调用可用指令。`;
+                ? forks ? forks.reason(button) : hostText(binding.reasons?.fork) || t('CLI 子会话尚未接通原生分支，操作不可用。')
+                : t('{reason}。仍可打开此菜单调用可用指令。', { reason: hostText(binding.reasons?.attachments) || t('此 CLI 子会话尚未接通文件和图片附件') });
             if (capability !== 'attachments') {
                 if (button.disabled !== !!reason)
                     button.disabled = !!reason;
@@ -68,11 +73,17 @@ export function installHarnessDomGuard(root, binding, onTargets, forks) {
                 button.removeAttribute('title');
             else if (button.getAttribute('title') !== title)
                 button.setAttribute('title', title);
-            if (capability === 'attachments' && button.getAttribute('aria-label') !== '调用指令（附件不可用）')
-                button.setAttribute('aria-label', '调用指令（附件不可用）');
-            // An available fork keeps the native button's own tooltip.
-            if (reason)
+            if (capability === 'attachments' && button.getAttribute('aria-label') !== t('调用指令（附件不可用）'))
+                button.setAttribute('aria-label', t('调用指令（附件不可用）'));
+            // An available fork keeps the native button's own tooltip; otherwise the
+            // reason replaces it, so the two never show together.
+            if (reason) {
+                if (button.getAttribute(HARNESS_REASON_TOOLTIP) === null)
+                    button.setAttribute(HARNESS_REASON_TOOLTIP, '');
                 targets.push({ element: button, feature: capability, reason });
+            }
+            else
+                button.removeAttribute(HARNESS_REASON_TOOLTIP);
         }
         onTargets?.(targets);
     };

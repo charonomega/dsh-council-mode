@@ -3,9 +3,36 @@ import { win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isCurrentWindowsRuntime, needsWindowsHiddenLaunch, spawnWindowsHidden } from "./windows-hidden-process.js";
 import { windowsCodexBackgroundLaunch } from "./windows-codex-launch.js";
+import { decidesProxy, proxyEnvironment } from "./windows-system-proxy.js";
 const privateLauncher = fileURLToPath(new URL('./private-launch.mjs', import.meta.url));
 /** One normalization boundary for tasks, metadata and interactive account menus. */
-export function nativeProcessBackend(backend, platform = process.platform, options = {}) {
+export function nativeProcessBackend(backend, platform = process.platform, 
+/** The Windows Internet Options proxy handed to every CLI that has none of its own. */
+options = {}) {
+    const native = normalizedBackend(backend, platform, options);
+    // macOS hands CLIs the proxy through launchd's HTTP(S)_PROXY. On Windows a proxy
+    // app usually only flips the Internet Options switch, which most CLIs never read.
+    const proxy = options.systemProxy;
+    if (!proxy)
+        return native;
+    const withProxy = (spec, value) => {
+        if (!value || decidesProxy(process.env, spec.env))
+            return spec;
+        // One NO_PROXY spelling: Windows keeps only one of several case variants.
+        const own = Object.entries(spec.env ?? {}).filter(([key]) => key.toUpperCase() === 'NO_PROXY');
+        const rest = Object.entries(spec.env ?? {}).filter(([key]) => key.toUpperCase() !== 'NO_PROXY');
+        const inherited = own.length ? Object.fromEntries(own) : process.env;
+        return { ...spec, env: { ...Object.fromEntries(rest), ...proxyEnvironment(value, inherited) } };
+    };
+    return {
+        resolveExecutable: (name) => native.resolveExecutable(name),
+        spawn: (spec) => native.spawn(withProxy(spec, proxy.current())),
+        ...(native.spawnTerminal
+            ? { spawnTerminal: async (spec) => native.spawnTerminal(withProxy(spec, await proxy.fresh())) }
+            : {}),
+    };
+}
+function normalizedBackend(backend, platform, options) {
     const normalize = (spec, background = false) => {
         const requested = nativeLaunchArgv(spec.argv, platform);
         // A known npm launcher can itself spawn a console executable with inherited

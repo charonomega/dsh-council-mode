@@ -7,6 +7,19 @@ import { cliOf } from "../shared/types.js";
 export const ACCOUNT_CHANGED = '账号已变更，请重新选择或新建任务';
 /** Private authorization state: never spread this object into a Remote response. */
 export async function authorizedCatalog(cli, backend, config, project, signal, expected) {
+    try {
+        return await authorizedCatalogOnce(cli, backend, config, project, signal, expected);
+    }
+    catch (error) {
+        // The account changed while its catalog was read: read the one signed in now,
+        // silently, unless the caller holds a specific account.
+        if (expected || !(error instanceof Error) || error.message !== ACCOUNT_CHANGED)
+            throw error;
+        signal.throwIfAborted();
+        return authorizedCatalogOnce(cli, backend, config, project, signal);
+    }
+}
+async function authorizedCatalogOnce(cli, backend, config, project, signal, expected) {
     const discover = async () => {
         const binding = await readCliAccountBinding(cli, backend, config, project, signal);
         if (expected && binding !== expected)

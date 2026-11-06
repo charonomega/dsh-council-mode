@@ -1,26 +1,27 @@
 import { jsx as _jsx, Fragment as _Fragment, jsxs as _jsxs } from "react/jsx-runtime";
+import { useDshConversation } from "./dsh-subagents.js";
 import { createElement, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Toast, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives';
-import { harnessFeatureReason, harnessPermissionReason } from "./harness-feature-support.js";
+import { Toast } from '@deepseek-ai/dsh-client-ui-primitives';
+import { harnessFeatureReason } from "./harness-feature-support.js";
+import { HarnessReasonTooltip } from "./harness-native-tooltip.js";
 import { useHarnessSessionBinding, } from "./harness-binding-registry.js";
 import { NativeCliModelDirectory } from "./native-cli-model-directory.js";
 import { useWorkers, value } from "./workers.js";
-import { active } from "../shared/types.js";
-import { workerPermissionOptions } from "../shared/worker-permissions.js";
+import { active, cliOf } from "../shared/types.js";
+import { cliLevelOptions } from "../shared/worker-permissions.js";
+import { t, useT } from "./i18n.js";
+import { hostText } from "./operation-error.js";
 const seats = {
     'conversation.input.model': { feature: 'model', label: '模型与强度' },
     'conversation.input.permission': { feature: 'permission', label: '权限' },
     'conversation.input.plan': { feature: 'plan', label: '规划模式' },
 };
-// PermissionSelect uses these public preset values to choose its native glyph
-// and narrow-container layout. Keep CLI modes at the Gateway boundary.
-const nativePermissionPreset = { plan: 'read-only', 'accept-edits': 'workspace-write' };
-function cliPermissionMode(preset) {
-    if (preset === 'read-only')
-        return 'plan';
-    if (preset === 'workspace-write')
-        return 'accept-edits';
-    return undefined;
+// PermissionSelect uses these public preset values to choose its native glyph,
+// narrow-container layout and full-access confirmation. Not `auto`: DSH would
+// relabel it 自动审查. Keep Worker levels at the Gateway boundary.
+const nativePermissionPreset = { ask: 'read-only', auto: 'workspace-write', full: 'danger-full-access' };
+function cliPermissionLevel(preset) {
+    return Object.keys(nativePermissionPreset).find((level) => nativePermissionPreset[level] === preset);
 }
 /** Native components own every menu, focus rule, confirmation and interaction. */
 function CliControl({ Native, props, binding, feature, api, unavailable, }) {
@@ -46,12 +47,12 @@ function CliControl({ Native, props, binding, feature, api, unavailable, }) {
     const inbox = props.useProjection('inbox');
     const nativeQueued = !!(inbox?.['next-turn'].length || inbox?.['next-step'].length);
     const reason = connecting || error || !worker
-        ? error || '正在读取当前 CLI 设置'
+        ? error || t('正在读取当前 CLI 设置')
         : nativeBusy || active(worker.status) || snapshot.selectedBusy
-            ? '请等待本轮结束后再修改设置'
+            ? t('请等待本轮结束后再修改设置')
             : nativeQueued || snapshot.queuedFollowups?.length
-                ? '请先发送或移除待发消息（包含已暂停消息），再修改设置'
-                : snapshot.resumeBlockedReason;
+                ? t('请先发送或移除待发消息（包含已暂停消息），再修改设置')
+                : hostText(snapshot.resumeBlockedReason);
     const locked = props.locked || !!reason || !!unavailable;
     const [directory, setDirectory] = useState();
     const initialWorker = useRef(worker);
@@ -103,27 +104,38 @@ function CliControl({ Native, props, binding, feature, api, unavailable, }) {
                 setToast(failure instanceof Error ? failure.message : String(failure));
         });
         return () => request.abort();
-    }, [api, feature, binding.parentSessionId, binding.workerId, worker?.mode, worker?.status, locked, parentAuthority]);
-    const selectPermission = async (mode) => {
+    }, [api, feature, binding.parentSessionId, binding.workerId, worker?.mode, worker?.level, worker?.status, locked, parentAuthority]);
+    /** @param setting - A level from the menu, or the plan switch (`plan` / `accept-edits`). */
+    const selectPermission = async (setting) => {
         if (locked ||
             saving.current ||
             !worker ||
             !permission?.writable ||
             !api.cliworker.configureWorkerPermission ||
-            !permission.options.some((option) => option.value === mode))
+            (setting === 'plan'
+                ? !permission.plan.supported
+                : setting !== 'accept-edits' && !permission.options.some((option) => option.value === setting)))
             return false;
         permissionRead.current?.abort();
         const request = (saving.current = new AbortController());
         const version = ++permissionVersion.current;
         setPermissionSaving(true);
         try {
-            const saved = JSON.parse(value(await api.cliworker.configureWorkerPermission(binding.parentSessionId, worker.id, mode, request.signal)));
+            const saved = JSON.parse(value(await api.cliworker.configureWorkerPermission(binding.parentSessionId, worker.id, setting, request.signal)));
             if (request.signal.aborted || !mounted.current)
                 return false;
             if (saved.id !== worker.id || saved.parentSessionId !== binding.parentSessionId)
-                throw new Error('收到不匹配的 Worker 设置');
+                throw new Error(t('收到不匹配的 Worker 设置'));
             if (version === permissionVersion.current)
-                setPermissionState({ authority: parentAuthority, value: { ...permission, currentValue: saved.mode } });
+                setPermissionState({
+                    authority: parentAuthority,
+                    value: {
+                        ...permission,
+                        // The Host saved this level; it runs as chosen.
+                        currentValue: setting === 'plan' || setting === 'accept-edits' ? permission.currentValue : (saved.level ?? 'full'),
+                        plan: { ...permission.plan, active: saved.mode === 'plan' },
+                    },
+                });
             return true;
         }
         catch (failure) {
@@ -152,12 +164,14 @@ function CliControl({ Native, props, binding, feature, api, unavailable, }) {
             : createElement(Native, { ...props, locked: true });
     }
     else {
-        const options = (permission?.options ?? (worker ? workerPermissionOptions(worker) : [])).map((option) => ({
+        // Until the Host answers, the control stays locked; the CLI's own levels stand in.
+        const options = (permission?.options ?? (worker ? cliLevelOptions(cliOf(worker.preference)) : [])).map((option) => ({
             ...option,
             value: nativePermissionPreset[option.value],
         }));
-        const currentMode = permission?.currentValue ?? worker?.mode;
-        const currentValue = currentMode && nativePermissionPreset[currentMode];
+        const currentLevel = permission?.currentValue ?? worker?.level;
+        const currentValue = currentLevel && nativePermissionPreset[currentLevel];
+        const planActive = permission?.plan.active ?? worker?.mode === 'plan';
         const catalog = {
             value: { options, defaultOptions: options, defaultPreset: currentValue ?? 'workspace-write' },
         };
@@ -169,7 +183,7 @@ function CliControl({ Native, props, binding, feature, api, unavailable, }) {
                     ? currentValue
                         ? { currentValue }
                         : undefined
-                    : { active: currentMode === 'plan', pending: false };
+                    : { active: planActive, pending: false };
                 return selector ? selector(state) : state;
             }
             return originalProjection(key, selector);
@@ -180,14 +194,14 @@ function CliControl({ Native, props, binding, feature, api, unavailable, }) {
             useProjection,
             usePermissionCatalog: (selector) => selector ? selector(catalog) : catalog,
             select: (preset) => {
-                const mode = cliPermissionMode(preset);
-                return mode ? selectPermission(mode) : Promise.resolve(false);
+                const level = cliPermissionLevel(preset);
+                return level ? selectPermission(level) : Promise.resolve(false);
             },
-            exitPlanMode: async () => (await selectPermission('accept-edits')) ? null : '权限设置未保存，请核对当前任务与权限状态',
+            exitPlanMode: async () => (await selectPermission('accept-edits')) ? null : t('权限设置未保存，请核对当前任务与权限状态'),
         });
     }
     const explanation = unavailable || reason || (feature !== 'model' ? permission?.reason : undefined);
-    return (_jsxs(_Fragment, { children: [explanation ? (_jsx(Tooltip, { label: explanation, side: "top", portal: true, children: _jsx("span", { tabIndex: 0, "aria-label": explanation, children: control }) })) : (control), toast && _jsx(Toast, { text: toast, onDone: () => setToast(undefined) })] }));
+    return (_jsxs(_Fragment, { children: [explanation ? (_jsx(HarnessReasonTooltip, { label: explanation, side: "top", children: control })) : (control), toast && _jsx(Toast, { text: toast, onDone: () => setToast(undefined) })] }));
 }
 /** Reuse each actual native leaf; only its documented business data/actions change. */
 const controlGuards = new WeakMap();
@@ -195,7 +209,7 @@ const controlGuards = new WeakMap();
 export function installHarnessControlGuards(ctx, bindings, api) {
     let held = controlGuards.get(ctx.slots);
     if (held && (held.bindings !== bindings || held.api !== api))
-        throw new Error('原生 CLI 控件已由另一组会话权限绑定接管');
+        throw new Error(t('原生 CLI 控件已由另一组会话权限绑定接管'));
     if (!held) {
         held = { bindings, api, owners: 0, release: registerHarnessControlGuards(ctx, bindings, api) };
         controlGuards.set(ctx.slots, held);
@@ -236,10 +250,14 @@ function registerHarnessControlGuards(ctx, bindings, api) {
                 const Native = next.component;
                 const { feature, label } = seats[name];
                 function BoundControl(props) {
+                    useT();
+                    const dsh = useDshConversation(props.sessionId);
                     const binding = useHarnessSessionBinding(bindings, props.sessionId);
+                    if (dsh)
+                        return null;
                     if (!binding)
                         return createElement(Native, props);
-                    const unavailable = feature === 'plan' ? harnessFeatureReason(binding, 'plan') : feature === 'permission' && harnessPermissionReason(binding);
+                    const unavailable = feature === 'plan' ? harnessFeatureReason(binding, 'plan') : undefined;
                     // Locked, but mapped to the CLI's real mode instead of the parent's preset.
                     if (unavailable && feature === 'permission' && api && binding.workerId)
                         return (_jsx(CliControl, { Native: Native, props: props, binding: binding, feature: feature, api: api, unavailable: unavailable }, `${binding.sessionId}:${binding.workerId}`));
@@ -247,11 +265,11 @@ function registerHarnessControlGuards(ctx, bindings, api) {
                     if (unavailable && feature === 'plan')
                         return null;
                     if (unavailable)
-                        return (_jsx(Tooltip, { label: unavailable, side: "top", portal: true, children: _jsx("span", { tabIndex: 0, "aria-label": unavailable, children: createElement(Native, { ...props, locked: true, select: async () => false, exitPlanMode: async () => null }) }) }));
+                        return (_jsx(HarnessReasonTooltip, { label: unavailable, side: "top", children: createElement(Native, { ...props, locked: true, select: async () => false, exitPlanMode: async () => null }) }));
                     if (api && binding.workerId)
                         return (_jsx(CliControl, { Native: Native, props: props, binding: binding, feature: feature, api: api }, `${binding.sessionId}:${binding.workerId}`));
-                    const reason = binding.reasons?.[feature] || `${label}正在等待 CLI 连接信息`;
-                    return (_jsx(Tooltip, { label: reason, side: "top", portal: true, children: _jsx("span", { tabIndex: 0, "aria-label": reason, children: createElement(Native, { ...props, locked: true }) }) }));
+                    const reason = hostText(binding.reasons?.[feature]) || t('{label}正在等待 CLI 连接信息', { label: t(label) });
+                    return (_jsx(HarnessReasonTooltip, { label: reason, side: "top", children: createElement(Native, { ...props, locked: true }) }));
                 }
                 const unregister = ctx.slots.register({
                     name,

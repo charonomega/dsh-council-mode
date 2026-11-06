@@ -73,13 +73,16 @@ async function readHistoryPage(api, sessionId, workerId, anchor) {
 /** Walk the CLI Worker history backwards from the live snapshot's oldest row. */
 async function loadOlderTimeline({ api, sessionId, workerId, state, initial, alive, update }) {
   if (typeof api?.cliworker?.history !== 'function') {
-    state.complete = true;
+    state.complete = false;
+    state.paused = true;
+    state.error = '当前 CLI Worker 版本不提供历史接口，早期消息暂不可用。';
     return;
   }
   let anchor = state.items[0]?.id ?? initial[0]?.id;
   for (let pageIndex = 0; pageIndex < 20 && anchor; pageIndex += 1) {
     if (!alive()) return;
     const page = await readHistoryPage(api, sessionId, workerId, anchor);
+    if (!alive()) return;
     if (!page) {
       state.complete = false;
       state.paused = true;
@@ -159,21 +162,25 @@ function useMemberStreams(api, sessionId, members, enabled) {
   const membersRef = React.useRef(members);
   membersRef.current = members;
   const historyRef = React.useRef(new Map());
-  const historySessionRef = React.useRef(sessionId);
+  const historySourceRef = React.useRef({ sessionId, api });
   const key = (members ?? []).map((member) => member.workerId).join('|');
 
   React.useEffect(() => {
-    if (historySessionRef.current !== sessionId) {
+    if (historySourceRef.current.sessionId !== sessionId || historySourceRef.current.api !== api) {
       historyRef.current.clear();
-      historySessionRef.current = sessionId;
+      historySourceRef.current = { sessionId, api };
       setTimelines({});
       setErrors({});
     }
     const currentIds = new Set((membersRef.current ?? []).filter((member) => member.kind !== 'subagent').map((member) => member.workerId));
-    for (const id of historyRef.current.keys()) if (!currentIds.has(id)) historyRef.current.delete(id);
+    // Each effect owns its loading state. A disposed stream may still have an
+    // uncancellable history request in flight when a new API generation starts.
+    for (const [id, state] of historyRef.current) {
+      if (!currentIds.has(id)) historyRef.current.delete(id);
+      else historyRef.current.set(id, { ...state, loading: false, paused: false, error: '' });
+    }
     setTimelines((old) => Object.fromEntries(Object.entries(old).filter(([id]) => currentIds.has(id))));
     setErrors((old) => Object.fromEntries(Object.entries(old).filter(([id]) => currentIds.has(id))));
-    for (const state of historyRef.current.values()) state.paused = false;
     if (!api || !enabled || !sessionId || key === '') return undefined;
     let alive = true;
     const streams = [];
@@ -230,7 +237,7 @@ function useMemberStreams(api, sessionId, members, enabled) {
                 },
               }).finally(() => {
                 historyState.loading = false;
-                if (alive && historyState.paused) setErrors((old) => ({ ...old, [member.workerId]: '更早历史尚未加载完；点击重连继续加载。' }));
+                if (alive && historyState.paused) setErrors((old) => ({ ...old, [member.workerId]: historyState.error || '更早历史尚未加载完；点击重连继续加载。' }));
               });
             }
             setErrors((old) => {

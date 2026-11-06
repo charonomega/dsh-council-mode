@@ -2,7 +2,9 @@ import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useEffect, useRef, useState } from 'react';
 import { Glyph } from "./icons.js";
 import { Button, Tooltip, IconCheckOutlineRegular, writeClipboard, } from '@deepseek-ai/dsh-client-ui-primitives';
+import { useT } from "./i18n.js";
 export function CopyText({ text, label, iconOnly = false, }) {
+    const t = useT();
     const [feedback, setFeedback] = useState('');
     const [busy, setBusy] = useState(false);
     const timer = useRef();
@@ -18,7 +20,7 @@ export function CopyText({ text, label, iconOnly = false, }) {
             clearTimeout(timer.current);
         };
     }, []);
-    return (_jsxs("span", { className: "cwn-copy", children: [_jsx(Tooltip, { label: feedback || label, side: "bottom", portal: true, children: _jsx(Button, { type: "button", size: "sm", variant: "ghost", "aria-label": label, className: iconOnly ? 'cwn-copy-icon' : undefined, disabled: busy || !text, onClick: () => {
+    return (_jsxs("span", { className: "cwn-copy", children: [_jsx(Tooltip, { label: feedback ? t(feedback) : label, side: "bottom", portal: true, children: _jsx(Button, { type: "button", size: "sm", variant: "ghost", "aria-label": label, className: iconOnly ? 'cwn-copy-icon' : undefined, disabled: busy || !text, onClick: () => {
                         const source = text;
                         setBusy(true);
                         void (async () => {
@@ -40,6 +42,6 @@ export function CopyText({ text, label, iconOnly = false, }) {
                                 }
                             }
                         })();
-                    }, children: iconOnly ? (feedback === '已复制' ? (_jsx(IconCheckOutlineRegular, { size: 16 })) : (_jsx(Glyph, { name: "copy" }))) : feedback === '已复制' ? ('已复制') : (label) }) }), feedback && (_jsx("span", { role: "status", className: feedback === '已复制' ? 'cwn-sr-only' : 'cwn-copy-feedback', children: feedback }))] }));
+                    }, children: iconOnly ? (feedback === '已复制' ? (_jsx(IconCheckOutlineRegular, { size: 16 })) : (_jsx(Glyph, { name: "copy" }))) : feedback === '已复制' ? (t('已复制')) : (label) }) }), feedback && (_jsx("span", { role: "status", className: feedback === '已复制' ? 'cwn-sr-only' : 'cwn-copy-feedback', children: t(feedback) }))] }));
 }
 //# sourceMappingURL=copy-text.js.map

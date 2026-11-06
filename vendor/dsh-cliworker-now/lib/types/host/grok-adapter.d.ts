@@ -1,5 +1,8 @@
 import { type Effort, type ModelChoice, type TaskMode } from '../shared/types.ts';
 import type { EventInput, ProtocolResult } from './protocol.ts';
+import type { ProcessBackend } from './process.ts';
+import type { NativeHarnessConnection } from './native-harness-tools.ts';
+import type { NativeAccess } from './native-approval-policy.ts';
 export interface GrokInput {
     executable: string;
     project: string;
@@ -8,9 +11,11 @@ export interface GrokInput {
         effort: Effort;
     };
     mode: TaskMode;
+    access?: NativeAccess;
     prompt: string;
     conversationId?: string;
     stateDirectory: string;
+    harnessTools?: NativeHarnessConnection;
 }
 /** Offline help/ACP verified; subscription-dependent task execution remains unverified. */
 export declare function prepareGrok(input: GrokInput): Promise<{
@@ -21,6 +26,12 @@ export declare function discoverGrok(executable: string, capture: (argv: string[
     signal?: AbortSignal;
     home?: string;
     fetch?: typeof fetch;
+    /** Lets the installed Grok renew an expiring session before the account catalog query. */
+    renewal?: {
+        backend: ProcessBackend;
+        signal: AbortSignal;
+        graceMs?: number;
+    };
 }): Promise<ModelChoice[]>;
 /** Native streaming-json parser from installed 1.0.0 docs; no fabricated execution evidence. */
 export declare class GrokProtocol {

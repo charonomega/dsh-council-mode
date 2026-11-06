@@ -6,6 +6,6 @@
 
 不要提交会话、密钥、账号配置、安装目录或机器专属 AGENTS.md。头像脚本可用 `CLIWORKER_ASSETS` 指定上游资源目录；普通构建不需要运行它或安装 Pillow。
 
-发布时更新 package.json 与 README 的版本链接，重建并测试，将 `npm pack` 生成的 tgz 和 SHA256SUMS 上传到同版本 Release。在 DSH 原生插件页使用 GitHub tag 链接验收安装、启用和配置表单；界面加载不能代替真实讨论测试。
+发布时更新 package.json 与 README 的版本链接，重建并测试，运行 `npm run pack:release`，将完整议会包、仅议会包、独立 CLI Worker 维护包及 SHA256SUMS 上传到同版本 Release。在 DSH 原生插件页使用 GitHub tag 链接验收安装、启用和配置表单；界面加载不能代替真实讨论测试。
 
 不要把未验证的宿主或 CLI Worker 版本写为已支持，CLI Worker 已作为明确列出的第三方组件随包分发；保持其许可、修改清单和文件校验。不要打包账号或机器配置。

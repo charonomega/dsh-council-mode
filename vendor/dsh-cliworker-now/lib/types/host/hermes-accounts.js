@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accountEmail, localTokenExpired } from "./account-identity.js";
+import { accountLoginId, parseAccountLoginId } from "../shared/account-links.js";
 import { authenticatedAccountLogins, providerLogin, usableNativeApiKey } from "./account-login.js";
 import { hermesSourceSuppressed, projectHermesUnsuppressedAuth } from "./hermes-suppression.js";
 import { projectHermesNousSource } from "./hermes-nous.js";
@@ -42,6 +43,10 @@ function tokenEmail(value) {
         buffer.fill(0);
     }
 }
+/** Hermes credential_pool.py gives every entry a 6-hex `id`, the exact `auth remove` target. */
+const poolEntryLogin = (provider, entry) => record(entry) && typeof entry.id === 'string' && /^[0-9a-f]{6}$/.test(entry.id)
+    ? accountLoginId('hermes', provider, entry.id)
+    : undefined;
 /** Native shapes from auth_codex.py/auth_xai.py and NousResearch/hermes-agent@6c80c327 auth_nous.py.
  * Explicit own credentials project local login; provider declarations and unknown schemas do not.
  */
@@ -53,6 +58,9 @@ export function projectHermesIdentity(raw) {
         throw new Error('Invalid Hermes auth metadata');
     const providers = record(raw.providers) ? raw.providers : {};
     const ids = nonempty(raw.active_provider) ? [raw.active_provider] : Object.keys(providers);
+    // The selected inference provider does not sign out a saved Nous account.
+    if (record(providers.nous) && !ids.includes('nous'))
+        ids.push('nous');
     const logins = [];
     let expired = false;
     let renewable = false;
@@ -60,17 +68,21 @@ export function projectHermesIdentity(raw) {
         const state = providers[id];
         if (id === 'nous' && record(state)) {
             try {
-                const nous = projectHermesNousSource(raw);
+                const nous = projectHermesNousSource(raw, 0, { allowInactive: true });
+                const entries = record(raw.credential_pool) ? raw.credential_pool.nous : undefined;
+                const pooled = Array.isArray(entries) && entries.length === 1 ? poolEntryLogin('nous', entries[0]) : undefined;
                 logins.push({
                     ...providerLogin('nous', 'oauth'),
                     ...(nous.email ? { accountLabel: nous.email } : {}),
+                    // Nous is one identity per Hermes home, so its row signs out even before the pool holds it.
+                    id: pooled ?? accountLoginId('hermes', 'nous', 'oauth'),
                 });
             }
             catch (error) {
                 if (error instanceof Error && /过期/.test(error.message)) {
                     expired = true;
                     try {
-                        projectHermesNousSource(raw, 0, { allowExpired: true });
+                        projectHermesNousSource(raw, 0, { allowExpired: true, allowInactive: true });
                         renewable = nonempty(state.refresh_token);
                     }
                     catch {
@@ -109,9 +121,12 @@ export function projectHermesIdentity(raw) {
             continue;
         }
         const email = tokenEmail(state.tokens.id_token);
+        // `hermes auth remove <provider> <id>` removes one pooled entry; an unpooled login stays native.
+        const pooled = Array.isArray(entries) && entries.length === 1 ? poolEntryLogin(id, entries[0]) : undefined;
         logins.push({
             ...providerLogin(id === 'xai-oauth' ? 'xai' : id, 'oauth'),
             ...(email ? { accountLabel: email } : {}),
+            ...(pooled ? { id: pooled } : {}),
         });
     }
     const pools = record(raw.credential_pool) ? raw.credential_pool : {};
@@ -127,7 +142,8 @@ export function projectHermesIdentity(raw) {
                 !['manual', 'config', ...(provider === 'openrouter' ? ['manual:openrouter_pkce'] : [])].includes(String(entry.source ?? 'manual')) ||
                 !usableNativeApiKey(entry.access_token ?? entry.runtime_api_key))
                 continue;
-            logins.push(providerLogin(provider, 'api', { baseUrl: entry.base_url }));
+            const handle = poolEntryLogin(provider, entry);
+            logins.push({ ...providerLogin(provider, 'api', { baseUrl: entry.base_url }), ...(handle ? { id: handle } : {}) });
         }
     }
     if (logins.length) {
@@ -154,7 +170,11 @@ export function projectHermesIdentity(raw) {
     const api = pool.some((entry) => record(entry) &&
         entry.auth_type === 'api_key' &&
         (nonempty(entry.access_token) || nonempty(entry.runtime_api_key)));
-    if (Object.keys(providers).length || pool.length)
+    // Empty provider declarations and ambient pool fingerprints survive native removal.
+    // They are not saved account credentials (notably Copilot's gh_cli seed).
+    const hasCredentials = (state) => record(state) &&
+        [state, ...(record(state.tokens) ? [state.tokens] : [])].some((tokens) => ['access_token', 'refresh_token', 'agent_key', 'runtime_api_key', 'api_key'].some((key) => nonempty(tokens[key])));
+    if (Object.values(providers).some(hasCredentials) || pool.some(hasCredentials))
         return configured(api ? 'api' : undefined);
     return undefined;
 }
@@ -298,15 +318,39 @@ export async function readHermesAccount(config, signal) {
         await file?.close();
     }
 }
+const pluginHermesHome = (config) => resolve(config.stateDirectory ?? join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'cliworker-now'), 'accounts', 'hermes');
 export async function listHermesAccountSources(config, signal) {
     const status = await readHermesAccount(config, signal);
     if (!['authenticated', 'configured', 'unauthenticated'].includes(status.state))
         return [];
-    const plugin = resolve(config.stateDirectory ?? join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'cliworker-now'), 'accounts', 'hermes');
-    const id = effectiveHermesHome(config) === plugin ? 'plugin' : 'native';
-    return [{ id, label: id === 'plugin' ? '插件账号' : 'CLI 全局账号' }];
+    const id = effectiveHermesHome(config) === pluginHermesHome(config) ? 'plugin' : 'native';
+    return [{ id, label: id === 'plugin' ? '插件目录' : '原生目录' }];
 }
-export async function prepareHermesAccount(action, executable, project, config, signal, source) {
+/**
+ * Hermes' own Nous sign-in (`hermes model`, then Nous) also makes Nous the inference provider;
+ * `hermes auth add nous` only stores the login, and `hermes logout --provider nous` resets the
+ * provider to auto (rechecked with Hermes 2026-10-30). With no explicit provider no account's
+ * models can be listed, so after a Nous login in the plugin's account home the provider is set
+ * with Hermes' own `config set`, which also drops the previous provider's route. A provider the
+ * user chose stays theirs, and the user's own Hermes home is never changed.
+ */
+export async function selectHermesNousAfterLogin(config, executable, run, signal) {
+    signal.throwIfAborted();
+    const home = effectiveHermesHome(config);
+    if (home !== pluginHermesHome(config))
+        return false;
+    const provider = (await assertHermesOwnAccounts(home, signal)).config?.model?.provider;
+    if (nonempty(provider) && provider.trim().toLowerCase() !== 'auto')
+        return false;
+    const command = await hermesNativeCommand(executable, ['config', 'set', 'model.provider', 'nous'], signal);
+    await run([process.execPath, fileURLToPath(new URL('./private-launch.mjs', import.meta.url)), ...command], home, {
+        ...hermesAccountEnvironment(home),
+        PYTHONDONTWRITEBYTECODE: '1',
+        ELECTRON_RUN_AS_NODE: '1',
+    });
+    return true;
+}
+export async function prepareHermesAccount(action, executable, project, config, signal, source, target = {}) {
     signal.throwIfAborted();
     if (!['login', 'manage', 'logout'].includes(action))
         throw new Error('不支持的 Hermes 账号操作');
@@ -364,7 +408,17 @@ export async function prepareHermesAccount(action, executable, project, config, 
     try {
         signal.throwIfAborted();
         const temporary = privateDirectory(join(state, 'tmp'));
-        const command = await hermesNativeCommand(executable, [action === 'login' ? 'model' : 'auth'], signal);
+        // A provider or pool entry chosen in the account window; otherwise Hermes' own menus.
+        const removed = target.login ? parseAccountLoginId(target.login) : undefined;
+        const args = action === 'login' && target.provider
+            ? ['auth', 'add', target.provider, '--type', target.provider === 'nous' ? 'oauth' : 'api-key']
+            : action === 'logout' && removed?.cli === 'hermes' && removed.provider === 'nous'
+                ? // `auth remove` leaves the shared Nous login, which Hermes re-adopts on its next start.
+                    ['logout', '--provider', 'nous']
+                : action === 'logout' && removed?.cli === 'hermes' && removed.entry
+                    ? ['auth', 'remove', removed.provider, removed.entry]
+                    : [action === 'login' ? 'model' : 'auth'];
+        const command = await hermesNativeCommand(executable, args, signal);
         const argv = [
             process.execPath,
             fileURLToPath(new URL('./private-launch.mjs', import.meta.url)),

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { active } from "../shared/types.js";
 import { operationMessage } from "./operation-error.js";
 import { value } from "./workers.js";
+import { t } from "./i18n.js";
 /** Cancelling an undispatched request must not wait for an older cleanup gate. */
 async function waitForAdmission(done, signal) {
     signal.throwIfAborted();
@@ -78,8 +79,8 @@ export function useMessageSubmissions(api, sessionId, snapshot, restoreDraft) {
                 message.mode === 'steer' &&
                 current.selected.runId !== message.originalRunId) {
                 message.runEnded = true;
-                if (message.uncertain && !message.error?.startsWith('原轮已结束'))
-                    message.error = `原轮已结束，引导结果仍待核查；不会转发到新轮。${message.error ?? ''}`;
+                if (message.uncertain && !message.error?.startsWith(t('原轮已结束，引导结果仍待核查；不会转发到新轮。')))
+                    message.error = `${t('原轮已结束，引导结果仍待核查；不会转发到新轮。')}${message.error ?? ''}`;
             }
             if (message.route === 'interrupt') {
                 const event = current.timeline.find((item) => item.kind === 'user' && item.queuedFollowupId === message.id && item.deliveryState);
@@ -100,7 +101,7 @@ export function useMessageSubmissions(api, sessionId, snapshot, restoreDraft) {
                     message.confirmed = false;
                     message.uncertain = true;
                     message.deliveryState = 'failed';
-                    message.error = '插队结果待确认，较早记录已不在当前窗口。请核对历史记录或停止后确认。';
+                    message.error = t('插队结果待确认，较早记录已不在当前窗口。请核对历史记录或停止后确认。');
                     message.admissionSettled = true;
                     message.releaseAdmission?.();
                 }
@@ -219,7 +220,7 @@ export function useMessageSubmissions(api, sessionId, snapshot, restoreDraft) {
                 if (receipt.messageId !== id ||
                     !Number.isSafeInteger(receipt.revision) ||
                     !['pending', 'admitted', 'running', 'superseded', 'cancelled', 'failed', 'completed'].includes(receipt.state))
-                    throw new Error('插队回执无法核对，请停止后确认消息状态');
+                    throw new Error(t('插队回执无法核对，请停止后确认消息状态'));
                 message.priorityRevision = receipt.revision;
                 if (!message.superseded && !message.stopped && !message.confirmed) {
                     applyPriorityState(message, receipt.state);
@@ -237,7 +238,7 @@ export function useMessageSubmissions(api, sessionId, snapshot, restoreDraft) {
                     message.state = 'failed';
                     message.uncertain = !rejectedByHost && !message.controller.signal.aborted;
                     message.error = message.uncertain
-                        ? `发送结果待确认，请停止后重试或核对记录。${operationMessage(error)}`
+                        ? `${t('发送结果待确认，请停止后重试或核对记录。')}${operationMessage(error)}`
                         : operationMessage(error);
                     message.deliveryState = message.controller.signal.aborted ? 'cancelled' : 'failed';
                     if (message.controller.signal.aborted)
@@ -325,7 +326,7 @@ export function useMessageSubmissions(api, sessionId, snapshot, restoreDraft) {
                     }
                     if (predecessor.state !== 'accepted' &&
                         (!predecessor.confirmed || ['failed', 'cancelled'].includes(predecessor.state)))
-                        throw new Error('前一条消息尚未成功发送，请确认后重试');
+                        throw new Error(t('前一条消息尚未成功发送，请确认后重试'));
                 }
                 if (message.redirected)
                     return;
@@ -351,7 +352,7 @@ export function useMessageSubmissions(api, sessionId, snapshot, restoreDraft) {
                     return;
                 const raw = value(response);
                 if (typeof raw !== 'string')
-                    throw new Error('发送回执无法核对，请停止后确认消息状态');
+                    throw new Error(t('发送回执无法核对，请停止后确认消息状态'));
                 const receipt = JSON.parse(raw);
                 if (receipt.runId)
                     message.acceptedRunId = receipt.runId;
@@ -370,7 +371,7 @@ export function useMessageSubmissions(api, sessionId, snapshot, restoreDraft) {
                     reconcile(received);
                 if (message.confirmed)
                     message.state = 'accepted';
-                else if (message.controller.signal.aborted && !/清理|cleanup/i.test(operationMessage(error))) {
+                else if (message.controller.signal.aborted && !/清理|clean ?up/i.test(operationMessage(error))) {
                     message.state = 'cancelled';
                     if (!records.current.some((item) => item.worker.id === worker.id && item.sequence > message.sequence))
                         restore.current(worker.id, prompt);
@@ -379,7 +380,7 @@ export function useMessageSubmissions(api, sessionId, snapshot, restoreDraft) {
                     message.state = 'failed';
                     message.uncertain = attempted && !rejectedByHost;
                     message.error = message.uncertain
-                        ? `发送结果待确认，请停止后重试或核对记录。${operationMessage(error)}`
+                        ? `${t('发送结果待确认，请停止后重试或核对记录。')}${operationMessage(error)}`
                         : operationMessage(error);
                     if (!message.uncertain &&
                         !records.current.some((item) => item.worker.id === worker.id && item.sequence > message.sequence))
@@ -436,7 +437,16 @@ export function useMessageSubmissions(api, sessionId, snapshot, restoreDraft) {
                 if (receipt.accepted !== true ||
                     receipt.requestId !== message.id ||
                     receipt.runId !== message.originalRunId)
-                    throw new Error('引导回执无法核对，请停止后确认消息状态');
+                    throw new Error(t('引导回执无法核对，请停止后确认消息状态'));
+                if (receipt.queued?.id === message.id) {
+                    // The account changed during this run: the Host queued it for the next turn,
+                    // where it appears with the other queued messages instead of as a steer.
+                    discard(message);
+                    const current = snapshots.current.get(worker.id);
+                    if (current)
+                        reconcile(current);
+                    return;
+                }
                 message.acceptedRunId = receipt.runId;
                 if (Number.isSafeInteger(receipt.revision))
                     message.receiptRevision = receipt.revision;
@@ -459,10 +469,10 @@ export function useMessageSubmissions(api, sessionId, snapshot, restoreDraft) {
                     message.state = 'failed';
                     message.uncertain = attempted && !rejectedByHost;
                     message.error = message.uncertain
-                        ? `发送结果待确认，请停止后重试或核对记录。${operationMessage(error)}`
+                        ? `${t('发送结果待确认，请停止后重试或核对记录。')}${operationMessage(error)}`
                         : operationMessage(error);
                     if (message.runEnded && message.uncertain)
-                        message.error = `原轮已结束，引导结果仍待核查；不会转发到新轮。${operationMessage(error)}`;
+                        message.error = `${t('原轮已结束，引导结果仍待核查；不会转发到新轮。')}${operationMessage(error)}`;
                 }
                 if (!message.confirmed &&
                     !message.runEnded &&
@@ -487,10 +497,10 @@ export function useMessageSubmissions(api, sessionId, snapshot, restoreDraft) {
             if (message.route === 'interrupt') {
                 applyPriorityState(message, 'cancelled');
             }
-            message.controller.abort(new Error('用户已停止发送'));
+            message.controller.abort(new Error(t('用户已停止发送')));
         }
         await Promise.all(pending.map((message) => message.done));
-        const cleanupError = pending.find((message) => message.state === 'failed' && /清理|cleanup/i.test(message.error ?? ''));
+        const cleanupError = pending.find((message) => message.state === 'failed' && /清理|clean ?up/i.test(message.error ?? ''));
         if (cleanupError)
             throw new Error(cleanupError.error);
     }
@@ -511,8 +521,8 @@ export function useMessageSubmissions(api, sessionId, snapshot, restoreDraft) {
                 message.originalRunId === stoppedRunId &&
                 message.uncertain) {
                 message.runEnded = true;
-                if (!message.error?.startsWith('原轮已结束'))
-                    message.error = `原轮已结束，引导结果仍待核查；不会转发到新轮。${message.error ?? ''}`;
+                if (!message.error?.startsWith(t('原轮已结束，引导结果仍待核查；不会转发到新轮。')))
+                    message.error = `${t('原轮已结束，引导结果仍待核查；不会转发到新轮。')}${message.error ?? ''}`;
                 continue;
             }
             if (message.worker.id === workerId && message.route === 'interrupt') {

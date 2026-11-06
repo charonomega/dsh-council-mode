@@ -1,7 +1,51 @@
 import { ToolCallId } from '@deepseek-ai/dsh-llm';
+import { truncationNote } from "../shared/types.js";
 const json = (value) => JSON.stringify(value) ?? 'null';
 const terminal = (state) => /^(?:COMPLETED|COMPLETE|DONE|SUCCESS|FAILED|ERROR|CANCELLED|CANCELED)$/u.test(state ?? '');
 const failed = (state) => /^(?:FAILED|ERROR|CANCELLED|CANCELED)$/u.test(state ?? '');
+const receiptExecutors = new WeakMap();
+/**
+ * CLI receipt names arrive after model-step admission has been snapshotted.
+ * This child-owned executor admits only our live receipt definitions, whose
+ * bodies verify the exact run/call/arguments and never execute real tools.
+ * It lives with the Agent so disposing one run does not leave the next turn
+ * with an unavailable executor. The MCP bridge uses its separate pipeline.
+ */
+function receiptDefinitions(agent) {
+    let pending = receiptExecutors.get(agent);
+    if (pending)
+        return pending;
+    pending = (async () => {
+        const definitions = new Set();
+        // Legacy tools has live lookup already and no executor subpath.
+        if ('presentAs' in agent.ctx.tools)
+            return definitions;
+        const [{ ToolExecutionPipeline, executeToolBatch }, { projectToolSchema }] = await Promise.all([
+            import('@deepseek-ai/dsh-tools/pipeline'), import('@deepseek-ai/dsh-tools'),
+        ]);
+        const pipeline = new ToolExecutionPipeline(agent.ctx, {
+            get(name, scope) {
+                if (scope !== agent)
+                    return undefined;
+                const definition = agent.ctx.tools.get(name, agent);
+                return definition && definitions.has(definition) ? definition : undefined;
+            },
+        });
+        agent.ctx.tools.setExecutor({
+            describe: tools => ({ schemas: tools.map(tool => projectToolSchema(tool, false)) }),
+            execute: input => executeToolBatch(input, pipeline, () => 1),
+        });
+        return definitions;
+    })();
+    receiptExecutors.set(agent, pending);
+    return pending;
+}
+/** Call arguments of an observed CLI tool; a command-only entry (Codex commandExecution) shows its command. */
+export function observedToolInput(toolCall) {
+    if (toolCall.input !== undefined)
+        return toolCall.input;
+    return typeof toolCall.command === 'string' ? { command: toolCall.command } : undefined;
+}
 /** AgentLoop receives an existing CLI receipt; this registry cannot execute a tool. */
 export class HarnessObservedTools {
     agent;
@@ -88,21 +132,26 @@ export class HarnessObservedTools {
             if (this.source.completed() && !this.source.hasFollowing())
                 exec.concludeTurn();
         }
+        if (row.truncated)
+            return `${text}\n\n[${truncationNote(row)}]`;
         return JSON.parse(json(output));
     }
-    declare(row) {
+    async declare(row) {
         if (this.disposed || !row.response || !row.toolCall?.callId || !row.toolCall.name)
             throw new Error('CLI 工具声明缺少响应或调用身份');
         const name = row.toolCall.name;
         if (name === 'run_code' || !/^[a-zA-Z0-9_.:-]{1,128}$/u.test(name))
             throw new Error('CLI 工具名称不能安全注册为回执适配');
         const callId = ToolCallId(`cliworker:${this.runId}:${row.toolCall.callId}`);
-        const args = json(row.toolCall.input ?? {});
+        const args = json(observedToolInput(row.toolCall) ?? {});
         const previous = this.receipts.get(callId);
         if (previous && (previous.rowId !== row.id || previous.name !== name || previous.arguments !== args))
             throw new Error('CLI 工具调用身份或参数发生变化');
+        const definitions = await receiptDefinitions(this.agent);
+        if (this.disposed)
+            throw new Error('CLI 工具回执已关闭');
         if (!this.names.has(name)) {
-            const dispose = this.agent.ctx.tools.register({
+            const definition = {
                 name,
                 description: '读取已由 CLI 执行的这次调用回执，不执行工具',
                 parameters: {},
@@ -112,9 +161,11 @@ export class HarnessObservedTools {
                 },
                 execute: (_args, exec) => this.receipt(exec),
                 isConcurrencySafe: () => true,
-            });
+            };
+            const dispose = this.agent.ctx.tools.register(definition);
+            definitions.add(definition);
             this.names.add(name);
-            this.disposers.push(dispose);
+            this.disposers.push(() => { definitions.delete(definition); dispose(); });
         }
         this.receipts.set(callId, { rowId: row.id, name, arguments: args });
         return { type: 'tool-call', id: callId, name, arguments: args };

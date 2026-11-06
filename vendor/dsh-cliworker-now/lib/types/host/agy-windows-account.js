@@ -4,6 +4,7 @@ import { win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { captureCatalogMetadata } from "./adapters.js";
 import { accountEmail, localAccountIdentity, } from "./account-identity.js";
+import { macAgyAccountIdentity } from "./agy-macos-account.js";
 const accountSnapshots = new AsyncLocalStorage();
 /** Only the initial binding and model precheck may share a native projection.
  * The final binding must be read after this operation has exited its scope. */
@@ -97,6 +98,9 @@ async function readNativeWindowsAgyAccount(backend, config, signal) {
     return projectWindowsAgyAccount(raw);
 }
 export function nativeAgyAccountIdentity(backend, config, platform = process.platform) {
+    // macOS keeps the login in the keychain; only Linux still reads the token file.
+    if (platform === 'darwin')
+        return macAgyAccountIdentity(backend, config);
     if (platform !== 'win32')
         return localAccountIdentity();
     return async (cli, signal) => cli === 'antigravity' ? (await readWindowsAgyAccount(backend, config, signal)).identity : undefined;

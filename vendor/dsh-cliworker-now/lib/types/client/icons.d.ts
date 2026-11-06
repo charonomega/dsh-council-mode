@@ -1,4 +1,8 @@
 import type { CliId } from '../shared/types.ts';
+/** DSH's own monochrome mark for the native-subagent group; inverted in dark theme like other mono brands. */
+export declare function DshIcon({ size }: {
+    size?: number;
+}): import("react/jsx-runtime").JSX.Element;
 /** Transparent PNGs, bundled locally without remote asset requests. */
 export declare function BrandIcon({ cli, size, tone, }: {
     cli?: CliId;

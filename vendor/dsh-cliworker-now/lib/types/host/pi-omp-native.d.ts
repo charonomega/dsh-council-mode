@@ -1,4 +1,4 @@
-import type { AccountIdentity } from './account-identity.ts';
+import { type AccountIdentity } from './account-identity.ts';
 import type { AccountSource } from '../shared/accounts.ts';
 import type { PiOmpCli } from './pi-omp-adapter.ts';
 export interface PiOmpNativeOptions {
@@ -38,6 +38,10 @@ export declare function listPiOmpAccountSources(cli: PiOmpCli, stateDirectory: s
     id: AccountSource;
     label: string;
 }[]>;
+/** Sign-out evidence must not confuse an invalid/blocked credential with a removed one. */
+export declare function piOmpStoredLoginExists(cli: PiOmpCli, login: string, stateDirectory: string | undefined, signal: AbortSignal, options?: {
+    nativeHome?: string;
+}): Promise<boolean>;
 /** Internal binding material only. Never expose these values through public status. */
 export declare function readPiOmpAccountMaterial(cli: PiOmpCli, options?: PiOmpNativeOptions): Promise<{
     auth: any;

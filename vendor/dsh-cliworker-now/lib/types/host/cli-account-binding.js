@@ -7,15 +7,17 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { CLI_LABELS } from "../shared/types.js";
 import { captureCatalogMetadata, resolveCliExecutable } from "./adapters.js";
 import { readCodexAccount } from "./codex-account.js";
+import { accountEmail } from "./account-identity.js";
 import { assertAgyNativeAccountRoute } from "./agy-models.js";
 import { readWindowsAgyAccount } from "./agy-windows-account.js";
+import { readMacAgyCredential } from "./agy-macos-account.js";
 import { readFirstPartyModelSources } from "./first-party-models.js";
 import { KimiOAuthModelError } from "./kimi-oauth-models.js";
 import { readPiOmpAccountMaterial, safePiOmpAncestors } from "./pi-omp-native.js";
 import { readOpenCodeProfile, OPENCODE_OAUTH_UNSUPPORTED } from "./opencode-native.js";
 import { openCodeAuthDirectory } from "./opencode-adapter.js";
 import { effectiveHermesHome } from "./hermes-account-context.js";
-import { assertHermesOwnAccounts, hermesPoolEntryUnavailable } from "./hermes-models.js";
+import { assertHermesOwnAccounts, HermesAccountSourceError, hermesPoolEntryUnavailable } from "./hermes-models.js";
 import { HermesNousError, selectHermesNousSource } from "./hermes-nous.js";
 import { hermesUnsuppressedEnvironment, projectHermesUnsuppressedAuth } from "./hermes-suppression.js";
 import { readZCodeBindingMaterial, zcodeAuthDirectory } from "./zcode-adapter.js";
@@ -37,6 +39,8 @@ function sort(v) {
         : v;
 }
 /** Safe public error; neither secrets nor native paths are interpolated. */
+/** A sign-out is told as such, so a caller asks the user to sign in rather than retrying. */
+export const AGY_SIGNED_OUT = '尚未登录 Antigravity，请在「CLI Worker 设置 → Antigravity」点击「登录账号」完成登录后再继续';
 export class CliAccountBindingError extends Error {
     code = 'CLI_OWN_ACCOUNT_REQUIRED';
     constructor(cli, reason) {
@@ -193,27 +197,75 @@ async function codexStore(project, signal) {
     }
     return { root, store };
 }
+const CODEX_ROUTE_ENV = [
+    'CODEX_API_KEY',
+    'OPENAI_API_KEY',
+    'OPENAI_BASE_URL',
+    'CODEX_BASE_URL',
+    'CHATGPT_BASE_URL',
+    'CODEX_PROFILE',
+];
+const CODEX_ROUTE_LINE = /^\s*(?:["']?(?:model_provider|model_providers|openai_base_url|chatgpt_base_url|profile)["']?\s*=|\[\[?\s*(?:profiles|model_providers)(?:\.|\]|\s))/;
+async function codexConfigs(root, project, signal) {
+    const configs = [];
+    for (const path of codexConfigPaths(root, project)) {
+        const raw = await read(path, signal);
+        if (raw)
+            configs.push([path, raw]);
+    }
+    return configs;
+}
+/**
+ * Codex's own config sends it to another provider, address or profile (a relay).
+ * Inherited route variables alone are not Codex's own setting.
+ */
+async function codexCustomRoute(root, project, signal) {
+    return (await codexConfigs(root, project, signal)).some(([, raw]) => raw.split(/\r?\n/).some((line) => CODEX_ROUTE_LINE.test(line)));
+}
+/**
+ * A relay has no account the plugin can read, so its version is a digest of what
+ * Codex reads for it: the config files, route variables, the `env_key` variables and
+ * auth.json. Any change counts as an account change. Raw values never leave here.
+ */
+const codexEnvKeys = (configs) => configs.flatMap(([, raw]) => [...raw.matchAll(/^\s*env_key\s*=\s*["']([A-Za-z_][A-Za-z0-9_]*)["']/gm)].map((match) => match[1]));
+async function codexRouteVersion(root, project, signal) {
+    const configs = await codexConfigs(root, project, signal);
+    const keys = codexEnvKeys(configs);
+    const auth = await read(join(root, 'auth.json'), signal);
+    if (auth !== undefined && !object(JSON.parse(auth)))
+        throw new CliAccountBindingError('codex');
+    return hash(stable({
+        configs: configs.map(([path, raw]) => [path, hash(raw)]),
+        env: [...new Set([...CODEX_ROUTE_ENV, ...keys])]
+            .sort()
+            .map((name) => [name, text(process.env[name]) ? hash(process.env[name]) : null]),
+        auth: auth === undefined ? null : hash(auth),
+    }));
+}
+/** The version of Codex's custom route, or undefined when Codex uses its official account. */
+export async function readCodexCustomRouteVersion(project, signal) {
+    const { root } = await codexStore(project, signal);
+    return (await codexCustomRoute(root, project, signal)) ? codexRouteVersion(root, project, signal) : undefined;
+}
+/**
+ * Workers start from a scrubbed environment. A relay's `env_key` variables, named in
+ * Codex's own config, are passed on when the Host has them; nothing else is added.
+ */
+export async function codexRouteEnvironment(project, signal) {
+    const { root } = await codexStore(project, signal);
+    if (!(await codexCustomRoute(root, project, signal)))
+        return {};
+    const env = {};
+    for (const name of codexEnvKeys(await codexConfigs(root, project, signal)))
+        if (text(process.env[name]))
+            env[name] = process.env[name];
+    return env;
+}
 async function requireDefaultCodexRoute(root, project, signal) {
     // These native overrides can route model/list and execution to another account.
     // Do not infer their endpoint/provider semantics from an unrelated auth.json.
-    if ([
-        'CODEX_API_KEY',
-        'OPENAI_API_KEY',
-        'OPENAI_BASE_URL',
-        'CODEX_BASE_URL',
-        'CHATGPT_BASE_URL',
-        'CODEX_PROFILE',
-    ].some((name) => text(process.env[name])))
+    if (CODEX_ROUTE_ENV.some((name) => text(process.env[name])) || (await codexCustomRoute(root, project, signal)))
         throw new CliAccountBindingError('codex');
-    for (const path of codexConfigPaths(root, project)) {
-        const raw = await read(path, signal);
-        if (!raw)
-            continue;
-        if (raw
-            .split(/\r?\n/)
-            .some((line) => /^\s*(?:["']?(?:model_provider|model_providers|openai_base_url|chatgpt_base_url|profile)["']?\s*=|\[\[?\s*(?:profiles|model_providers)(?:\.|\]|\s))/.test(line)))
-            throw new CliAccountBindingError('codex');
-    }
 }
 /** File-backed Codex auth only. Native keyring/auto cannot use a stale auth.json for model queries. */
 export async function readCodexOwnAccountSource(project, signal) {
@@ -278,22 +330,47 @@ async function material(cli, backend, config, project, signal, selectedClaudeRou
         await assertAgyNativeAccountRoute(signal, home);
         if (process.platform === 'win32') {
             const account = await readWindowsAgyAccount(backend, config, signal);
+            if (account.identity.state === 'unconfigured')
+                throw new CliAccountBindingError(cli, AGY_SIGNED_OUT);
+            // AGY 1.4.x credentials may carry only id_token_email; bind that local email instead.
+            const principal = account.identity.state !== 'authenticated'
+                ? undefined
+                : account.principalHash
+                    ? { kind: 'oauth', subjectHash: account.principalHash }
+                    : account.identity.accountLabel
+                        ? { kind: 'oauth', email: account.identity.accountLabel.toLowerCase() }
+                        : undefined;
             return {
                 sourceIds: ['windows-credential:gemini:antigravity'],
-                entries: account.identity.state === 'authenticated' && account.principalHash
-                    ? [{ provider: 'antigravity', principal: { kind: 'oauth', subjectHash: account.principalHash } }]
-                    : [],
+                entries: principal ? [{ provider: 'antigravity', principal }] : [],
             };
         }
         const root = join(home, '.gemini');
-        const auth = await document(join(root, 'jetski-standalone-oauth-token'), signal);
+        // The macOS keychain item holds the Linux file's JSON, but agy 1.4.7 writes it
+        // with only `id_token_email`, so its principal is the email.
+        const auth = process.platform === 'darwin'
+            ? await readMacAgyCredential(backend, config, signal)
+            : await document(join(root, 'jetski-standalone-oauth-token'), signal);
+        if (!auth)
+            throw new CliAccountBindingError(cli, AGY_SIGNED_OUT);
         const principal = auth.auth_method === 'consumer' && object(auth.token)
-            ? oauthPrincipal({ ...auth.token, id_token: auth.id_token })
+            ? oauthPrincipal({ ...auth.token, id_token: auth.id_token, email: accountEmail(auth.id_token_email) })
             : undefined;
         return { sourceIds: [root], entries: principal ? [{ provider: 'antigravity', principal }] : [] };
     }
     if (cli === 'codex') {
         const { root, store } = await codexStore(project, signal);
+        // A relay set in Codex's own config: Codex runs it as configured.
+        if (await codexCustomRoute(root, project, signal))
+            return {
+                sourceIds: [root, ...(store === 'file' ? [] : [`native-store:${store}`])],
+                entries: [
+                    {
+                        provider: 'codex-custom-route',
+                        principal: { kind: 'route', version: await codexRouteVersion(root, project, signal) },
+                    },
+                ],
+            };
         if (store !== 'file') {
             await requireDefaultCodexRoute(root, project, signal);
             const executable = await resolveCliExecutable(cli, backend, config, signal);
@@ -545,6 +622,9 @@ export async function readCliAccountBinding(cli, backend, config, project, signa
             error instanceof HermesRenewalError
             || error instanceof QoderAccountError)
             throw error;
+        // Keep the binding contract (CLI_OWN_ACCOUNT_REQUIRED) with the actionable reason.
+        if (error instanceof HermesAccountSourceError)
+            throw new CliAccountBindingError(cli, error.message);
         throw new CliAccountBindingError(cli);
     }
 }

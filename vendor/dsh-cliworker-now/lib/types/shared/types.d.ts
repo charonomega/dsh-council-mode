@@ -13,9 +13,18 @@ export declare const CLI_SHORT_NAMES: Record<CliId, string>;
 export declare const cliOf: (preference: Preference) => CliId;
 export declare const effortLabel: (effort: string) => string;
 export declare const LEGACY_ACCOUNT_RECORD_NOTICE = "\u6B64\u5386\u53F2\u4EFB\u52A1\u7F3A\u5C11\u8D26\u53F7\u8BB0\u5F55\uFF0C\u8BF7\u65B0\u5EFA\u4EFB\u52A1";
+/** Timeline notes for a task continued in a new native session; an account change itself is never announced. */
+export declare const CARRYOVER_FAILED_NOTICE = "\u539F\u4F1A\u8BDD\u65E0\u6CD5\u7EED\u63A5\uFF0C\u5DF2\u5728\u65B0\u4F1A\u8BDD\u4E2D\u7EE7\u7EED";
+export declare const CARRYOVER_UNREACHABLE_NOTICE = "\u539F\u4F1A\u8BDD\u8BB0\u5F55\u4E0D\u53EF\u7528\uFF0C\u5DF2\u5728\u65B0\u4F1A\u8BDD\u4E2D\u7EE7\u7EED";
+/** Earlier builds' account-change notes: hidden or reworded when an older record is read. */
+export declare const LEGACY_ACCOUNT_NOTICES: Readonly<Record<string, string | null>>;
+export declare const CARRYOVER_FORK_REFUSED = "\u8FD9\u6761\u6D88\u606F\u65E9\u4E8E\u6539\u63A5\u5230\u65B0\u4F1A\u8BDD\uFF0C\u5F53\u524D\u4F1A\u8BDD\u4E2D\u6CA1\u6709\u5B83\u7684\u539F\u751F\u8BB0\u5F55\uFF0C\u8BF7\u4ECE\u6539\u63A5\u4E4B\u540E\u7684\u6D88\u606F\u5206\u652F";
 export type Effort = (typeof EFFORTS)[number];
 export type WorkerStatus = 'queued' | 'running' | 'stopping' | 'completed' | 'failed' | 'interrupted' | 'uncertain';
+/** The Worker's plan switch: `plan` runs the CLI in its native plan mode. */
 export type TaskMode = 'plan' | 'accept-edits';
+/** Worker permission level: first item (ask), middle, full. Capped by the parent per run. */
+export type WorkerLevel = 'ask' | 'auto' | 'full';
 export interface Preference {
     /** Missing in v0.1.x data means Antigravity. */
     cli?: CliId;
@@ -47,7 +56,14 @@ export interface RoleSnapshot {
     summary: string;
     prompt: string;
 }
+export interface WorkerInitiator {
+    kind: 'worker' | 'subagent';
+    id: string;
+    name: string;
+}
 export interface Worker {
+    /** Attribution only; never a lifecycle or permission parent. */
+    initiator?: WorkerInitiator;
     id: string;
     parentSessionId: string;
     project: string;
@@ -62,9 +78,21 @@ export interface Worker {
     role?: RoleSnapshot;
     preference: Preference;
     mode: TaskMode;
+    /** The user's chosen level; missing means full, i.e. follow the parent conversation. */
+    level?: WorkerLevel;
     conversationId?: string;
+    /** Native sessions this task left when it continued in a new session under another account. */
+    previousConversationIds?: string[];
+    /** The session rebound to the current account and not yet shown to resume under it;
+     * a later turn may still carry it over to a new session. */
+    reboundConversationId?: string;
+    /** Run in which the current session replaced the one before it; earlier runs belong to older sessions. */
+    carryoverRunId?: string;
     /** A session receipt is replaced, never added to another invocation's cumulative receipt. */
     conversationTelemetry?: ConversationTelemetryCheckpoint;
+    /** Final cumulative usage of native sessions this task left after an account change;
+     * the task's displayed session usage adds it to the current session's receipt. */
+    previousSessionUsage?: import('./telemetry.ts').TokenUsage;
     /** Last full run receipt, kept independently from session cumulative accounting. */
     lastRunUsageSnapshot?: LastRunUsageSnapshot;
     /** Last verified native window; never derived from cumulative accounting. */
@@ -89,6 +117,29 @@ export interface Worker {
     interruptionReason?: 'user';
     observedModel?: string;
     lastResult?: string;
+    /** Plugin-owned project copy this conversation runs in; see isolated-workspace.ts. */
+    isolation?: WorkerIsolation;
+    /** Why the last turn waited for the main directory instead of using a copy. */
+    isolationNotice?: string;
+    /** Set on a completed turn whose CLI recovered from failed tool steps. */
+    resultNotice?: string;
+    /** CLI authorization requests of the running turn still awaiting a DSH answer. */
+    approvalWaiting?: number;
+}
+/**
+ * `released` keeps the conversation bound to its copy path after merge or
+ * discard: native CLI sessions are tied to their working directory.
+ */
+export interface WorkerIsolation {
+    state: 'preparing' | 'ready' | 'merging' | 'conflict' | 'released';
+    path: string;
+    createdAt?: string;
+    conflicts?: {
+        path: string;
+        reason: string;
+    }[];
+    skippedLinks?: number;
+    message?: string;
 }
 export type HarnessConversationFeature = 'send' | 'queue' | 'steer' | 'stop' | 'model' | 'permission' | 'plan' | 'attachments' | 'fork' | 'forkEarlier' | 'goal' | 'feedback' | 'skills' | 'tools';
 export interface HarnessConversationBinding {
@@ -141,6 +192,14 @@ export interface WorkerEvent {
     step?: number;
     state?: string;
     detail?: string;
+    /** A running step's new output or public reasoning only; the timeline appends it. */
+    delta?: string;
+    /** Shown content was cut to the display budget; the full content stays with the CLI. */
+    truncated?: true;
+    /** Byte size of the largest cut content, when known. */
+    outputBytes?: number;
+    /** A diagnostic about an action CLI Worker itself took in this run (not CLI output); shown in the Worker conversation. */
+    notice?: true;
     toolCall?: PublicToolCall;
     response?: NativeResponseIdentity;
     /** Whether the terminal body covers all response segments or only the final response. */
@@ -169,6 +228,9 @@ export interface TimelineItem {
     time: string;
     state?: string;
     detail?: string;
+    truncated?: true;
+    outputBytes?: number;
+    notice?: true;
     toolCall?: PublicToolCall;
     queuedFollowupId?: string;
     deliveryState?: DeliveryState;
@@ -189,7 +251,26 @@ export interface QueuedFollowup {
     state: 'pending' | 'sending' | 'paused';
     pauseReason?: string;
 }
+/** Public DSH directory/projection data; never a plugin-owned Worker. */
+/** `dsh-<n>` names are reserved for DSH native subagents in the CLI Worker window. */
+export declare const DSH_AGENT_NAME: RegExp;
+export interface DshSubagent {
+    id: string;
+    parentSessionId: string;
+    name: string;
+    /** Plugin-assigned `dsh-N`, stable per main conversation; used by cliworker_followup. */
+    agentName: string;
+    createdAt: number;
+    mode: 'continuable' | 'one-shot' | 'unknown' | 'external';
+    status: 'running' | 'completed' | 'failed' | 'unknown';
+    model?: string;
+    /** Only an acknowledged interrupt followed by a settled native projection. */
+    stopped?: boolean;
+}
 export interface WorkerSnapshot {
+    showDshSubagents?: boolean;
+    /** Saved interface language; absent means follow the DSH language. */
+    language?: import('./cli-settings.ts').LanguagePreference;
     externalRequestState?: import('./native-request-state.ts').ExternalRequestState;
     /** Exact selected child turn/run totals; never added to native response usage. */
     externalTurnUsage?: import('./native-turn-usage.ts').ExternalTurnUsage;
@@ -224,6 +305,15 @@ export interface HistoryPage {
 }
 export declare const active: (status: WorkerStatus) => status is "queued" | "running" | "stopping";
 /** Fold repeated step updates without duplicating streamed text or the final response. */
+/** Binary units, matching the configured byte budgets. */
+export declare function outputSizeLabel(bytes: number): string;
+/** Source text of the truncation marker; the Client translates the same keys. */
+export declare const TRUNCATED_SIZED = "\u8F93\u51FA\u5DF2\u622A\u65AD\uFF08\u5171 {size}\uFF09\uFF0C\u5B8C\u6574\u5185\u5BB9\u89C1 CLI \u539F\u751F\u4F1A\u8BDD\u6216\u5B9E\u9645\u4EA7\u7269";
+export declare const TRUNCATED_PLAIN = "\u8F93\u51FA\u5DF2\u622A\u65AD\uFF0C\u5B8C\u6574\u5185\u5BB9\u89C1 CLI \u539F\u751F\u4F1A\u8BDD\u6216\u5B9E\u9645\u4EA7\u7269";
+export declare function truncationNote(row: {
+    truncated?: true;
+    outputBytes?: number;
+}): string;
 export declare function foldEvents(events: readonly WorkerEvent[], endedRun?: {
     runId: string;
     status: WorkerStatus;

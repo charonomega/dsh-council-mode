@@ -8,29 +8,12 @@ import { EFFORTS } from "../shared/types.js";
 import { probeAccountModels } from './account-models.mjs';
 import { readZCodeAccountApiKeys, readZCodeAccountBindings } from "./zcode-account-models.js";
 import { ZcodeResponseTracker } from './zcode-response.mjs';
-// Native ZCode uses exact tool-name sets, not globs. Deny its own delegation
-// surface and bundled browser REPL. This is not a general MCP isolation policy;
-// arbitrary MCP tool names cannot be safely represented by "mcp__*" here.
-export const ZCODE_DENIED_TOOLS = [
-    'Agent',
-    'Task',
-    'Skill',
-    'TaskOutput',
-    'TaskStop',
-    'SendMessage',
-    'ReadSessionContext',
-    'CreateWorkflow',
-    'AmendWorkflow',
-    'SaveWorkflow',
-    'EvalWorkflowSnippet',
-    'ListWorkflowRuns',
-    'GetWorkflowRun',
-    'ResumeWorkflowRun',
-    'ResolveWorkflowQuestion',
-    'ListSavedWorkflows',
-    'ListModels',
-    'mcp__node_repl__js',
-];
+import { shareNativeMemory, unshareNativeMemory, parseZcodeDeniedTools, zcodeWorkflowMode } from './cli-native-capabilities.mjs';
+// Keep only the bundled browser REPL closure (DSH permissions); native delegation
+// and skills follow native configuration, independently of the plugin task tree.
+export const ZCODE_DENIED_TOOLS = ['mcp__node_repl__js'];
+const ZCODE_SUBAGENT_TOOLS = ['Agent', 'Task', 'TaskOutput', 'TaskStop', 'SendMessage', 'ReadSessionContext'];
+const ZCODE_WORKFLOW_TOOLS = ['CreateWorkflow', 'AmendWorkflow', 'SaveWorkflow', 'EvalWorkflowSnippet', 'ListWorkflowRuns', 'GetWorkflowRun', 'ResumeWorkflowRun', 'ResolveWorkflowQuestion', 'ListSavedWorkflows', 'ListModels'];
 const record = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const nonempty = (value) => typeof value === 'string' && !!value.trim();
 /** Login and every worker share auth; sessions, logs and model choices stay isolated. */
@@ -87,6 +70,64 @@ export function zcodeEnvironment(executable, state, auth, builtin) {
         ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: builtinPath(executable, builtin),
         TMPDIR: join(state, 'tmp'),
     };
+}
+/** Handed to the bridge only; it removes the variable before starting the CLI. */
+export const ZCODE_MEMORY_ENVIRONMENT = 'CLIWORKER_ZCODE_NATIVE_MEMORY';
+const zcodeNativeBase = (options) => options.nativeHome ?? process.env.ZCODE_DATA_BASE_DIR?.trim() ?? homedir();
+/** Where the native CLI keeps its storage (ZCODE_STORAGE_DIR, else ~/.zcode). */
+function zcodeNativeStorage(options) {
+    return options.nativeHome !== undefined
+        ? join(options.nativeHome, '.zcode')
+        : process.env.ZCODE_STORAGE_DIR?.trim() || join(homedir(), '.zcode');
+}
+/** The desktop setting `memoryEnabled`; unset or unreadable counts as off, its default. */
+function zcodeNativeMemory(options) {
+    try {
+        const setting = readZCodeConfig(join(zcodeNativeBase(options), '.zcode/v2/setting.json'), true, true);
+        return record(setting) && setting.memoryEnabled === true;
+    }
+    catch {
+        return false;
+    }
+}
+/** Native user config then project configs from the nearest Git root, as ZCode's Hm/gra resolve them.
+ * Read only feature switches and exact deny names; never import provider/auth configuration. */
+function zcodeNativeTools(input) {
+    const directories = [resolve(input.project)];
+    while (!existsSync(join(directories[0], '.git'))) {
+        const parent = dirname(directories[0]);
+        if (parent === directories[0]) {
+            directories.splice(0, directories.length, resolve(input.project));
+            break;
+        }
+        directories.unshift(parent);
+    }
+    let permission = {}, features = {};
+    for (const path of [join(input.nativeHome ?? homedir(), '.zcode/cli/config.json'),
+        ...directories.flatMap(dir => [join(dir, 'zcode.json'), join(dir, '.zcode/config.json')])]) {
+        const config = readZCodeConfig(path, true, true);
+        if (!record(config))
+            continue;
+        if (record(config.permission))
+            permission = config.permission;
+        if (record(config.features))
+            features = config.features;
+    }
+    const setting = readZCodeConfig(join(zcodeNativeBase(input), '.zcode/v2/setting.json'), true, true);
+    const workflow = zcodeWorkflowMode(setting);
+    const denied = [...ZCODE_DENIED_TOOLS];
+    if (permission.disallowedTools !== undefined) {
+        if (!Array.isArray(permission.disallowedTools) || permission.disallowedTools.some(name => typeof name !== 'string'))
+            throw new Error('ZCode 原生禁用工具设置无效');
+        denied.push(...permission.disallowedTools);
+    }
+    if (features.subagent === false)
+        denied.push(...ZCODE_SUBAGENT_TOOLS);
+    if (features.skill === false)
+        denied.push('Skill');
+    if (workflow === 'disabled')
+        denied.push(...ZCODE_WORKFLOW_TOOLS);
+    return { denied: parseZcodeDeniedTools([...new Set(denied)].join(',')), workflow };
 }
 function writePersonalConfig(path, value) {
     const temporary = join(dirname(path), `.personal-${randomUUID()}.tmp`);
@@ -161,6 +202,21 @@ export async function prepareZCode(input) {
             }),
         });
     }
+    // The desktop client's own memory switch (off by default) decides; its memory
+    // directory is shared, never copied. The bridge answers the CLI's preference request.
+    const memory = zcodeNativeMemory(input);
+    const nativeTools = zcodeNativeTools(input);
+    Object.assign(env, {
+        ZCODE_DYNAMIC_WORKFLOW_MODE: nativeTools.workflow,
+        ...((input.nativeTransport || input.conversationId) ? { CLIWORKER_ZCODE_NATIVE_WORKFLOW_MODE: nativeTools.workflow } : {}),
+    });
+    const memoryPath = join(env.ZCODE_STORAGE_DIR, 'cli', 'memories');
+    if (memory)
+        await shareNativeMemory(memoryPath, join(zcodeNativeStorage(input), 'cli', 'memories'));
+    else
+        await unshareNativeMemory(memoryPath);
+    if (input.nativeTransport)
+        Object.assign(env, { [ZCODE_MEMORY_ENVIRONMENT]: memory ? '1' : '0' });
     // Preserve private provider/model overlays. Only this worker's default selection changes.
     writePersonalConfig(env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE, {
         ...personal,
@@ -174,11 +230,11 @@ export async function prepareZCode(input) {
         '--cwd',
         input.project,
         '--mode',
-        input.mode === 'plan' ? 'plan' : 'edit',
+        input.mode === 'plan' ? 'plan' : input.access === 'read-only' ? 'build' : input.access === 'danger-full-access' ? 'yolo' : 'edit',
         '--output-format',
         'stream-json',
         '--disallowedTools',
-        ZCODE_DENIED_TOOLS.join(','),
+        nativeTools.denied.join(','),
         ...(input.conversationId ? ['--resume', input.conversationId] : []),
         '--prompt',
         `任务：\n${input.prompt}`,
@@ -357,7 +413,7 @@ function readZCodeConfig(path, optional, personal = false) {
 function personalPaths(authDirectory, options = {}) {
     const explicit = options.personalConfig ??
         (options.nativeHome === undefined ? process.env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE?.trim() : undefined);
-    const nativeBase = options.nativeHome ?? process.env.ZCODE_DATA_BASE_DIR?.trim() ?? homedir();
+    const nativeBase = zcodeNativeBase(options);
     const paths = new Map([
         [resolve(explicit || join(nativeBase, '.zcode/v2/provider_config.json')), !explicit],
     ]);
@@ -842,7 +898,7 @@ export class ZCodeProtocol {
                     this.open.add(p.toolCallId);
                 if (nonempty(p.toolName))
                     this.toolNames.set(p.toolCallId, p.toolName);
-                this.emit({
+                this.responses.tool({
                     kind: 'tool',
                     step: this.step(p.toolCallId),
                     text: this.toolNames.get(p.toolCallId) ?? '工具',

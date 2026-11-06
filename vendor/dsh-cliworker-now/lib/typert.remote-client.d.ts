@@ -9,9 +9,11 @@ import type {
 declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertRemoteNamespace$636c69776f726b6572 {
     accountResize: (parentSessionId: string, accountId: string, cols: number, rows: number) => Promise<RemoteResult<boolean>>
+    accountRespond: (parentSessionId: string, accountId: string, response: string) => Promise<RemoteResult<boolean>>
     accountStart: (parentSessionId: string, cli: string, action: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     accountStartForProvider: (parentSessionId: string, cli: string, action: string, provider: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     accountStartForSource: (parentSessionId: string, cli: string, action: string, source: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
+    accountStartWith: (parentSessionId: string, cli: string, action: string, options: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     accountStatus: (parentSessionId: string, cli: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     accountStop: (parentSessionId: string, accountId: string) => Promise<RemoteResult<boolean>>
     accountWatch: (parentSessionId: string, accountId: string, signal?: AbortSignal) => RemoteStreamHandle<string, never>
@@ -31,11 +33,16 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     ensureHarnessConversation: (parentSessionId: string, workerId: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     followup: (parentSessionId: string, workerId: string, prompt: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     forkWorker: (parentSessionId: string, workerId: string, atMessageId: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
+    generalSettings: (parentSessionId: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
+    hideDshSubagent: (parentSessionId: string, childSessionId: string, signal?: AbortSignal) => Promise<RemoteResult<void>>
     history: (parentSessionId: string, workerId: string, anchor: string, direction: string) => Promise<RemoteResult<string>>
     interruptMessage: (parentSessionId: string, workerId: string, prompt: string, requestId: string, clientId: string, sequence: number, signal?: AbortSignal) => Promise<RemoteResult<string>>
     interruptQueuedFollowup: (parentSessionId: string, workerId: string, queuedId: string, expectedRunId: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
+    listDshSubagents: (parentSessionId: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     permissionForWorker: (parentSessionId: string, workerId: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
+    promptDshSubagent: (parentSessionId: string, childSessionId: string, prompt: string, requestId: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     queueFollowup: (parentSessionId: string, workerId: string, prompt: string, expectedRunId: string, requestId: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
+    recoverCliCleanup: (parentSessionId: string, cli: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     refreshCatalogForCli: (parentSessionId: string, cli: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     refreshCliExecutablePath: (parentSessionId: string, cli: string, path: string, action: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     renameWorker: (parentSessionId: string, workerId: string, name: string, signal?: AbortSignal) => Promise<RemoteResult<void>>
@@ -46,6 +53,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     retryQueuedFollowups: (parentSessionId: string, workerId: string, expectedRunId: string, signal?: AbortSignal) => Promise<RemoteResult<void>>
     rolePresets: (parentSessionId: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     runningMessageSettings: (parentSessionId: string, cli: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
+    saveGeneralSettings: (parentSessionId: string, patch: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     saveRolePreset: (parentSessionId: string, requestJSON: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     saveRunningMessageMode: (parentSessionId: string, cli: string, mode: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     sendRunningMessage: (parentSessionId: string, workerId: string, prompt: string, expectedRunId: string, requestId: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
@@ -54,14 +62,18 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     setWorkerGoalStatus: (parentSessionId: string, workerId: string, status: 'active' | 'paused', expectedRevision: number, signal?: AbortSignal) => Promise<RemoteResult<string>>
     steerMessage: (parentSessionId: string, workerId: string, prompt: string, expectedRunId: string, requestId: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     stop: (parentSessionId: string, workerId: string) => Promise<RemoteResult<string>>
+    stopDshSubagent: (parentSessionId: string, childSessionId: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     submitMessage: (parentSessionId: string, workerId: string, requestJSON: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     watch: (parentSessionId: string, workerId: string, signal?: AbortSignal) => RemoteStreamHandle<string, never>
+    watchDshSubagents: (parentSessionId: string, signal?: AbortSignal) => RemoteStreamHandle<string, never>
   }
   interface TypertRemoteMap {
     'cliworker/accountResize': (parentSessionId: string, accountId: string, cols: number, rows: number) => Promise<RemoteResult<boolean>>
+    'cliworker/accountRespond': (parentSessionId: string, accountId: string, response: string) => Promise<RemoteResult<boolean>>
     'cliworker/accountStart': (parentSessionId: string, cli: string, action: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     'cliworker/accountStartForProvider': (parentSessionId: string, cli: string, action: string, provider: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     'cliworker/accountStartForSource': (parentSessionId: string, cli: string, action: string, source: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
+    'cliworker/accountStartWith': (parentSessionId: string, cli: string, action: string, options: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     'cliworker/accountStatus': (parentSessionId: string, cli: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     'cliworker/accountStop': (parentSessionId: string, accountId: string) => Promise<RemoteResult<boolean>>
     'cliworker/accountWatch': (parentSessionId: string, accountId: string, signal?: AbortSignal) => RemoteStreamHandle<string, never>
@@ -81,11 +93,16 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'cliworker/ensureHarnessConversation': (parentSessionId: string, workerId: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     'cliworker/followup': (parentSessionId: string, workerId: string, prompt: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     'cliworker/forkWorker': (parentSessionId: string, workerId: string, atMessageId: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
+    'cliworker/generalSettings': (parentSessionId: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
+    'cliworker/hideDshSubagent': (parentSessionId: string, childSessionId: string, signal?: AbortSignal) => Promise<RemoteResult<void>>
     'cliworker/history': (parentSessionId: string, workerId: string, anchor: string, direction: string) => Promise<RemoteResult<string>>
     'cliworker/interruptMessage': (parentSessionId: string, workerId: string, prompt: string, requestId: string, clientId: string, sequence: number, signal?: AbortSignal) => Promise<RemoteResult<string>>
     'cliworker/interruptQueuedFollowup': (parentSessionId: string, workerId: string, queuedId: string, expectedRunId: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
+    'cliworker/listDshSubagents': (parentSessionId: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     'cliworker/permissionForWorker': (parentSessionId: string, workerId: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
+    'cliworker/promptDshSubagent': (parentSessionId: string, childSessionId: string, prompt: string, requestId: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     'cliworker/queueFollowup': (parentSessionId: string, workerId: string, prompt: string, expectedRunId: string, requestId: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
+    'cliworker/recoverCliCleanup': (parentSessionId: string, cli: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     'cliworker/refreshCatalogForCli': (parentSessionId: string, cli: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     'cliworker/refreshCliExecutablePath': (parentSessionId: string, cli: string, path: string, action: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     'cliworker/renameWorker': (parentSessionId: string, workerId: string, name: string, signal?: AbortSignal) => Promise<RemoteResult<void>>
@@ -96,6 +113,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'cliworker/retryQueuedFollowups': (parentSessionId: string, workerId: string, expectedRunId: string, signal?: AbortSignal) => Promise<RemoteResult<void>>
     'cliworker/rolePresets': (parentSessionId: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     'cliworker/runningMessageSettings': (parentSessionId: string, cli: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
+    'cliworker/saveGeneralSettings': (parentSessionId: string, patch: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     'cliworker/saveRolePreset': (parentSessionId: string, requestJSON: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     'cliworker/saveRunningMessageMode': (parentSessionId: string, cli: string, mode: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     'cliworker/sendRunningMessage': (parentSessionId: string, workerId: string, prompt: string, expectedRunId: string, requestId: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
@@ -104,8 +122,10 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'cliworker/setWorkerGoalStatus': (parentSessionId: string, workerId: string, status: 'active' | 'paused', expectedRevision: number, signal?: AbortSignal) => Promise<RemoteResult<string>>
     'cliworker/steerMessage': (parentSessionId: string, workerId: string, prompt: string, expectedRunId: string, requestId: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     'cliworker/stop': (parentSessionId: string, workerId: string) => Promise<RemoteResult<string>>
+    'cliworker/stopDshSubagent': (parentSessionId: string, childSessionId: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     'cliworker/submitMessage': (parentSessionId: string, workerId: string, requestJSON: string, signal?: AbortSignal) => Promise<RemoteResult<string>>
     'cliworker/watch': (parentSessionId: string, workerId: string, signal?: AbortSignal) => RemoteStreamHandle<string, never>
+    'cliworker/watchDshSubagents': (parentSessionId: string, signal?: AbortSignal) => RemoteStreamHandle<string, never>
   }
   interface TypertRemoteNamespaceMap {
     'cliworker': TypertRemoteNamespace$636c69776f726b6572
@@ -114,9 +134,11 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
 
 export declare const TYPERT_REMOTE: TypertRemoteInfo<{
   readonly 'cliworker/accountResize': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'accountId': string; readonly 'cols': number; readonly 'rows': number }, boolean>
+  readonly 'cliworker/accountRespond': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'accountId': string; readonly 'response': string }, boolean>
   readonly 'cliworker/accountStart': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'cli': string; readonly 'action': string }, string>
   readonly 'cliworker/accountStartForProvider': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'cli': string; readonly 'action': string; readonly 'provider': string }, string>
   readonly 'cliworker/accountStartForSource': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'cli': string; readonly 'action': string; readonly 'source': string }, string>
+  readonly 'cliworker/accountStartWith': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'cli': string; readonly 'action': string; readonly 'options': string }, string>
   readonly 'cliworker/accountStatus': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'cli': string }, string>
   readonly 'cliworker/accountStop': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'accountId': string }, boolean>
   readonly 'cliworker/accountWatch': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'accountId': string }, string, 'stream'>
@@ -136,11 +158,16 @@ export declare const TYPERT_REMOTE: TypertRemoteInfo<{
   readonly 'cliworker/ensureHarnessConversation': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'workerId': string }, string>
   readonly 'cliworker/followup': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'workerId': string; readonly 'prompt': string }, string>
   readonly 'cliworker/forkWorker': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'workerId': string; readonly 'atMessageId': string }, string>
+  readonly 'cliworker/generalSettings': TypertRemoteMethod<{ readonly 'parentSessionId': string }, string>
+  readonly 'cliworker/hideDshSubagent': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'childSessionId': string }, void>
   readonly 'cliworker/history': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'workerId': string; readonly 'anchor': string; readonly 'direction': string }, string>
   readonly 'cliworker/interruptMessage': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'workerId': string; readonly 'prompt': string; readonly 'requestId': string; readonly 'clientId': string; readonly 'sequence': number }, string>
   readonly 'cliworker/interruptQueuedFollowup': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'workerId': string; readonly 'queuedId': string; readonly 'expectedRunId': string }, string>
+  readonly 'cliworker/listDshSubagents': TypertRemoteMethod<{ readonly 'parentSessionId': string }, string>
   readonly 'cliworker/permissionForWorker': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'workerId': string }, string>
+  readonly 'cliworker/promptDshSubagent': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'childSessionId': string; readonly 'prompt': string; readonly 'requestId': string }, string>
   readonly 'cliworker/queueFollowup': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'workerId': string; readonly 'prompt': string; readonly 'expectedRunId': string; readonly 'requestId': string }, string>
+  readonly 'cliworker/recoverCliCleanup': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'cli': string }, string>
   readonly 'cliworker/refreshCatalogForCli': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'cli': string }, string>
   readonly 'cliworker/refreshCliExecutablePath': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'cli': string; readonly 'path': string; readonly 'action': string }, string>
   readonly 'cliworker/renameWorker': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'workerId': string; readonly 'name': string }, void>
@@ -151,6 +178,7 @@ export declare const TYPERT_REMOTE: TypertRemoteInfo<{
   readonly 'cliworker/retryQueuedFollowups': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'workerId': string; readonly 'expectedRunId': string }, void>
   readonly 'cliworker/rolePresets': TypertRemoteMethod<{ readonly 'parentSessionId': string }, string>
   readonly 'cliworker/runningMessageSettings': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'cli': string }, string>
+  readonly 'cliworker/saveGeneralSettings': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'patch': string }, string>
   readonly 'cliworker/saveRolePreset': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'requestJSON': string }, string>
   readonly 'cliworker/saveRunningMessageMode': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'cli': string; readonly 'mode': string }, string>
   readonly 'cliworker/sendRunningMessage': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'workerId': string; readonly 'prompt': string; readonly 'expectedRunId': string; readonly 'requestId': string }, string>
@@ -159,8 +187,10 @@ export declare const TYPERT_REMOTE: TypertRemoteInfo<{
   readonly 'cliworker/setWorkerGoalStatus': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'workerId': string; readonly 'status': 'active' | 'paused'; readonly 'expectedRevision': number }, string>
   readonly 'cliworker/steerMessage': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'workerId': string; readonly 'prompt': string; readonly 'expectedRunId': string; readonly 'requestId': string }, string>
   readonly 'cliworker/stop': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'workerId': string }, string>
+  readonly 'cliworker/stopDshSubagent': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'childSessionId': string }, string>
   readonly 'cliworker/submitMessage': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'workerId': string; readonly 'requestJSON': string }, string>
   readonly 'cliworker/watch': TypertRemoteMethod<{ readonly 'parentSessionId': string; readonly 'workerId': string }, string, 'stream'>
+  readonly 'cliworker/watchDshSubagents': TypertRemoteMethod<{ readonly 'parentSessionId': string }, string, 'stream'>
 }>
 export default TYPERT_REMOTE
 //# sourceMappingURL=typert.remote-client.d.ts.map

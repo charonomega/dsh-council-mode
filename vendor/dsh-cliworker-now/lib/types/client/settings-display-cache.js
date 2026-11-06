@@ -1,5 +1,6 @@
 import { CLI_IDS, EFFORTS } from "../shared/types.js";
 import { preferenceReadVersion, SettingsPreferenceSaves } from "./settings-preference-saves.js";
+import { t } from "./i18n.js";
 const object = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const id = (v) => typeof v === 'string' && v.length > 0 && v.length <= 128;
 /** An absent capability uses the old Host path; a malformed scope fails closed. */
@@ -8,20 +9,20 @@ export function settingsCacheMetadata(value) {
         return;
     if (!object(value) || value.policy !== 1 || !id(value.host) || !id(value.project) ||
         !object(value.revisions) || !object(value.preferences) || !object(value.catalogReady))
-        throw new Error('设置缓存来源无效，请重新打开设置');
+        throw new Error(t('设置缓存来源无效，请重新打开设置'));
     const revisions = value.revisions;
     if (CLI_IDS.some(cli => !id(revisions[cli])))
-        throw new Error('设置缓存来源无效，请重新打开设置');
+        throw new Error(t('设置缓存来源无效，请重新打开设置'));
     const catalogReady = value.catalogReady;
     if (CLI_IDS.some(cli => typeof catalogReady[cli] !== 'boolean'))
-        throw new Error('模型目录来源无效，请刷新重试');
+        throw new Error(t('模型目录来源无效，请刷新重试'));
     for (const cli of CLI_IDS) {
         const pref = value.preferences[cli];
         if (pref === undefined)
             continue;
         if (!object(pref) || (pref.cli ?? 'antigravity') !== cli || typeof pref.model !== 'string' || !pref.model || pref.model.length > 2048 ||
             !EFFORTS.includes(pref.effort))
-            throw new Error('项目默认设置无效，请刷新重试');
+            throw new Error(t('项目默认设置无效，请刷新重试'));
     }
     return value;
 }

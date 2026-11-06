@@ -1,3 +1,4 @@
+import { t } from "./i18n.js";
 /**
  * The official child sidebar owns the complete conversation presentation.
  * Register that exact component in our Worker body seat; the renderer supplies
@@ -23,7 +24,7 @@ export function installHarnessNativeContent(ctx) {
             // rc.2's official entry renders the public content factory and declares
             // no child slots. A changed ownership contract must not be transplanted.
             if (Object.keys(next.children ?? {}).length)
-                throw new Error('Harness 原生侧栏对话入口的 Slot 合同已变更');
+                throw new Error(t('Harness 原生侧栏对话入口的 Slot 合同已变更'));
             release = ctx.slots.register({
                 name: 'cliworker.native.sidebar',
                 ...next.options,

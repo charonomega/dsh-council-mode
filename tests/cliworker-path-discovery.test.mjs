@@ -7,7 +7,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { Readable } from 'node:stream';
 import vm from 'node:vm';
 import { findWindowsPathCommand as sourceLookup } from '../vendor/dsh-cliworker-now/lib/types/host/windows-cli-path.js';
-import { ProcessCleanupUnconfirmedError } from '../vendor/dsh-cliworker-now/lib/types/host/process.js';
+import { ProcessCleanupUnconfirmedError, METADATA_EXIT_GRACE_MS } from '../vendor/dsh-cliworker-now/lib/types/host/process.js';
 
 const bundle = readFileSync(new URL('../vendor/dsh-cliworker-now/lib/index.js', import.meta.url), 'utf8');
 function declaration(name) {
@@ -18,7 +18,7 @@ function declaration(name) {
   return bundle.slice(prefix, end);
 }
 const sandbox = { lstatSync, homedir, isAbsolute, join, sep, win32, Buffer, process,
-  StringDecoder, AbortSignal, ProcessCleanupUnconfirmedError, Error, Object,
+  StringDecoder, AbortSignal, ProcessCleanupUnconfirmedError, METADATA_EXIT_GRACE_MS, Error, Object,
   WINDOWS_PATH_QUERY: 'read-only fixture query' };
 const compiledLookup = vm.runInNewContext([
   'windowsCommandCandidates', 'windowsPathDirectories', 'firstPresentWindowsPath', 'findWindowsPathCommand',
@@ -87,7 +87,7 @@ test('confirmed metadata cleanup still returns the complete output', async () =>
 const accountSource = readFileSync(new URL('../vendor/dsh-cliworker-now/lib/types/host/accounts.js', import.meta.url), 'utf8');
 for (const [name, code] of [['source', accountSource], ['compiled', bundle]]) {
   function accountFixture(resolveCliExecutable) {
-    const method = code.match(/async readStatus\(cli, cwd, signal\)\s*\{[\s\S]*?(?=\n[ \t]+hasCustomExecutable\()/)?.[0];
+    const method = code.match(/async readStatus\(cli, cwd, signal, \{ renew = true \} = \{\}\)\s*\{[\s\S]*?(?=\n[ \t]+\/\*\* The login still exists)/)?.[0];
     assert.ok(method, 'published AccountManager.readStatus must be present');
     class WindowsCliNotFoundError extends Error {}
     const readStatus = vm.runInNewContext(`({ ${method} }).readStatus`, {
@@ -97,7 +97,8 @@ for (const [name, code] of [['source', accountSource], ['compiled', bundle]]) {
     const quarantined = [];
     const manager = { unsafeQueries: new Set(), unsafeTerminals: new Map(),
       controller: new AbortController(), backend: {}, config: {},
-      onQueryCleanup: cli => quarantined.push(cli) };
+      cleanupHold(cli) { return this.unsafeQueries.has(cli) ? { cli, state: 'unavailable', installed: true } : undefined; },
+      quarantineQuery(cli) { this.unsafeQueries.add(cli); quarantined.push(cli); } };
     return { WindowsCliNotFoundError, quarantined, manager,
       status: () => readStatus.call(manager, 'hermes', tmpdir(), new AbortController().signal) };
   }

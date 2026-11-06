@@ -1,15 +1,37 @@
-import { chmod, lstat, mkdir, realpath, symlink, unlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, realpath, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { StringDecoder } from 'node:string_decoder';
 import { EFFORTS } from "../shared/types.js";
 import { assertGrokNativeEnvironment, discoverGrokAccountModels } from "./grok-models.js";
+import { ensureGrokAccessFresh } from "./grok-renewal.js";
 import { GrokResponseTracker, grokResponseUsage } from './grok-response.mjs';
+import { HARNESS_MCP_SERVER, nativeHarnessReadyConnection } from './native-harness-injection.mjs';
+import { GROK_NATIVE_WEB, GROK_PLAN_TOOLS, grokNativeMemory, grokNativeSubagents, shareNativeMemory, unshareNativeMemory } from './cli-native-capabilities.mjs';
 const record = (x) => typeof x === 'object' && x !== null && !Array.isArray(x);
-const config = `[cli]\nauto_update = false\nuse_leader = false\n[features]\nsupport_permission = true\ntelemetry = false\nfeedback = false\ncodebase_indexing = false\n[telemetry]\ntrace_upload = false\nmixpanel_enabled = false\n[subagents]\nenabled = false\n[session]\nload_envrc = false\n[shell_environment_policy]\ninherit = "core"\nignore_default_excludes = false\n`;
+const baseConfig = `[cli]\nauto_update = false\nuse_leader = false\n[features]\nsupport_permission = true\nweb_fetch = ${GROK_NATIVE_WEB}\ntelemetry = false\nfeedback = false\ncodebase_indexing = false\n[telemetry]\ntrace_upload = false\nmixpanel_enabled = false\n[session]\nload_envrc = false\n[shell_environment_policy]\ninherit = "core"\nignore_default_excludes = false\n`;
+// `grok agent stdio` ignores the global --permission-mode/--deny flags, and its
+// config ignores permission_mode = "dontAsk", so a read-only run denies edits
+// by rule in this run's private config. Bare mkdir/touch skip prompts in every
+// mode and are denied too. A ready DSH bridge is pre-approved; the Host still
+// approves each execution. Web reads are pre-approved too: a plan run refuses
+// every prompt, and web_fetch otherwise asks for each domain off Grok's list.
+// The ask level asks before every edit and shell call; the middle level uses
+// Grok's own auto-review classifier (config `ui.permission_mode`). An ignored
+// key falls back to Grok's default ask mode, never to a wider one.
+function grokConfig(readOnly, level, subagents = false) {
+    const base = baseConfig + (subagents ? '' : '[subagents]\nenabled = false\n');
+    if (!readOnly)
+        return level === 'ask'
+            ? `${base}[ui]\npermission_mode = "ask"\n[permission]\nask = ["Bash", "Edit", "Write"]\n`
+            : level === 'auto' ? `${base}[ui]\npermission_mode = "auto"\n` : base;
+    const allowed = [...(GROK_NATIVE_WEB ? ['WebSearch', 'WebFetch'] : []), ...(readOnly.bridge ? [`MCPTool(${HARNESS_MCP_SERVER}__*)`] : [])];
+    const allow = allowed.length ? `allow = ${JSON.stringify(allowed).replaceAll(',', ', ')}\n` : '';
+    return `${base}[permission]\ndeny = ["Edit", "Write", "Bash(mkdir)", "Bash(touch)"]\n${allow}`;
+}
 function bridgePath() {
     const here = dirname(fileURLToPath(import.meta.url));
     for (const path of [join(here, 'grok-catalog.mjs'), resolve(here, '../../grok-catalog.mjs')])
@@ -17,7 +39,23 @@ function bridgePath() {
             return path;
     throw new Error('Grok catalog bridge 未安装，请重新构建插件');
 }
-async function state(stateDirectory, project) {
+/**
+ * Windows refuses to replace a file while another start replaces or reads it
+ * (EPERM/EACCES/EBUSY); the next attempt succeeds once that handle closes.
+ */
+async function publish(from, to) {
+    for (let attempt = 0;; attempt++) {
+        try {
+            return await rename(from, to);
+        }
+        catch (e) {
+            if (process.platform !== 'win32' || attempt >= 20 || !record(e) || !['EPERM', 'EACCES', 'EBUSY'].includes(String(e.code)))
+                throw e;
+            await new Promise((resolve) => setTimeout(resolve, 10 + attempt * 10));
+        }
+    }
+}
+async function state(stateDirectory, project, readOnly, level, memory = false, subagents = false) {
     await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
     if ((await lstat(stateDirectory)).isSymbolicLink())
         throw new Error('Unsafe Grok state symlink');
@@ -45,8 +83,17 @@ async function state(stateDirectory, project) {
         if (!record(e) || e.code !== 'ENOENT')
             throw e;
     }
-    await writeFile(configPath, config, { mode: 0o600 });
-    await chmod(configPath, 0o600);
+    // Tasks of one project share this state and may start together: each file is
+    // published whole by rename, so a concurrent start never sees or races a gap.
+    const temporary = (path) => `${path}.${randomUUID()}.tmp`;
+    const configTemporary = temporary(configPath);
+    try {
+        await writeFile(configTemporary, grokConfig(readOnly, level, subagents), { mode: 0o600, flag: 'wx' });
+        await publish(configTemporary, configPath);
+    }
+    finally {
+        await rm(configTemporary, { force: true });
+    }
     if (project) {
         const original = join(homedir(), '.grok', 'auth.json'), target = join(home, 'auth.json');
         // This path is a derived worker reference, never an account source. Replace
@@ -55,14 +102,34 @@ async function state(stateDirectory, project) {
             const existing = await lstat(target);
             if (!existing.isFile() && !existing.isSymbolicLink())
                 throw new Error('Unsafe Grok auth snapshot');
-            await unlink(target);
         }
         catch (e) {
             if (!record(e) || e.code !== 'ENOENT')
                 throw e;
         }
-        if (process.platform !== 'win32' && existsSync(original))
-            await symlink(original, target);
+        if (process.platform !== 'win32' && existsSync(original)) {
+            const link = temporary(target);
+            try {
+                await symlink(original, link);
+                await publish(link, target);
+            }
+            finally {
+                await rm(link, { force: true });
+            }
+        }
+        else
+            try {
+                await unlink(target);
+            }
+            catch (e) {
+                if (!record(e) || e.code !== 'ENOENT')
+                    throw e;
+            }
+        // The user's own Grok memory, shared rather than copied; off unless they turned it on.
+        if (memory)
+            await shareNativeMemory(join(home, 'memory-v2'), join(homedir(), '.grok', 'memory-v2'));
+        else
+            await unshareNativeMemory(join(home, 'memory-v2'));
     }
     return {
         root,
@@ -74,10 +141,10 @@ async function state(stateDirectory, project) {
             XAI_API_KEY: '',
             GROK_CODE_XAI_API_KEY: '',
             TMPDIR: tmp,
-            GROK_MEMORY: '0',
-            GROK_SUBAGENTS: '0',
+            GROK_MEMORY: memory ? '1' : '0',
+            GROK_SUBAGENTS: subagents ? '1' : '0',
             GROK_WORKFLOWS: '0',
-            GROK_WEB_FETCH: '0',
+            GROK_WEB_FETCH: GROK_NATIVE_WEB ? '1' : '0',
             GROK_TELEMETRY_ENABLED: '0',
             GROK_TELEMETRY_TRACE_UPLOAD: '0',
             GROK_TELEMETRY_MIXPANEL_ENABLED: '0',
@@ -95,7 +162,11 @@ export async function prepareGrok(input) {
         throw new Error('Invalid Grok mode');
     if (!input.prompt.trim())
         throw new Error('Prompt must not be empty');
-    const prepared = await state(input.stateDirectory, input.project);
+    const memory = await grokNativeMemory();
+    const subagents = await grokNativeSubagents();
+    const prepared = await state(input.stateDirectory, input.project, input.mode === 'plan'
+        ? { bridge: !!nativeHarnessReadyConnection({ cli: 'grok', harnessTools: input.harnessTools }, {}) }
+        : undefined, input.mode === 'plan' || input.access === 'danger-full-access' ? undefined : input.access === 'workspace-write' ? 'auto' : 'ask', memory, subagents);
     return {
         argv: [
             input.executable,
@@ -107,11 +178,11 @@ export async function prepareGrok(input) {
             '--output-format',
             'streaming-json',
             '--permission-mode',
-            input.mode === 'plan' ? 'default' : 'acceptEdits',
-            '--no-memory',
-            '--no-subagents',
-            '--disable-web-search',
-            ...(input.mode === 'plan' ? ['--tools', 'read_file,grep,list_dir'] : []),
+            input.mode !== 'plan' && input.access === 'danger-full-access' ? 'bypassPermissions' : 'default',
+            ...(memory ? [] : ['--no-memory']),
+            ...(subagents ? [] : ['--no-subagents']),
+            ...(GROK_NATIVE_WEB ? [] : ['--disable-web-search']),
+            ...(input.mode === 'plan' ? ['--tools', GROK_PLAN_TOOLS.join(',')] : []),
             ...(input.conversationId ? ['--resume', input.conversationId] : []),
             '--single',
             `任务：\n${input.prompt}`,
@@ -143,9 +214,28 @@ export async function discoverGrok(executable, capture, stateDirectory, options 
     options.signal?.throwIfAborted();
     const version = await capture([executable, '--version'], prepared.env, 'native-candidates');
     options.signal?.throwIfAborted();
+    const renewal = options.renewal;
     return discoverGrokAccountModels(models, {
         ...options,
         nativeDynamicSchema: version.trim() === 'grok 1.0.0 (3cd0d0cbcebe)',
+        ...(renewal
+            ? {
+                renew: async (signal) => {
+                    // Its own private home (no leader, telemetry or auto-update); only the auth path is real.
+                    const own = await state(join(stateDirectory, 'renewal'));
+                    await ensureGrokAccessFresh({
+                        backend: renewal.backend,
+                        executable,
+                        env: own.env,
+                        cwd: own.root,
+                        logPath: join(own.root, 'home', 'logs', 'unified.jsonl'),
+                        signal,
+                        ...(renewal.graceMs === undefined ? {} : { graceMs: renewal.graceMs }),
+                        ...(options.home ? { home: options.home } : {}),
+                    });
+                },
+            }
+            : {}),
     });
 }
 /** Native streaming-json parser from installed 1.0.0 docs; no fabricated execution evidence. */

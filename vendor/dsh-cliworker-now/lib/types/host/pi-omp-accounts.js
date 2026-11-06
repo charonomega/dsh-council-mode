@@ -145,11 +145,18 @@ export async function preparePiOmpAccountTerminal(input) {
             ? [process.execPath, input.executable, ...nativeArgs]
             : [input.executable, ...nativeArgs];
         if (input.action === 'login') {
-            // No prompt injection: OMP's native onboarding, or Pi's native UI API.
-            nativeArgv =
-                cli === 'omp'
-                    ? [input.executable, 'setup']
-                    : [process.execPath, fileURLToPath(new URL('./pi-login.mjs', import.meta.url)), input.executable];
+            // No prompt injection: OMP's native onboarding, or Pi's native UI API. A provider
+            // picked in the window opens its own login: Pi's /login <provider>, or OMP's TUI,
+            // where the guide types /login <provider> once it is ready.
+            if (cli === 'pi')
+                nativeArgv = [
+                    process.execPath,
+                    fileURLToPath(new URL('./pi-login.mjs', import.meta.url)),
+                    input.executable,
+                    ...(input.provider ? ['login', input.provider] : []),
+                ];
+            else if (!input.provider)
+                nativeArgv = [input.executable, 'setup'];
         }
         const argv = [process.execPath, fileURLToPath(new URL('./private-launch.mjs', import.meta.url)), ...nativeArgv];
         if (cli === 'omp') {

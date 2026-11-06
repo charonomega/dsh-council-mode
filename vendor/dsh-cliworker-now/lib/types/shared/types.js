@@ -62,14 +62,47 @@ export const CLI_SHORT_NAMES = {
 export const cliOf = (preference) => preference.cli ?? 'antigravity';
 export const effortLabel = (effort) => effort === 'default' ? '默认' : effort.charAt(0).toUpperCase() + effort.slice(1);
 export const LEGACY_ACCOUNT_RECORD_NOTICE = '此历史任务缺少账号记录，请新建任务';
+/** Timeline notes for a task continued in a new native session; an account change itself is never announced. */
+export const CARRYOVER_FAILED_NOTICE = '原会话无法续接，已在新会话中继续';
+export const CARRYOVER_UNREACHABLE_NOTICE = '原会话记录不可用，已在新会话中继续';
+/** Earlier builds' account-change notes: hidden or reworded when an older record is read. */
+export const LEGACY_ACCOUNT_NOTICES = {
+    '账号已变更，已改用当前账号继续': null,
+    '原会话无法在当前账号续接，已在新会话中继续': CARRYOVER_FAILED_NOTICE,
+    '原会话不在当前账号的会话记录中，已在新会话中继续': CARRYOVER_UNREACHABLE_NOTICE,
+};
+export const CARRYOVER_FORK_REFUSED = '这条消息早于改接到新会话，当前会话中没有它的原生记录，请从改接之后的消息分支';
 /** Exact legacy stop messages are compatible; other interrupted outcomes stay diagnostic. */
 export const isUserInterrupted = (worker) => worker.status === 'interrupted' &&
     ((worker.interruptionReason === 'user' && !worker.error) ||
         ['Error: 用户已停止任务', '用户已取消排队任务'].includes(worker.error ?? ''));
 /** Stable, non-mutating name for histories created before named workers. */
 export const workerName = (worker) => worker.agentName || `智能体-${worker.id.slice(0, 6)}`;
+/** Public DSH directory/projection data; never a plugin-owned Worker. */
+/** `dsh-<n>` names are reserved for DSH native subagents in the CLI Worker window. */
+export const DSH_AGENT_NAME = /^dsh-[1-9]\d*$/i;
 export const active = (status) => status === 'queued' || status === 'running' || status === 'stopping';
 /** Fold repeated step updates without duplicating streamed text or the final response. */
+/** Binary units, matching the configured byte budgets. */
+export function outputSizeLabel(bytes) {
+    return bytes >= 1_048_576 ? `${(bytes / 1_048_576).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+/** Source text of the truncation marker; the Client translates the same keys. */
+export const TRUNCATED_SIZED = '输出已截断（共 {size}），完整内容见 CLI 原生会话或实际产物';
+export const TRUNCATED_PLAIN = '输出已截断，完整内容见 CLI 原生会话或实际产物';
+export function truncationNote(row) {
+    if (!row.truncated)
+        return '';
+    return row.outputBytes ? TRUNCATED_SIZED.replace('{size}', outputSizeLabel(row.outputBytes)) : TRUNCATED_PLAIN;
+}
+function appendDelta(row, delta) {
+    if (row.kind !== 'tool') {
+        row.detail = (row.detail ?? '') + delta;
+        return;
+    }
+    const output = row.toolCall?.output;
+    row.toolCall = { ...row.toolCall, output: (typeof output === 'string' ? output : '') + delta };
+}
 export function foldEvents(events, endedRun, cli) {
     const rows = [];
     const steps = new Map();
@@ -195,6 +228,14 @@ export function foldEvents(events, endedRun, cli) {
             // snapshot can withdraw a block; never append or retain its older text.
             if (event.detail || (event.kind === 'reasoning' && event.detail !== undefined))
                 existing.detail = event.detail;
+            // Increments extend the shown output (tools) or visible reasoning; a later
+            // snapshot above or a completed output replaces them.
+            if (event.delta)
+                appendDelta(existing, event.delta);
+            if (event.truncated)
+                existing.truncated = true;
+            if (event.outputBytes)
+                existing.outputBytes = Math.max(existing.outputBytes ?? 0, event.outputBytes);
         }
         else {
             const row = {
@@ -208,7 +249,12 @@ export function foldEvents(events, endedRun, cli) {
                 response: event.response,
                 queuedFollowupId: event.queuedFollowupId,
                 admittedRunId: event.admittedRunId,
+                ...(event.truncated ? { truncated: true } : {}),
+                ...(event.outputBytes ? { outputBytes: event.outputBytes } : {}),
+                ...(event.kind === 'diagnostic' && event.notice ? { notice: true } : {}),
             };
+            if (event.delta)
+                appendDelta(row, event.delta);
             steps.set(key, row);
             rows.push(row);
         }

@@ -1,6 +1,8 @@
 import { resolve } from 'node:path'
 import { CodexRunUsage } from './codex-run-usage.mjs'
-import { createProgressPreviews } from './codex-progress-preview.mjs'
+import { createToolOutcomes } from './native-tool-outcomes.mjs'
+import { nativeHarnessGuidance } from './native-harness-injection.mjs'
+import { codexDeveloperInstructionsConfigured } from './cli-native-capabilities.mjs'
 
 const object = (value) => value && typeof value === 'object' && !Array.isArray(value)
 const string = (value) => typeof value === 'string' && value.trim().length > 0
@@ -33,10 +35,71 @@ export function nativeCodexArgv(config) {
   return [argv[0], 'app-server', '--stdio', ...preserved]
 }
 
+const APPROVAL_METHODS = ['item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'item/permissions/requestApproval']
+const ELICITATION_METHOD = 'mcpServer/elicitation/request'
+const SANDBOX_TYPES = { 'read-only': 'readOnly', 'workspace-write': 'workspaceWrite', 'danger-full-access': 'dangerFullAccess' }
+
+/** Only the verified, input-free Computer Use app grant is an authorization. */
+function computerUseApproval(params, threadId, turnId) {
+  const schema = params.requestedSchema, meta = params._meta
+  if (!threadId || !turnId || params.threadId !== threadId || (params.turnId !== null && params.turnId !== turnId) ||
+    params.serverName !== 'cua_repl' || params.mode !== 'form' || !object(schema) || schema.type !== 'object' ||
+    !object(schema.properties) || Object.keys(schema.properties).length !== 0 ||
+    // Empty properties alone does not exclude required fields or schema combinators.
+    Object.keys(schema).some((key) => !['type', 'properties', 'required', 'additionalProperties', 'title', 'description', '$schema'].includes(key)) ||
+    (schema.required !== undefined && (!Array.isArray(schema.required) || schema.required.length !== 0)) ||
+    (schema.additionalProperties !== undefined && schema.additionalProperties !== false) ||
+    !object(meta) || meta.codex_approval_kind !== 'mcp_tool_call' || meta.connector_id !== 'computer-use' ||
+    meta.codex_requires_user_input === true) return
+  const display = Array.isArray(meta.tool_params_display)
+    ? meta.tool_params_display.find((entry) => object(entry) && entry.name === 'app' && string(entry.value))?.value : undefined
+  const app = display ?? (object(meta.tool_params) && string(meta.tool_params.app) ? meta.tool_params.app : undefined)
+  if (!app) return
+  return {
+    kind: 'permission', summary: `允许 Computer Use 使用应用：${app}`,
+    detail: [`MCP：${params.serverName}`, string(params.message) ? params.message : undefined].filter(Boolean).join('\n'),
+    allowSession: Array.isArray(meta.persist) && meta.persist.includes('session'),
+  }
+}
+
+/**
+ * Native thread settings for this run's DSH tier. Plan never asks; 完全权限
+ * uses Codex's own full-access mode; the confined tiers ask on request. A run
+ * without a Host tier keeps the historical workspace mapping.
+ */
+export function codexPermission(config) {
+  const plan = config.mode === 'plan'
+  const sandbox = plan ? 'read-only' : config.access ?? 'workspace-write'
+  const approvalPolicy = plan || !config.access || sandbox === 'danger-full-access' ? 'never' : 'on-request'
+  return { sandbox, approvalPolicy, sandboxType: SANDBOX_TYPES[sandbox], legacy: !config.access,
+    ...(!plan && config.access ? { approvalsReviewer: sandbox === 'workspace-write' ? 'auto_review' : 'user' } : {}) }
+}
+
+/** Public summary of one Codex approval request for the DSH prompt. */
+export function codexApprovalRequest(method, params) {
+  const reason = string(params.reason) ? `原因：${params.reason}` : undefined
+  if (method === 'item/commandExecution/requestApproval') {
+    const command = Array.isArray(params.command) ? params.command.join(' ') : params.command
+    return { kind: 'command', summary: `执行命令：${string(command) ? command : '（CLI 未提供命令）'}`,
+      detail: [reason, string(params.cwd) ? `命令目录：${params.cwd}` : undefined].filter(Boolean).join('\n'), allowSession: true }
+  }
+  if (method === 'item/fileChange/requestApproval')
+    return { kind: 'file', summary: string(params.grantRoot) ? `写入目录：${params.grantRoot}` : '修改文件',
+      detail: reason, allowSession: true }
+  return { kind: 'permission', summary: '扩大沙箱权限', allowSession: true,
+    detail: [reason, object(params.permissions) ? `请求：${JSON.stringify(params.permissions).slice(0, 2000)}` : undefined].filter(Boolean).join('\n') }
+}
+
 function safeItem(item) {
   // The app-server exposes raw reasoning separately. Only its public summary is used.
   if (item.type === 'reasoning') return { id: item.id, type: item.type, summary: item.summary }
   return item
+}
+
+/** Tool metadata for `detail`; the output body travels once, in `toolCall.output`. */
+function toolDetail(item) {
+  const { aggregatedOutput: _output, result: _result, contentItems: _items, changes: _changes, ...metadata } = safeItem(item)
+  return JSON.stringify(metadata)
 }
 
 function publicTool(item) {
@@ -55,11 +118,14 @@ function publicTool(item) {
 
 export async function runNativeCodex(config, io) {
   const peer = await io.openStdio(nativeCodexArgv(config), { env: config.env, cwd: config.project })
-  let threadId, turnId, response = '', failure, completed = false, started = false, failedTools = 0
-  const steps = new Map(), messages = new Map(), summaries = new Map(), finished = new Set(), tools = new Set(), receipts = new Map()
+  let threadId, turnId, response = '', failure, denied = false, completed = false, started = false, closed = false
+  const steps = new Map(), messages = new Map(), finished = new Set(), tools = new Set(), receipts = new Map()
   const steerReceipts = new Map(), toolItems = new Map(), toolOutput = new Map()
+  // Items whose approval was declined; their declined/failed completion is the denial itself.
+  const deniedItems = new Set()
+  const elicitations = new Set(), elicitationSends = new Set()
   const runUsage = new CodexRunUsage(config.conversationId)
-  const previews = createProgressPreviews(event => io.event(event))
+  const toolOutcomes = createToolOutcomes()
   const step = (id) => {
     if (!steps.has(id)) steps.set(id, steps.size)
     return steps.get(id)
@@ -111,21 +177,22 @@ export async function runNativeCodex(config, io) {
       const remaining = item.text.slice(previous.length)
       if (remaining || previous) io.event({ kind: 'assistant', step: step(item.id), text: remaining, state: 'COMPLETED' })
       messages.set(item.id, item.text)
-      if (item.text.trim()) response = item.text
+      if (item.text.trim()) {
+        response = item.text
+        toolOutcomes.succeeded()
+      }
     } else if (item.type === 'reasoning') {
-      for (const key of summaries.keys()) if (key.startsWith(`reasoning:${item.id}:`)) previews.finish(key)
       if (Array.isArray(item.summary)) item.summary.forEach((summary, index) => {
         if (typeof summary === 'string') io.event({ kind: 'reasoning', step: step(`reasoning:${item.id}:${index}`), text: 'Codex 思考摘要', detail: summary, state: 'COMPLETED' })
       })
     } else if (toolTypes.has(item.type)) {
-      previews.finish(item.id)
       tools.delete(item.id)
       // Every typed tool except webSearch has an explicit native completion status.
       const failed = (item.type !== 'webSearch' && item.status !== 'completed') || item.success === false || !!item.error || !!item.failure || (typeof item.exitCode === 'number' && item.exitCode !== 0)
-      // Tool failures are conversation items: Codex can recover or report them.
-      // Only native turn/transport failures determine the overall run status.
-      if (failed) failedTools++
-      io.event({ kind: 'tool', step: step(item.id), text: item.command ?? item.tool ?? item.type, state: failed ? 'FAILED' : 'COMPLETED', detail: JSON.stringify(safeItem(item)), toolCall: { ...publicTool(item),
+      if (item.status === 'inProgress') markFailure('原生轮次结束时仍有未完成工具')
+      else if (failed && !deniedItems.has(item.id)) toolOutcomes.failed(item.id)
+      else if (!failed) toolOutcomes.succeeded()
+      io.event({ kind: 'tool', step: step(item.id), text: item.command ?? item.tool ?? item.type, state: failed ? 'FAILED' : 'COMPLETED', detail: toolDetail(item), toolCall: { ...publicTool(item),
         ...(item.type === 'commandExecution' && item.aggregatedOutput == null && toolOutput.has(item.id) ? { output: toolOutput.get(item.id) } : {}) } })
     }
   }
@@ -139,14 +206,52 @@ export async function runNativeCodex(config, io) {
     }
     if (typeof message.method !== 'string') return
     const params = object(message.params) ? message.params : {}
-    // Server requests are denied even if native configuration would normally approve them.
+    // Authorization requests go to the Host; input/unknown elicitations remain unsupported.
     if (message.id !== undefined) {
+      if (message.method === ELICITATION_METHOD) {
+        if (elicitations.has(message.id)) return
+        elicitations.add(message.id)
+        const request = computerUseApproval(params, threadId, turnId)
+        if (request) {
+          if (closed || completed || io.signal?.aborted) return
+          // A run that has already failed declines at once, so Codex is not left waiting on the tool.
+          void (failure ? Promise.resolve({ decision: 'deny', source: 'invalid' }) : io.approval(request)).then((answer) => {
+            // The turn may end while DSH is waiting. A late answer cannot grant access.
+            if (closed || completed || io.signal?.aborted || answer.source === 'stopped') return
+            const allowed = !failure && (answer.decision === 'allow-once' || (answer.decision === 'allow-session' && request.allowSession))
+            if (!allowed) denied = true
+            io.event({ kind: 'diagnostic', text: allowed ? 'Codex Computer Use 应用授权已批准' : 'Codex Computer Use 应用授权已拒绝' })
+            const result = allowed
+              ? { action: 'accept', content: {}, ...(answer.decision === 'allow-session' ? { _meta: { persist: 'session' } } : {}) }
+              : { action: 'decline', content: null }
+            // Observe delivery before settling the run, even if completion races the write callback.
+            const sending = Promise.resolve(peer.send({ id: message.id, result }))
+              .catch(() => markFailure('Codex 授权回复未送达'))
+            elicitationSends.add(sending)
+            void sending.finally(() => elicitationSends.delete(sending))
+          }).catch(() => { if (!closed && !io.signal?.aborted) markFailure('Codex 授权回复未送达') })
+          return
+        }
+      }
+      if (APPROVAL_METHODS.includes(message.method)) {
+        const itemId = typeof params.itemId === 'string' ? params.itemId : undefined
+        void io.approval(codexApprovalRequest(message.method, params)).then((answer) => {
+          const allowed = answer.decision !== 'deny'
+          if (!allowed) {
+            denied = true
+            if (itemId) deniedItems.add(itemId)
+          }
+          io.event({ kind: 'diagnostic', text: allowed ? 'Codex 原生授权请求已批准' : 'Codex 原生交互请求已拒绝' })
+          if (message.method !== 'item/permissions/requestApproval')
+            return peer.send({ id: message.id, result: { decision: !allowed ? 'decline' : answer.decision === 'allow-session' ? 'acceptForSession' : 'accept' } })
+          return peer.send({ id: message.id, result: allowed && object(params.permissions)
+            ? { permissions: params.permissions, scope: answer.decision === 'allow-session' ? 'session' : 'turn' }
+            : { permissions: { network: null, fileSystem: null }, scope: 'turn' } })
+        }).catch(() => markFailure('Codex 授权回复未送达'))
+        return
+      }
       markFailure('CLI 请求额外交互授权，插件未批准')
       io.event({ kind: 'diagnostic', text: 'Codex 原生交互请求已拒绝', state: 'FAILED' })
-      if (['item/commandExecution/requestApproval', 'item/fileChange/requestApproval'].includes(message.method))
-        return peer.send({ id: message.id, result: { decision: 'decline' } })
-      else if (message.method === 'item/permissions/requestApproval')
-        return peer.send({ id: message.id, result: { permissions: { network: null, fileSystem: null }, scope: 'turn' } })
       return peer.send({ id: message.id, error: { code: -32601, message: 'CLI Worker does not provide interactive approvals or user input' } })
     }
     if (!started) {
@@ -173,8 +278,7 @@ export async function runNativeCodex(config, io) {
     } else if (message.method === 'item/reasoning/summaryTextDelta') {
       if (!string(params.itemId) || typeof params.delta !== 'string' || finished.has(params.itemId) || (params.summaryIndex !== undefined && (!Number.isSafeInteger(params.summaryIndex) || params.summaryIndex < 0))) throw fail('无效或迟到的公开摘要增量')
       const key = `reasoning:${params.itemId}:${params.summaryIndex ?? 0}`
-      summaries.set(key, (summaries.get(key) ?? '') + params.delta)
-      previews.update(key, { kind: 'reasoning', step: step(key), text: 'Codex 思考摘要', detail: summaries.get(key), state: 'RUNNING' })
+      io.event({ kind: 'reasoning', step: step(key), text: 'Codex 思考摘要', delta: params.delta, state: 'RUNNING' })
     } else if (message.method === 'item/commandExecution/outputDelta' || message.method === 'item/mcpToolCall/progress') {
       const item = toolItems.get(params.itemId)
       const command = message.method === 'item/commandExecution/outputDelta'
@@ -183,11 +287,11 @@ export async function runNativeCodex(config, io) {
       // Raw reasoning and unrelated notifications never enter this channel.
       if (!item || !tools.has(params.itemId) || finished.has(params.itemId) ||
         item.type !== (command ? 'commandExecution' : 'mcpToolCall') || typeof delta !== 'string') return
-      const output = command ? (toolOutput.get(params.itemId) ?? '') + delta : delta
-      toolOutput.set(params.itemId, output)
-      previews.update(item.id, { kind: 'tool', step: step(item.id), text: item.command ?? item.tool ?? item.type,
-        state: 'RUNNING', detail: output, toolCall: { ...publicTool(item), output } })
-      io.native(message)
+      // Only the increment is sent; the completed item carries the one full output.
+      if (command) toolOutput.set(params.itemId, (toolOutput.get(params.itemId) ?? '') + delta)
+      io.event({ kind: 'tool', step: step(item.id), text: item.command ?? item.tool ?? item.type, state: 'RUNNING',
+        ...(command ? { delta } : { toolCall: { ...publicTool(item), output: delta } }) })
+      io.native({ method: message.method, params: { ...params, ...(command ? { delta: { cliworkerOmitted: true, bytes: Buffer.byteLength(delta) } } : {}) } })
     } else if (message.method === 'item/started' || message.method === 'item/completed') {
       const item = params.item
       if (!object(item) || !string(item.id) || !string(item.type)) throw fail('无效的条目通知')
@@ -197,7 +301,7 @@ export async function runNativeCodex(config, io) {
         if (finished.has(item.id)) throw fail('条目完成后再次启动')
         tools.add(item.id)
         toolItems.set(item.id, item)
-        io.event({ kind: 'tool', step: step(item.id), text: item.command ?? item.tool ?? item.type, state: 'RUNNING', detail: JSON.stringify(safeItem(item)), toolCall: publicTool(item) })
+        io.event({ kind: 'tool', step: step(item.id), text: item.command ?? item.tool ?? item.type, state: 'RUNNING', detail: toolDetail(item), toolCall: publicTool(item) })
       }
     } else if (message.method === 'thread/tokenUsage/updated') {
       runUsage.active(params)
@@ -210,28 +314,46 @@ export async function runNativeCodex(config, io) {
     } else if (message.method === 'turn/completed') {
       if (!object(params.turn) || !Array.isArray(params.turn.items)) throw fail('无效的轮次终态')
       for (const item of params.turn.items) completeItem(item)
-      previews.flush()
       completed = true
       if (params.turn.status !== 'completed') markFailure(typeof params.turn.error?.message === 'string' ? params.turn.error.message : `原生轮次 ${params.turn.status}`)
       if (tools.size) markFailure('原生轮次结束时仍有未完成工具')
-      if (params.turn.status === 'completed' && failedTools)
-        io.event({ kind: 'diagnostic', text: `Codex 原生轮次已完成；期间有 ${failedTools} 次工具调用失败或被拒绝，详情见工具记录和最终回复。`, state: 'COMPLETED' })
       io.native({ method: message.method, params: { threadId, turn: { id: turnId, status: params.turn.status, error: params.turn.error } } })
     }
   })
   try {
     io.signal?.throwIfAborted()
-    await peer.request('initialize', { clientInfo: { name: 'cli_worker_native', title: 'CLI Worker', version: '0.8.2' }, capabilities: { experimentalApi: false, requestAttestation: false, explicitGatewayOauth: true } })
+    await peer.request('initialize', { clientInfo: { name: 'cli_worker_native', title: 'CLI Worker', version: '0.8.7' }, capabilities: { experimentalApi: false, requestAttestation: false, explicitGatewayOauth: true } })
     await peer.send({ method: 'initialized', params: {} })
-    const mode = config.mode === 'plan' ? 'read-only' : 'workspace-write'
-    const options = { cwd: config.project, model: config.preference.model, approvalPolicy: 'never', sandbox: mode }
-    const result = await peer.request(config.conversationId ? 'thread/resume' : 'thread/start', {
-      ...options,
-      ...(config.conversationId ? { threadId: config.conversationId, excludeTurns: true } : {}),
-    })
-    if (!string(result?.thread?.id) || (config.conversationId && result.thread.id !== config.conversationId)) throw fail('原生会话身份与绑定不一致')
-    if (result.model !== config.preference.model || !string(result.cwd) || resolve(result.cwd) !== resolve(config.project) || result.approvalPolicy !== 'never' || result.sandbox?.type !== (config.mode === 'plan' ? 'readOnly' : 'workspaceWrite') || result.sandbox?.networkAccess === true)
-      throw fail('原生会话未保留所选模型、目录或权限')
+    let permission = codexPermission(config)
+    const guidance = codexDeveloperInstructionsConfigured(config.project, { ...process.env, ...config.env }) ? undefined : nativeHarnessGuidance(config)
+    let result, binding = config.conversationId
+    for (;;) {
+      io.signal?.throwIfAborted()
+      try {
+        result = await peer.request(binding ? 'thread/resume' : 'thread/start', {
+          cwd: config.project, model: config.preference.model, approvalPolicy: permission.approvalPolicy, sandbox: permission.sandbox,
+          ...(permission.approvalsReviewer ? { approvalsReviewer: permission.approvalsReviewer } : {}),
+          ...(guidance ? { developerInstructions: guidance } : {}),
+          ...(binding ? { threadId: binding, excludeTurns: true } : {}),
+        })
+      } catch (error) {
+        // Only a definite parameter rejection permits a metadata-only retry.
+        if (permission.approvalsReviewer !== 'auto_review' || ![-32600, -32602].includes(error?.code)) throw error
+        result = undefined
+      }
+      if (result) {
+        if (!string(result.thread?.id) || (binding && result.thread.id !== binding)) throw fail('原生会话身份与绑定不一致')
+        if (result.model !== config.preference.model || !string(result.cwd) || resolve(result.cwd) !== resolve(config.project))
+          throw fail('原生会话未保留所选模型、目录或权限')
+        binding = result.thread.id
+        if (result.approvalPolicy === permission.approvalPolicy && result.sandbox?.type === permission.sandboxType &&
+          (!permission.approvalsReviewer || result.approvalsReviewer === permission.approvalsReviewer) &&
+          !(permission.legacy && result.sandbox?.networkAccess === true)) break
+      }
+      if (permission.approvalsReviewer !== 'auto_review') throw fail('原生会话未保留所选权限，无法确认询问模式；已拒绝启动')
+      permission = codexPermission({ ...config, access: 'read-only' })
+      io.event({ kind: 'diagnostic', text: 'Codex 原生自动审批不可用，本轮按询问运行' })
+    }
     if (config.preference.effort !== 'default' && result.reasoningEffort !== undefined && result.reasoningEffort !== null && result.reasoningEffort !== config.preference.effort) throw fail('原生思考强度与选型不一致')
     threadId = result.thread.id
     io.session(threadId, result.model)
@@ -253,15 +375,18 @@ export async function runNativeCodex(config, io) {
     completion.catch(() => {})
     const turn = await peer.request('turn/start', {
       threadId,
-      // Preserve first-line directives for UserPromptSubmit hooks (for example STS).
       input: await nativeAttachmentInput('codex', config.prompt, config.attachments, io.signal),
       model: config.preference.model,
       ...(config.preference.effort !== 'default' ? { effort: config.preference.effort } : {}),
       // Public summaries are opt-in (some models default to none). Never request raw reasoning.
       summary: 'auto',
       cwd: config.project,
-      approvalPolicy: 'never',
-      sandboxPolicy: config.mode === 'plan' ? { type: 'readOnly' } : { type: 'workspaceWrite', writableRoots: [config.project], networkAccess: false },
+      approvalPolicy: permission.approvalPolicy,
+      ...(permission.approvalsReviewer ? { approvalsReviewer: permission.approvalsReviewer } : {}),
+      // Writable tiers keep native sandbox details. Asking and planning both
+      // pin read-only, with different approval policies; legacy stays confined.
+      ...(permission.sandbox === 'read-only' ? { sandboxPolicy: { type: 'readOnly' } }
+        : permission.legacy ? { sandboxPolicy: { type: 'workspaceWrite', writableRoots: [config.project], networkAccess: false } } : {}),
     }, { timeoutMs: config.timeoutMs })
     if (!string(turn?.turn?.id) || (turnId && turn.turn.id !== turnId)) throw fail('启动回执缺少匹配轮次')
     turnId = turn.turn.id
@@ -269,16 +394,19 @@ export async function runNativeCodex(config, io) {
     if (!completed) throw fail('缺少原生轮次完成证据')
     const billing = runUsage.finish(turnId)
     if (billing) io.native({ type: 'cliworker.codex_run_usage', sessionId: threadId, turnId, usage: billing })
+    await Promise.all(elicitationSends)
     peer.end()
     const outcome = await peer.done
     io.signal?.throwIfAborted()
     if (outcome.exitCode !== 0) markFailure('Codex 原生进程非零退出')
-    io.result(failure ? 'ERROR' : 'SUCCESS', response, failure, 'response')
+    if (failure) io.result('ERROR', response, failure, 'response')
+    else toolOutcomes.settle(io, response, 'response', denied)
   } finally {
+    closed = true
     releaseSteer?.()
     io.signal?.removeEventListener('abort', abort)
     unsubscribe()
-    try { previews.flush() } finally { await peer.close() }
+    await peer.close()
   }
 }
 import { nativeAttachmentInput } from './native-attachments.mjs'
@@ -291,7 +419,7 @@ export async function forkNativeCodex(config, io) {
       return peer.send({ id: message.id, error: { code: -32601, message: '分支不接受交互请求' } })
   })
   try {
-    await peer.request('initialize', { clientInfo: { name: 'cli_worker_native', version: '0.8.2' }, capabilities: { experimentalApi: false } })
+    await peer.request('initialize', { clientInfo: { name: 'cli_worker_native', version: '0.8.7' }, capabilities: { experimentalApi: false } })
     await peer.send({ method: 'initialized', params: {} })
     if (config.forkOperation === 'delete') {
       // Codex exposes archive, not deletion. Keep an explicit orphan/archival receipt.

@@ -1,3 +1,10 @@
+import { setTimeout as sleep } from 'node:timers/promises';
+import { AgyAccountGuide } from "./agy-account-guide.js";
+import { GuideResponseError, } from "./account-guide/engine.js";
+import { createAccountGuide } from "./account-guide/flows.js";
+import { isLoginProvider, loginProviders, providerStores } from "./account-guide/providers.js";
+import { NativeLoginProviders } from "./native-login-providers.js";
+import { parseAccountLoginId } from "../shared/account-links.js";
 import { readClaudeOwnRoute, readClaudeOfficialAccountRoute, claudeNativeSettingsArguments, claudeLaunchEnvironment, prepareClaudeWorkerLaunch, claudeRouteIdentity, ClaudeOwnRouteError, } from "./claude-own-route.js";
 import { isExtendedCli } from "./extended-adapters.js";
 import { nativeAgyAccountIdentity } from "./agy-windows-account.js";
@@ -5,8 +12,8 @@ import { firstPartyEnvironment, MimoConfigurationError } from "./first-party-mod
 import { randomUUID } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
 import { stripVTControlCharacters } from 'node:util';
-import { resolveCliExecutable } from "./adapters.js";
-import { projectDirectory, ProcessCleanupUnconfirmedError, } from "./process.js";
+import { captureCatalogMetadata, resolveCliExecutable } from "./adapters.js";
+import { cleanupCauseText, METADATA_EXIT_GRACE_MS, projectDirectory, ProcessCleanupUnconfirmedError, } from "./process.js";
 import { CLI_IDS } from "../shared/types.js";
 import { accountEmail, } from "./account-identity.js";
 import { readCodexAccount } from "./codex-account.js";
@@ -14,17 +21,19 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { zcodeGrokAccountLaunch, zcodeGrokAccountStatus, zcodeGrokInstruction, ZCodeAccountCapabilityError, } from "./zcode-grok-accounts.js";
 import { readPiOmpAccount, readOpenCodeAccount, prepareOpenCodeAccount } from "./harness-opencode-accounts.js";
-import { prepareHermesAccount, readHermesAccount, listHermesAccountSources } from "./hermes-accounts.js";
-import { listPiOmpAccountSources } from "./pi-omp-native.js";
+import { prepareHermesAccount, readHermesAccount, listHermesAccountSources, selectHermesNousAfterLogin, } from "./hermes-accounts.js";
+import { listPiOmpAccountSources, piOmpStoredLoginExists } from "./pi-omp-native.js";
 import { verifyHermesExecutable, HermesExecutableError } from "./hermes-installation.js";
 import { preparePiOmpAccountTerminal } from "./pi-omp-accounts.js";
-import { readKimiAccount, KIMI_MANAGE_LOGIN, prepareKimiAccountDirectory } from "./kimi-accounts.js";
+import { readKimiAccount, KIMI_CODE_LOGIN, KIMI_MANAGE_LOGIN, prepareKimiAccountDirectory } from "./kimi-accounts.js";
 import { readMimoAccount } from "./mimo-configuration.js";
 import { prepareMimoAccountTerminal } from "./first-party-account-context.js";
 import { spawnAccountTerminal, WindowsAccountTerminalError } from "./windows-account-terminal.js";
 import { WindowsCliInstallationError, WindowsCliNotFoundError } from "./windows-cli-installation.js";
 import { effectiveHermesHome } from "./hermes-account-context.js";
 import { ensureHermesNousFresh, HermesRenewalError, reserveHermesAccount } from "./hermes-renewal.js";
+import { reserveGrokAccount } from "./grok-renewal.js";
+import { HermesAccountSourceError } from "./hermes-models.js";
 import { readQoderAccount, qoderEnvironment, QODER_METADATA_ARGUMENTS } from "./qoder-accounts.js";
 const STATUS_TIMEOUT = 10_000;
 const STARTUP_TIMEOUT = 30_000;
@@ -33,6 +42,31 @@ const MAX_OUTPUT_BYTES = 256 * 1024;
 const MAX_FRAMES = 512;
 const MAX_INPUT_BYTES = 16 * 1024;
 const ACTIONS = ['login', 'logout', 'manage'];
+/** Guided login window timing; tests shorten it. */
+export const AGY_GUIDE_TIMING = {
+    commandDelayMs: 400,
+    pollMs: 1500,
+    loginConfirmMs: 20_000,
+    logoutConfirmMs: 20_000,
+    /** Output pause that counts as a finished draw; agy pauses ~2 s while signing in. */
+    quietMs: 3000,
+    /** A screen that keeps animating is still read after this long. */
+    settleCapMs: 10_000,
+    /** When `/logout` is still pending after this, one more Enter runs a completed slash command. */
+    confirmEnterMs: 1500,
+    /** Other CLIs' guided windows: a screen this still with no known step goes to the native terminal. */
+    flowQuietMs: 8000,
+    /** How long a waiting browser/device authorization is watched, and how often. */
+    authorizeWatchMs: 15 * 60_000,
+    watchPollMs: 3000,
+};
+// A guided answer's Enter follows its pasted value after the input box takes it.
+const ANSWER_ENTER_MS = 300;
+class AccountLoginGoneError extends Error {
+    constructor() {
+        super('该账号已不存在，请刷新后重试');
+    }
+}
 const validateCli = (cli) => {
     if (!CLI_IDS.includes(cli))
         throw new Error('不支持的 CLI');
@@ -49,7 +83,9 @@ const instructionFor = (cli, action) => {
     if (cli === 'antigravity')
         return action === 'manage'
             ? '在 Antigravity 原生终端中使用 /login 登录，或 /logout 退出。'
-            : `在 Antigravity 原生终端中输入 /${action} 并按 Enter。`;
+            : action === 'login'
+                ? '按下方提示在 Antigravity 原生终端中完成登录。'
+                : '插件会在 Antigravity 原生终端中自动输入 /logout 退出登录。';
     if (cli === 'kimi' && action !== 'login')
         return action === 'logout'
             ? '在 Kimi 原生终端中输入 /logout 并按 Enter，再选择要退出的提供商。'
@@ -179,7 +215,8 @@ export class AccountManager {
     onQueryCleanup;
     sessions = new Map();
     reserved = new Set();
-    unsafeQueries = new Set();
+    /** CLIs whose account read left an unconfirmed range, with its display-safe reason. */
+    unsafeQueries = new Map();
     unsafeTerminals = new Map();
     statusQueries = new Map();
     pending = new Set();
@@ -187,15 +224,54 @@ export class AccountManager {
     parentClosings = new Map();
     controller = new AbortController();
     closing;
+    nativeLoginProviders;
     constructor(backend, config, identity = nativeAgyAccountIdentity(backend, config), onQueryCleanup) {
         this.backend = backend;
         this.config = config;
         this.identity = identity;
         this.onQueryCleanup = onQueryCleanup;
+        this.nativeLoginProviders = new NativeLoginProviders(backend, config);
     }
     isBusy(cli) {
         validateCli(cli);
         return this.reserved.has(cli) || this.unsafeQueries.has(cli) || this.unsafeTerminals.has(cli);
+    }
+    /** The paused state a CLI reports while an account process range is unconfirmed. */
+    cleanupHold(cli) {
+        if (!this.unsafeQueries.has(cli) && !this.unsafeTerminals.has(cli))
+            return undefined;
+        const reason = this.unsafeQueries.get(cli);
+        return {
+            cli,
+            installed: true,
+            state: 'unavailable',
+            summary: this.unsafeQueries.has(cli)
+                ? `账号查询未能确认进程已退出，已暂停此 CLI${reason ? `：${reason}` : ''}`
+                : '账号终端未能确认完全退出，已暂停此 CLI',
+            cleanupBlocked: true,
+            actions: [],
+        };
+    }
+    /** An account read whose process range is unconfirmed holds the CLI until the user releases it. */
+    quarantineQuery(cli, error) {
+        this.unsafeQueries.set(cli, cleanupCauseText(error));
+        this.onQueryCleanup?.(cli, error);
+    }
+    /** The user confirmed no account process of this CLI is left; refuse while one is still owned here. */
+    assertCleanupRecoverable(cli) {
+        validateCli(cli);
+        if (this.controller.signal.aborted)
+            throw new Error('插件正在关闭');
+        if (this.reserved.has(cli))
+            throw new Error('此 CLI 的账号终端仍在运行或等待关闭，请先关闭账号终端');
+        for (const query of this.statusQueries.values())
+            if (query.cli === cli && !query.settled)
+                throw new Error('此 CLI 的账号状态仍在读取，请稍后再试');
+    }
+    recoverCleanup(cli) {
+        this.assertCleanupRecoverable(cli);
+        this.unsafeQueries.delete(cli);
+        this.unsafeTerminals.delete(cli);
     }
     async status(cli, cwd, signal) {
         validateCli(cli);
@@ -249,23 +325,11 @@ export class AccountManager {
             }
         }
     }
-    async readStatus(cli, cwd, signal) {
-        if (this.unsafeTerminals.has(cli))
-            return {
-                cli,
-                installed: true,
-                state: 'unavailable',
-                summary: '账号终端尚未确认完全退出，请重启应用',
-                actions: [],
-            };
-        if (this.unsafeQueries.has(cli))
-            return {
-                cli,
-                installed: true,
-                state: 'unavailable',
-                summary: '账号查询未完成清理，请重启应用',
-                actions: [],
-            };
+    /** `renew: false` reads Hermes' own store as it is, for a window that holds off Nous renewal. */
+    async readStatus(cli, cwd, signal, { renew = true } = {}) {
+        const held = this.cleanupHold(cli);
+        if (held)
+            return held;
         const timer = new AbortController();
         // Qoder's native account budget includes its acknowledged session teardown.
         const timeout = setTimeout(() => timer.abort(), (cli === 'qoder' || cli === 'qodercn') ? 15_000 : STATUS_TIMEOUT);
@@ -291,8 +355,9 @@ export class AccountManager {
             if (cli === 'hermes') {
                 await verifyHermesExecutable(executable, control);
                 const local = await readHermesAccount(this.config, control);
-                if (local.logins?.some((login) => login.providerLabel === 'Nous') ||
-                    local.summary === 'Hermes 登录已保存，等待自动续期')
+                if (renew &&
+                    (local.logins?.some((login) => login.providerLabel === 'Nous') ||
+                        local.summary === 'Hermes 登录已保存，等待自动续期'))
                     await ensureHermesNousFresh({
                         home: effectiveHermesHome(this.config),
                         executable,
@@ -314,12 +379,26 @@ export class AccountManager {
                     : cli === 'hermes'
                         ? await listHermesAccountSources(this.config, control)
                         : undefined;
+                const native = cli === 'pi' || cli === 'omp'
+                    ? await this.nativeLoginProviders.read(cli, executable, control).catch(error => {
+                        if (error instanceof ProcessCleanupUnconfirmedError)
+                            throw error;
+                        signal.throwIfAborted();
+                        this.controller.signal.throwIfAborted();
+                        return [];
+                    })
+                    : undefined;
+                const providers = loginProviders(cli, identity.logins, native);
                 return {
                     cli,
                     installed,
                     ...identity,
                     actions: actionsFor(cli, this.config)
-                        .map((item) => (item.id === 'logout' && sources ? { ...item, sources } : item))
+                        .map((item) => item.id === 'logout' && sources
+                        ? { ...item, sources }
+                        : item.id === 'login' && providers
+                            ? { ...item, providers }
+                            : item)
                         .filter((item) => item.target === 'models' || this.backend.spawnTerminal),
                 };
             }
@@ -392,8 +471,10 @@ export class AccountManager {
                 raw += decoder.end();
             };
             const readers = [read(child.stdout), read(child.stderr)];
+            let finished = false;
             try {
                 const [outcome] = await abortable(Promise.all([child.done, ...readers]), control);
+                finished = true;
                 const status = claudeRoute
                     ? claudeRouteIdentity(claudeRoute, raw, outcome.exitCode)
                     : cli === 'kimi' && outcome.exitCode === 0
@@ -404,21 +485,33 @@ export class AccountManager {
                     installed,
                     ...status,
                     actions: this.backend.spawnTerminal
-                        ? actionsFor(cli, this.config).map((item) => cli === 'kimi' && item.id === 'login' && status.state === 'authenticated'
-                            ? { ...item, label: '管理登录', description: '在原生终端管理 Kimi 登录' }
-                            : item)
+                        ? actionsFor(cli, this.config).map((item) => {
+                            if (cli !== 'kimi' || item.id !== 'login')
+                                return item;
+                            const providers = loginProviders(cli, status.logins);
+                            return status.state === 'authenticated'
+                                ? { ...item, label: '管理登录', description: '在原生终端管理 Kimi 登录', providers }
+                                : { ...item, providers };
+                        })
                         : [],
                 };
             }
             finally {
+                let exited = false;
                 try {
-                    child.terminate();
-                    if (!(await child.waitForExit()))
-                        throw new ProcessCleanupUnconfirmedError();
+                    // A status command that ran to completion normally empties its own range; terminate only what outlives it.
+                    if (finished && !control.aborted)
+                        exited = await child.waitForExit(AbortSignal.timeout(METADATA_EXIT_GRACE_MS));
+                    if (!exited) {
+                        child.terminate();
+                        exited = await child.waitForExit();
+                    }
                 }
-                catch {
+                catch (error) {
+                    throw new ProcessCleanupUnconfirmedError({ cause: error });
+                }
+                if (!exited)
                     throw new ProcessCleanupUnconfirmedError();
-                }
                 await Promise.allSettled([child.done, ...readers]);
                 raw = '';
                 if ('cleanup' in launch)
@@ -427,15 +520,8 @@ export class AccountManager {
         }
         catch (error) {
             if (error instanceof ProcessCleanupUnconfirmedError) {
-                this.unsafeQueries.add(cli);
-                this.onQueryCleanup?.(cli, error);
-                return {
-                    cli,
-                    installed,
-                    state: 'unavailable',
-                    summary: '账号查询未完成清理，请重启应用',
-                    actions: [],
-                };
+                this.quarantineQuery(cli, error);
+                return { ...this.cleanupHold(cli), installed };
             }
             if (signal.aborted || this.controller.signal.aborted)
                 throw new Error('账号状态查询已取消');
@@ -458,6 +544,17 @@ export class AccountManager {
                 return { cli, installed, state: 'unavailable', summary: error.message, actions: [] };
             if (error instanceof HermesExecutableError)
                 return { cli, installed, state: 'unavailable', summary: error.message, actions: [] };
+            // Signing in again is the way out of both, so the window still offers every provider (Nous included).
+            const hermesActions = () => actionsFor(cli, this.config).map((item) => item.id === 'login' ? { ...item, providers: loginProviders(cli, undefined, cli === 'pi' || cli === 'omp' ? [] : undefined) } : item);
+            if (error instanceof HermesAccountSourceError)
+                return {
+                    cli,
+                    installed,
+                    state: 'unavailable',
+                    verification: 'local',
+                    summary: error.message,
+                    actions: hermesActions(),
+                };
             if (error instanceof HermesRenewalError)
                 return {
                     cli,
@@ -465,7 +562,7 @@ export class AccountManager {
                     state: error.state === 'relogin' ? 'unauthenticated' : 'unavailable',
                     verification: 'local',
                     summary: error.message,
-                    actions: actionsFor(cli, this.config),
+                    actions: hermesActions(),
                 };
             if (code === 'CLI_LAUNCHER_UNSUPPORTED')
                 return {
@@ -507,6 +604,18 @@ export class AccountManager {
             clearTimeout(timeout);
         }
     }
+    /** The login still exists in the native store: a stale window never signs out something else. */
+    async assertLogin(cli, cwd, login, signal) {
+        if (cli === 'pi' || cli === 'omp') {
+            if (!await piOmpStoredLoginExists(cli, login, this.config.stateDirectory, signal))
+                throw new AccountLoginGoneError();
+            return;
+        }
+        const current = await this.readStatus(cli, cwd, signal);
+        signal.throwIfAborted();
+        if (!current.logins?.some((item) => item.id === login))
+            throw new AccountLoginGoneError();
+    }
     hasCustomExecutable(cli) {
         if (cli !== 'harness' && this.config.cliExecutablePaths?.read(cli)?.mode === 'manual')
             return true;
@@ -517,7 +626,7 @@ export class AccountManager {
         const configured = this.config[`${cli}Executable`];
         return !!configured && configured !== cli;
     }
-    start(parent, cli, action, cwd, signal, source, provider) {
+    start(parent, cli, action, cwd, signal, source, provider, login) {
         validateCli(cli);
         if (!ACTIONS.includes(action))
             throw new Error('不支持的账号操作');
@@ -527,11 +636,30 @@ export class AccountManager {
                 !['pi', 'omp', 'hermes'].includes(cli)))
             throw new Error('不支持的账号来源');
         if (provider !== undefined &&
-            (cli !== 'zcode' ||
-                action !== 'login' ||
+            (action !== 'login' ||
                 source !== undefined ||
-                !['bigmodel', 'zai'].includes(provider)))
-            throw new Error('不支持的 ZCode 授权来源');
+                login !== undefined ||
+                !(cli === 'zcode' ? ['bigmodel', 'zai'].includes(provider)
+                    : cli === 'pi' || cli === 'omp' ? /^[a-z0-9][a-z0-9._-]{0,63}$/.test(provider)
+                        : isLoginProvider(cli, provider))))
+            throw new Error(cli === 'zcode' ? '不支持的 ZCode 授权来源' : '不支持的登录服务商');
+        // One login of the account window: an OpenCode or Kimi provider, a Hermes pool entry,
+        // a Pi provider in one location, or one OMP credential row in one location.
+        const target = login === undefined ? undefined : parseAccountLoginId(login);
+        const entry = target?.entry;
+        if (login !== undefined &&
+            (action !== 'logout' ||
+                source !== undefined ||
+                !target ||
+                target.cli !== cli ||
+                !(cli === 'opencode' || cli === 'kimi'
+                    ? entry === undefined
+                    : cli === 'hermes'
+                        ? entry !== undefined
+                        : cli === 'pi'
+                            ? entry === 'native' || entry === 'plugin'
+                            : cli === 'omp' && !!entry && /^(?:native|plugin)\.[1-9][0-9]{0,15}$/.test(entry))))
+            throw new Error('不支持单独退出该账号');
         if (!parent || parent.length > 512)
             throw new Error('无效的父会话');
         this.controller.signal.throwIfAborted();
@@ -542,7 +670,7 @@ export class AccountManager {
         if (!this.backend.spawnTerminal)
             throw new Error('当前宿主不支持交互终端');
         if (this.unsafeTerminals.has(cli))
-            throw new Error('账号终端尚未确认完全退出，请重启应用');
+            throw new Error('账号终端未能确认完全退出，已暂停此 CLI；确认没有残留进程后可在设置中解除暂停');
         if (this.unsafeQueries.has(cli))
             throw new ProcessCleanupUnconfirmedError();
         if (this.reserved.has(cli))
@@ -557,12 +685,12 @@ export class AccountManager {
             scope = { controller: new AbortController(), pending: new Set() };
             this.parents.set(parent, scope);
         }
-        const operation = this.track(this.startSession(parent, cli, action, directory, signal, scope, source, provider));
+        const operation = this.track(this.startSession(parent, cli, action, directory, signal, scope, source, provider, login));
         scope.pending.add(operation);
         void operation.finally(() => scope.pending.delete(operation)).catch(() => undefined);
         return operation;
     }
-    async startSession(parent, cli, action, cwd, signal, scope, source, provider) {
+    async startSession(parent, cli, action, cwd, signal, scope, source, provider, login) {
         const timeout = new AbortController();
         const timer = setTimeout(() => timeout.abort(), STARTUP_TIMEOUT);
         timer.unref?.();
@@ -575,9 +703,16 @@ export class AccountManager {
         let session;
         let allocation;
         let release;
+        let afterLogin;
+        let nativeProviders;
         let instruction = instructionFor(cli, action);
         try {
             const executable = await resolveCliExecutable(cli, this.backend, this.config, startup);
+            if (provider && (cli === 'pi' || cli === 'omp')) {
+                nativeProviders = await this.nativeLoginProviders.read(cli, executable, startup);
+                if (!isLoginProvider(cli, provider, nativeProviders))
+                    throw new Error('不支持的登录服务商');
+            }
             if (cli === 'hermes')
                 await verifyHermesExecutable(executable, startup);
             startup.throwIfAborted();
@@ -607,7 +742,18 @@ export class AccountManager {
                 launch.env = qoderEnvironment(cli);
             }
             else if (cli === 'kimi') {
-                if (action === 'login') {
+                if (login)
+                    await this.assertLogin(cli, cwd, login, startup);
+                const target = login ? parseAccountLoginId(login) : undefined;
+                if (provider) {
+                    // A Kimi Code region picked in the window: Kimi's own device login for it.
+                    launch.argv = [executable, 'login', '--region', provider === 'kimi-code-cn' ? 'mainland-cn' : 'global'];
+                }
+                else if (target && target.provider !== KIMI_CODE_LOGIN) {
+                    // One API provider: Kimi's own non-interactive removal, the same call as /logout.
+                    launch.argv = [executable, 'provider', 'remove', target.provider];
+                }
+                else if (action === 'login') {
                     const current = await this.readStatus(cli, cwd, startup);
                     startup.throwIfAborted();
                     if (current.state === 'authenticated' && current.authMethod === 'oauth') {
@@ -629,15 +775,22 @@ export class AccountManager {
                 release = prepared.cleanup;
             }
             else if (cli === 'zcode' || cli === 'grok') {
+                // A Grok login/logout must not race Grok's own renewal of the same auth file.
+                if (cli === 'grok')
+                    release = await reserveGrokAccount(startup);
                 const prepared = await zcodeGrokAccountLaunch(cli, action, executable, this.config, this.backend, startup, { loginProvider: provider });
                 launch = prepared;
                 instruction = prepared.instruction;
             }
             else if (cli === 'pi' || cli === 'omp') {
+                if (login)
+                    await this.assertLogin(cli, cwd, login, startup);
                 const prepared = await preparePiOmpAccountTerminal({
                     cli,
                     action,
                     source,
+                    provider,
+                    login,
                     executable,
                     project: cwd,
                     stateDirectory: this.config.stateDirectory ??
@@ -656,7 +809,11 @@ export class AccountManager {
                     for (const free of releases)
                         free();
                 };
-                const prepared = await prepareHermesAccount(action, executable, cwd, this.config, startup, source);
+                // The reservation holds off Nous renewal, which a full status read would report as busy
+                // (no rows): the target is checked in the local native store instead.
+                if (login && !(await readHermesAccount(this.config, startup)).logins?.some((item) => item.id === login))
+                    throw new AccountLoginGoneError();
+                const prepared = await prepareHermesAccount(action, executable, cwd, this.config, startup, source, { provider, login });
                 const cleanup = release;
                 release = async () => {
                     await prepared.cleanup();
@@ -665,25 +822,32 @@ export class AccountManager {
                 const selectedHome = effectiveHermesHome(this.config);
                 if (selectedHome !== oldHome)
                     releases.push(await reserveHermesAccount(selectedHome, startup));
+                if (action === 'login' && provider === 'nous')
+                    afterLogin = (signal) => selectHermesNousAfterLogin(this.config, executable, (argv, home, env) => captureCatalogMetadata(this.backend, this.config, argv, home, signal, env), signal);
                 launch = prepared;
                 instruction = prepared.instruction;
             }
             else if (cli === 'opencode') {
-                const prepared = await prepareOpenCodeAccount(executable, action, this.config, startup);
+                if (login)
+                    await this.assertLogin(cli, cwd, login, startup);
+                const prepared = await prepareOpenCodeAccount(executable, action, this.config, startup, { provider, login });
                 launch = prepared;
                 instruction = prepared.instruction;
                 release = prepared.cleanup;
             }
             startup.throwIfAborted();
+            const guide = createAccountGuide(cli, action, {
+                provider,
+                login,
+                stores: provider ? providerStores(cli, provider, nativeProviders) : undefined,
+            });
             allocation = spawnAccountTerminal(this.backend, {
                 ...launch,
-                rows: 24,
-                cols: 80,
+                ...(guide ? guide.size : { rows: 24, cols: 80 }),
                 terminalType: 'xterm-256color',
                 graceMs: this.config.graceMs,
                 signal: allocationControl.signal,
             }).then(async (terminal) => {
-                void terminal.done.catch(() => undefined);
                 session = {
                     id: randomUUID(),
                     parent,
@@ -697,9 +861,18 @@ export class AccountManager {
                     stopping: false,
                     changed: new Set(),
                     output: Promise.resolve(),
+                    exited: false,
+                    ...(guide ? { guide, guideControl: new AbortController() } : {}),
+                    project: cwd,
                     release,
+                    ...(afterLogin ? { afterLogin } : {}),
+                    ...(action === 'logout' && login && (cli === 'pi' || cli === 'omp') ? { logoutLogin: login } : {}),
                 };
+                const own = session;
+                void terminal.done.then(() => (own.exited = true), () => (own.exited = true));
                 this.sessions.set(session.id, session);
+                if (guide && cli !== 'antigravity')
+                    session.before = this.evidence(session, session.guideControl.signal).catch(() => undefined);
                 this.emit(session, { status: 'running' });
                 session.output = this.readTerminal(session);
                 void session.output.catch(() => undefined);
@@ -742,13 +915,16 @@ export class AccountManager {
             }, 30_000);
             session.attachDeadline.unref?.();
             void session.terminal.done
-                .then((outcome) => this.finish(published, outcome.exitCode === 0 ? 'closed' : 'failed', outcome.exitCode === 0
-                ? '账号终端已结束'
-                : Number.isInteger(outcome.exitCode)
-                    ? `账号终端异常退出（退出码 ${outcome.exitCode}），请在系统终端检查该 CLI 后重试`
-                    : '账号终端连接已结束，未返回退出码；请在系统终端检查该 CLI 后重试'), () => this.finish(published, 'failed', '账号终端连接失败，请重新打开'))
+                .then(async (outcome) => {
+                await this.guidedExit(published, outcome.exitCode ?? undefined);
+                return this.finish(published, outcome.exitCode === 0 ? 'closed' : 'failed', outcome.exitCode === 0
+                    ? '账号终端已结束'
+                    : Number.isInteger(outcome.exitCode)
+                        ? `账号终端异常退出（退出码 ${outcome.exitCode}），请在系统终端检查该 CLI 后重试`
+                        : '账号终端连接已结束，未返回退出码；请在系统终端检查该 CLI 后重试');
+            }, () => this.finish(published, 'failed', '账号终端连接失败，请重新打开'))
                 .catch(() => undefined);
-            return { id: session.id, instruction };
+            return { id: session.id, instruction, size: guide?.size ?? { cols: 80, rows: 24 } };
         }
         catch (error) {
             // An allocation still in flight may own a process already; never permit a
@@ -766,16 +942,20 @@ export class AccountManager {
             if (error instanceof Error && error.message === '此 CLI 已有账号终端，请先关闭后重试')
                 throw error;
             if (error instanceof ProcessCleanupUnconfirmedError)
-                throw new Error('账号终端尚未确认完全退出，请重启应用');
+                throw new Error('账号终端未能确认完全退出，已暂停此 CLI；确认没有残留进程后可在设置中解除暂停');
             if (timeout.signal.aborted)
                 throw new Error('账号终端启动超时，正在回收启动过程；请稍后重试');
             if (error instanceof ZCodeAccountCapabilityError)
+                throw error;
+            if (error instanceof AccountLoginGoneError)
                 throw error;
             if (error instanceof WindowsAccountTerminalError)
                 throw error;
             if (error instanceof WindowsCliInstallationError)
                 throw error;
             if (error instanceof HermesExecutableError)
+                throw error;
+            if (error instanceof HermesAccountSourceError)
                 throw error;
             if (error instanceof MimoConfigurationError)
                 throw error;
@@ -797,6 +977,10 @@ export class AccountManager {
                 const text = typeof chunk === 'string' ? chunk : decoder.write(chunk);
                 for (let offset = 0; offset < text.length; offset += 4096)
                     this.emit(session, { data: text.slice(offset, offset + 4096) });
+                if (session.guide) {
+                    this.guided(session, session.guide.output(text));
+                    this.settleLater(session);
+                }
             }
             const tail = decoder.end();
             if (tail)
@@ -838,7 +1022,13 @@ export class AccountManager {
                     seq = frame.seq;
                     yield frame;
                 }
-                if (session.state !== 'running' || signal.aborted)
+                if (signal.aborted)
+                    return;
+                // Cleanup can append its final frame while the consumer is paused at yield.
+                // Drain that frame before ending the stream, even if the session is now closed.
+                if (session.frames.some((frame) => frame.seq > seq))
+                    continue;
+                if (session.state !== 'running')
                     return;
                 await new Promise((resolve) => {
                     const wake = () => {
@@ -870,6 +1060,228 @@ export class AccountManager {
         catch {
             throw new Error('无法写入账号终端，请重新打开');
         }
+        if (session.guide)
+            this.guided(session, session.guide.input(data));
+    }
+    /** The user's answer to the current step of a plugin-drawn window. */
+    async respond(parent, id, response) {
+        const session = this.owned(parent, id);
+        if (!session.guide)
+            throw new GuideResponseError();
+        if (session.state !== 'running' || session.stopping)
+            throw new Error('账号终端已关闭');
+        const events = session.guide.respond(response);
+        // Keys go first, so the CLI has the answer before the account is read.
+        for (const event of events)
+            if ('write' in event) {
+                try {
+                    await session.terminal.write(event.write);
+                    if (event.enter) {
+                        await sleep(ANSWER_ENTER_MS);
+                        if (session.state === 'running' && !session.stopping)
+                            await session.terminal.write('\r');
+                    }
+                }
+                catch {
+                    throw new Error('无法写入账号终端，请重新打开');
+                }
+            }
+        this.guided(session, events.filter((event) => !('write' in event)));
+    }
+    guided(session, events) {
+        for (const event of events) {
+            if ('guide' in event) {
+                this.emit(session, { guide: event.guide });
+                if (event.guide.step === 'notSignedIn')
+                    void this.finish(session, 'closed', '账号终端已关闭').catch(() => undefined);
+            }
+            else if ('finish' in event)
+                void this.finish(session, 'closed', '账号终端已关闭').catch(() => undefined);
+            else if ('write' in event)
+                void this.autoWrite(session, event.write);
+            else if ('command' in event)
+                void this.logOut(session, event.command);
+            else if ('identify' in event)
+                void this.identifyScreen(session);
+            else if ('watch' in event)
+                void this.watchAccount(session);
+            else
+                void this.confirmAccount(session, event.confirm);
+        }
+    }
+    /** A choice the user already made in the window, typed into the menu it belongs to. */
+    async autoWrite(session, keys) {
+        const signal = session.guideControl.signal;
+        try {
+            await sleep(AGY_GUIDE_TIMING.commandDelayMs, undefined, { signal });
+            if (session.state === 'running' && !session.stopping)
+                await session.terminal.write(keys);
+        }
+        catch {
+            // Closing the window aborts it; nothing else to undo.
+        }
+    }
+    /** The native account: agy's own credential store, or this CLI's account status. */
+    evidence(session, signal) {
+        if (session.logoutLogin && (session.cli === 'pi' || session.cli === 'omp')) {
+            const login = session.logoutLogin;
+            return piOmpStoredLoginExists(session.cli, login, this.config.stateDirectory, signal).then(exists => ({
+                state: exists ? 'configured' : 'unconfigured',
+                logins: exists ? [{ id: login, providerLabel: '', authMethod: 'api' }] : [],
+            }));
+        }
+        if (session.cli === 'antigravity')
+            return this.identity(session.cli, signal).catch((error) => {
+                // readStatus quarantines its own unconfirmed reads; the agy identity read is quarantined here.
+                if (error instanceof ProcessCleanupUnconfirmedError)
+                    this.quarantineQuery(session.cli, error);
+                throw error;
+            });
+        // A Hermes window holds off Nous renewal, which a renewing read reports as busy (no rows):
+        // Hermes' own account store shows whether the login or logout took effect.
+        return this.readStatus(session.cli, session.project, signal, { renew: session.cli !== 'hermes' });
+    }
+    /** An ordinary failed read is retried by the caller's poll; an unconfirmed process range ends it. */
+    readEvidence(session, signal) {
+        return this.evidence(session, signal).catch((error) => {
+            if (error instanceof ProcessCleanupUnconfirmedError)
+                throw error;
+            return undefined;
+        });
+    }
+    /** Report a proven change, after the native step a login still needs. */
+    async proven(session, change, signal) {
+        // The login itself took effect; a failed follow-up leaves the model list to say what is missing.
+        if (change === 'login')
+            await session.afterLogin?.(signal).catch(() => undefined);
+        signal.throwIfAborted();
+        const events = session.guide.confirmed(change);
+        if (change === 'logout' && session.logoutLogin) {
+            session.completionGuide = events.find((event) => 'guide' in event)?.guide;
+            await this.finish(session, 'closed', '账号终端已关闭');
+        }
+        else
+            this.guided(session, events);
+    }
+    /** The CLI ended its own login/logout: read the account before reporting the window closed. */
+    async guidedExit(session, exitCode) {
+        if (!session.guide || session.stopping)
+            return;
+        session.exitCode = exitCode;
+        const events = session.guide.exited(exitCode);
+        const confirm = events.find((event) => 'confirm' in event);
+        this.guided(session, events.filter((event) => !('confirm' in event)));
+        if (confirm)
+            await this.confirmAccount(session, confirm.confirm, true);
+    }
+    settleLater(session) {
+        const now = Date.now();
+        session.firstOutputAt ??= now;
+        clearTimeout(session.settleTimer);
+        const agy = session.guide instanceof AgyAccountGuide;
+        const quiet = agy ? AGY_GUIDE_TIMING.quietMs : AGY_GUIDE_TIMING.flowQuietMs;
+        // A spinner never lets the screen settle; the cap still reads it once.
+        const capped = session.firstOutputAt + (agy ? AGY_GUIDE_TIMING.settleCapMs : quiet + AGY_GUIDE_TIMING.settleCapMs) - now;
+        session.settleTimer = setTimeout(() => {
+            session.firstOutputAt = undefined;
+            if (session.state === 'running' && !session.stopping)
+                this.guided(session, session.guide.settled());
+        }, Math.max(0, Math.min(quiet, capped)));
+    }
+    /** A settled screen with no known step: the native account decides whether it is signed in. */
+    async identifyScreen(session) {
+        const signal = session.guideControl.signal;
+        let identity;
+        try {
+            identity = await this.readEvidence(session, signal);
+        }
+        catch {
+            // The unconfirmed read is quarantined; nothing is typed on a guess.
+            return;
+        }
+        if (signal.aborted || session.state !== 'running' || session.stopping)
+            return;
+        this.guided(session, session.guide.identified(identity));
+    }
+    /** The sign-out command the plugin types for the user (2026-10-26 request) in a CLI without a logout subcommand. */
+    async logOut(session, command) {
+        const signal = session.guideControl.signal;
+        try {
+            // Let the input box take focus after its first full draw.
+            await sleep(AGY_GUIDE_TIMING.commandDelayMs, undefined, { signal });
+            if (session.state !== 'running' || session.stopping)
+                return;
+            await session.terminal.write(command);
+            await sleep(AGY_GUIDE_TIMING.commandDelayMs, undefined, { signal });
+            if (session.state !== 'running' || session.stopping)
+                return;
+            await session.terminal.write('\r');
+            // The first Enter may only accept the slash-command completion. Never press it
+            // again once the account is gone or agy shows its login menu (Enter would sign in).
+            await sleep(AGY_GUIDE_TIMING.confirmEnterMs, undefined, { signal });
+            const identity = await this.readEvidence(session, signal);
+            signal.throwIfAborted();
+            if (identity?.state === 'authenticated' &&
+                session.guide.retryEnter() &&
+                session.state === 'running' &&
+                !session.stopping)
+                await session.terminal.write('\r');
+        }
+        catch {
+            if (!signal.aborted)
+                this.guided(session, session.guide.unconfirmed('logout'));
+            return;
+        }
+        await this.confirmAccount(session, 'logout');
+    }
+    /** A browser or device authorization the CLI waits for without exiting: read the account until it signs in. */
+    async watchAccount(session) {
+        const signal = session.guideControl.signal;
+        const until = Date.now() + AGY_GUIDE_TIMING.authorizeWatchMs;
+        const guide = session.guide;
+        try {
+            const before = await session.before;
+            while (Date.now() < until && session.state === 'running' && !session.stopping) {
+                await sleep(AGY_GUIDE_TIMING.watchPollMs, undefined, { signal });
+                const after = await this.readEvidence(session, signal);
+                signal.throwIfAborted();
+                if (guide.proves('login', before, after, session.exitCode)) {
+                    await this.proven(session, 'login', signal);
+                    return;
+                }
+            }
+        }
+        catch {
+            // Closing the window aborts it; the login stays the user's to finish.
+        }
+    }
+    /** The native account state, not terminal text, decides that a login or logout took effect. */
+    async confirmAccount(session, change, exited = false) {
+        const signal = session.guideControl.signal;
+        const until = Date.now() + (change === 'login' ? AGY_GUIDE_TIMING.loginConfirmMs : AGY_GUIDE_TIMING.logoutConfirmMs);
+        const guide = session.guide;
+        try {
+            const before = await session.before;
+            while (Date.now() < until) {
+                await sleep(AGY_GUIDE_TIMING.pollMs, undefined, { signal });
+                const after = await this.readEvidence(session, signal);
+                signal.throwIfAborted();
+                if (guide.proves(change, before, after, session.exitCode)) {
+                    // Nothing is left for the user to do in the native terminal.
+                    await this.proven(session, change, signal);
+                    return;
+                }
+                // A finished process will not change the account any more.
+                if (exited && after)
+                    break;
+            }
+        }
+        catch (error) {
+            // Closing the window aborts the poll; an unconfirmed read ends it as unconfirmed.
+            if (signal.aborted || !(error instanceof ProcessCleanupUnconfirmedError))
+                return;
+        }
+        this.guided(session, guide.unconfirmed(change));
     }
     async resize(parent, id, cols, rows) {
         const session = this.owned(parent, id);
@@ -884,6 +1296,7 @@ export class AccountManager {
             return;
         try {
             await session.terminal.resize(cols, rows);
+            session.guide?.resize?.(cols, rows);
         }
         catch {
             throw new Error('无法调整账号终端尺寸，请重新打开');
@@ -938,13 +1351,18 @@ export class AccountManager {
         if (session.cleanup)
             return session.cleanup;
         session.stopping = true;
+        session.guideControl?.abort();
+        clearTimeout(session.settleTimer);
         clearTimeout(session.deadline);
         clearTimeout(session.attachDeadline);
         session.cleanup = (async () => {
             try {
+                await this.endForeground(session);
                 await session.terminal.terminate();
                 await session.output;
                 await session.release?.();
+                if (session.completionGuide)
+                    this.emit(session, { guide: session.completionGuide });
                 session.state = state;
                 this.emit(session, { status: state, message, cleanupConfirmed: true });
                 this.reserved.delete(session.cli);
@@ -968,6 +1386,28 @@ export class AccountManager {
             }
         })();
         return session.cleanup;
+    }
+    /**
+     * A CLI that never reaped a finished helper (agy's browser opener after
+     * /login) keeps a zombie descendant, and the macOS provider then refuses to
+     * stop the session without signalling the CLI. Ending it first lets the
+     * system reap the zombie; terminate() still owns every remaining member.
+     */
+    async endForeground(session) {
+        if (process.platform === 'win32' || session.exited)
+            return;
+        try {
+            await session.terminal.signalForeground('SIGTERM');
+        }
+        catch {
+            return;
+        }
+        let timer;
+        await Promise.race([
+            session.terminal.done.then(() => undefined, () => undefined),
+            new Promise((resolve) => (timer = setTimeout(resolve, this.config.graceMs))),
+        ]);
+        clearTimeout(timer);
     }
     track(operation) {
         this.pending.add(operation);

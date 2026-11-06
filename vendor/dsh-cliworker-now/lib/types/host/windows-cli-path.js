@@ -73,9 +73,7 @@ export async function findWindowsPathCommand(commands, capture, signal, options 
     catch (error) {
         if (!(error instanceof ProcessCleanupUnconfirmedError))
             throw error;
-        // This fixed, read-only system query has not launched the requested CLI
-        // or opened its account. Keep the discovery failure retryable instead of
-        // permanently quarantining an unrelated (possibly absent) CLI.
+        // This fixed system PATH query has not launched the requested CLI or opened its account.
         throw Object.assign(new Error('Windows CLI 安装路径探测暂时失败，请刷新重试', { cause: error }), {
             code: 'CLI_PATH_DISCOVERY_FAILED',
         });

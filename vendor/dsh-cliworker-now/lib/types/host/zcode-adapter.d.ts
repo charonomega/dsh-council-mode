@@ -1,8 +1,9 @@
+import type { NativeAccess } from './native-approval-policy.ts';
 import { type Effort, type ModelChoice, type TaskMode } from '../shared/types.ts';
 import type { EventInput, ProtocolResult } from './protocol.ts';
 import type { AccountIdentity } from './account-identity.ts';
 import { probeAccountModels } from './account-models.mjs';
-export declare const ZCODE_DENIED_TOOLS: readonly ["Agent", "Task", "Skill", "TaskOutput", "TaskStop", "SendMessage", "ReadSessionContext", "CreateWorkflow", "AmendWorkflow", "SaveWorkflow", "EvalWorkflowSnippet", "ListWorkflowRuns", "GetWorkflowRun", "ResumeWorkflowRun", "ResolveWorkflowQuestion", "ListSavedWorkflows", "ListModels", "mcp__node_repl__js"];
+export declare const ZCODE_DENIED_TOOLS: readonly ["mcp__node_repl__js"];
 export interface ZCodeInput {
     executable: string;
     project: string;
@@ -11,6 +12,7 @@ export interface ZCodeInput {
         effort: Effort;
     };
     mode: TaskMode;
+    access?: NativeAccess;
     prompt: string;
     conversationId?: string;
     nativeTransport?: boolean;
@@ -34,6 +36,8 @@ export declare function zcodeEnvironment(executable: string, state: string, auth
     TMPDIR: string;
     ZCODE_CREDENTIAL_SECRET?: string | undefined;
 };
+/** Handed to the bridge only; it removes the variable before starting the CLI. */
+export declare const ZCODE_MEMORY_ENVIRONMENT = "CLIWORKER_ZCODE_NATIVE_MEMORY";
 export declare function prepareZCode(input: ZCodeInput): Promise<{
     argv: string[];
     env: {

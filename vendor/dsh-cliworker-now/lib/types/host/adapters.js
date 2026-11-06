@@ -3,10 +3,11 @@ import { qoderVariant } from "./qoder-variant.js";
 import { readClaudeOwnRoute, claudeNativeSettingsArguments } from "./claude-own-route.js";
 import { discoverClaudeNativeOAuth } from "./claude-native-oauth.js";
 import { discoverCodexModels } from "./codex-models.js";
+import { readCodexCustomRouteVersion } from "./cli-account-binding.js";
 import { discoverAgyAccountModels } from "./agy-models.js";
 import { agyBackgroundEnvironment } from "./agy-background-environment.js";
 import { discoverQoderModels } from "./qoder-accounts.js";
-import { discoverFirstPartySources, readFirstPartyModelSources } from "./first-party-models.js";
+import { discoverFirstPartySources, discoverMimoModels, readFirstPartyModelSources } from "./first-party-models.js";
 import { nativeAgyAccountIdentity } from "./agy-windows-account.js";
 import { extendedCatalog, isExtendedCli } from "./extended-adapters.js";
 import { ZCodeProtocol, managedZCodeEntry } from "./zcode-adapter.js";
@@ -26,7 +27,8 @@ import { SubprocessExecutableNotFoundError } from '@deepseek-ai/dsh-subprocess';
 import { CLI_LABELS, EFFORTS, cliOf, } from "../shared/types.js";
 import { AgyProtocol } from "./protocol.js";
 import { CliProtocol } from "./cli-protocol.js";
-import { agyArguments, ProcessCleanupUnconfirmedError, } from "./process.js";
+import { catalogNoticeOf } from "./catalog-notice.js";
+import { agyArguments, METADATA_EXIT_GRACE_MS, ProcessCleanupUnconfirmedError, } from "./process.js";
 const managedPiEntry = () => join(homedir(), '.local/share/cliworker-now/runtimes/pi-1.0.2/node_modules/@earendil-works/pi-coding-agent/dist/cli.js');
 function entryPresent(path) {
     try {
@@ -99,9 +101,11 @@ export async function captureCatalogMetadata(backend, config, argv, cwd, signal,
             output += decoder.end();
     };
     const readers = [read(process.stdout, true), read(process.stderr, false)];
+    let finished = false;
     try {
         await Promise.all(readers);
         const outcome = await process.done;
+        finished = true;
         control.throwIfAborted();
         if (outcome.exitCode === null || !allowedExitCodes.includes(outcome.exitCode))
             throw new Error('CLI 模型查询失败，请在终端检查该 CLI 配置');
@@ -110,11 +114,16 @@ export async function captureCatalogMetadata(backend, config, argv, cwd, signal,
     finally {
         let exited = false;
         try {
-            process.terminate();
-            exited = await process.waitForExit();
+            // A query that ran to completion normally empties its own range; terminate only what outlives it.
+            if (finished && !control.aborted)
+                exited = await process.waitForExit(AbortSignal.timeout(METADATA_EXIT_GRACE_MS));
+            if (!exited) {
+                process.terminate();
+                exited = await process.waitForExit();
+            }
         }
-        catch {
-            throw new ProcessCleanupUnconfirmedError();
+        catch (error) {
+            throw new ProcessCleanupUnconfirmedError({ cause: error });
         }
         if (!exited)
             throw new ProcessCleanupUnconfirmedError();
@@ -133,12 +142,13 @@ export async function catalogFor(cli, backend, config, cwd, signal) {
     }
     if (isExtendedCli(cli)) {
         const models = await extendedCatalog(cli, executable, (argv, env) => capture(backend, config, argv, cwd, signal, env), config.stateDirectory ?? join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'cliworker-now'), config, signal, { backend, signal, graceMs: config.graceMs });
+        const scopeNotice = catalogNoticeOf(models);
         if (!models.length)
-            throw new Error(`${CLI_LABELS[cli]} 当前账号暂无可用模型，请登录或刷新`);
+            throw new Error(scopeNotice ?? `${CLI_LABELS[cli]} 当前账号暂无可用模型，请登录或刷新`);
         return {
             cli,
             models,
-            notice: '当前账号可用模型',
+            notice: scopeNotice ?? '当前账号可用模型',
         };
     }
     if (cli === 'antigravity') {
@@ -146,12 +156,21 @@ export async function catalogFor(cli, backend, config, cwd, signal) {
         return { cli, models, notice: '当前账号可用模型' };
     }
     if (cli === 'codex') {
+        const relay = (await readCodexCustomRouteVersion(cwd, signal)) !== undefined;
         const models = await discoverCodexModels(backend, config, executable, cwd, signal);
         if (!models.length)
             throw new Error('Codex 当前账号暂无可确认模型，请刷新');
+        return { cli, models, notice: relay ? 'Codex 自定义路由模型；来自 Codex 自带列表，中转是否支持以实际调用为准' : '当前账号可用模型' };
+    }
+    if (cli === 'mimo') {
+        const { models, stale } = await discoverMimoModels(executable, cwd, (argv, env) => capture(backend, config, argv, cwd, signal, env), signal);
+        if (!models.length)
+            throw new Error(stale
+                ? 'MiMo 本地模型列表与当前账号可用模型不一致，请更新 MiMo 或运行 mimo models --refresh 后刷新'
+                : 'MiMo 当前账号暂无可确认模型，请检查配置');
         return { cli, models, notice: '当前账号可用模型' };
     }
-    if (cli === 'claude' || cli === 'kimi' || cli === 'mimo') {
+    if (cli === 'claude' || cli === 'kimi') {
         const claudeRoute = cli === 'claude' ? await readClaudeOwnRoute(cwd, signal) : undefined;
         if (claudeRoute?.kind === 'native') {
             const { models, quota } = await discoverClaudeNativeOAuth(backend, config, executable, cwd, signal, claudeNativeSettingsArguments(claudeRoute.configDirectory, claudeRoute.suppressedEnvironment));
@@ -214,17 +233,19 @@ export function validatePreference(preference, catalog) {
         throw new Error('CLI 配置不匹配');
     resolveModel(preference, catalog.models);
 }
-export function workerArguments(executable, project, preference, mode, prompt, timeoutMs, conversationId, nativeTransport = false) {
+export function workerArguments(executable, project, preference, mode, prompt, timeoutMs, conversationId, nativeTransport = false, 
+/** DSH permission tier for this run; absent keeps the historical workspace mapping. */
+access) {
     const cli = cliOf(preference);
     const task = `任务：\n${prompt}`;
     if (cli === 'antigravity')
-        return agyArguments(executable, project, preference, mode, prompt, timeoutMs, conversationId);
+        return agyArguments(executable, project, preference, mode, prompt, timeoutMs, conversationId, access);
     if ((cli === 'qoder' || cli === 'qodercn')) {
         if (!nativeTransport)
             throw new Error('Qoder 仅支持已确认的原生 ACP 通信，请新建任务');
         if (mode === 'plan')
             throw new Error('Qoder 当前 ACP 未公开只读规划模式，无法安全执行规划任务');
-        return [executable, '--acp', '--permission-mode', 'accept_edits', '--model', preference.model];
+        return [executable, '--acp', '--permission-mode', access === 'read-only' ? 'default' : access === 'danger-full-access' ? 'bypass_permissions' : 'auto', '--model', preference.model];
     }
     if (cli === 'codex')
         return [
@@ -238,9 +259,10 @@ export function workerArguments(executable, project, preference, mode, prompt, t
             '-c',
             `model_reasoning_effort=${JSON.stringify(preference.effort)}`,
             '-c',
-            `sandbox_mode=${JSON.stringify(mode === 'plan' ? 'read-only' : 'workspace-write')}`,
+            `sandbox_mode=${JSON.stringify(mode === 'plan' ? 'read-only' : (access ?? 'workspace-write'))}`,
             '-c',
-            'approval_policy="never"',
+            `approval_policy=${JSON.stringify(mode === 'plan' || !access || access === 'danger-full-access' ? 'never' : 'on-request')}`,
+            ...(mode !== 'plan' && access ? ['-c', `approvals_reviewer=${JSON.stringify(access === 'workspace-write' ? 'auto_review' : 'user')}`] : []),
             task,
         ];
     if (cli === 'claude')
@@ -255,7 +277,7 @@ export function workerArguments(executable, project, preference, mode, prompt, t
             preference.model,
             ...(preference.effort !== 'default' ? ['--effort', preference.effort] : []),
             '--permission-mode',
-            mode === 'plan' ? 'plan' : 'acceptEdits',
+            mode === 'plan' ? 'plan' : access === 'danger-full-access' ? 'bypassPermissions' : access === 'read-only' ? 'manual' : access === 'workspace-write' ? 'auto' : 'acceptEdits',
             ...(conversationId ? ['--resume', conversationId] : []),
             task,
         ];

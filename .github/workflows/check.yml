@@ -16,8 +16,11 @@ jobs:
       - run: npm run build
       - run: git diff --exit-code -- client.js
       - run: npm run check
-      - run: mkdir -p artifacts && npm pack --pack-destination artifacts
+      - run: npm run pack:release
       - uses: actions/upload-artifact@v4
         with:
           name: council-plugin
-          path: artifacts/*.tgz
+          path: |
+            artifacts/*.tgz
+            artifacts/SHA256SUMS
+            artifacts/release-manifest.json

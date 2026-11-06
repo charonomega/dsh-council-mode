@@ -5,9 +5,20 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve, relative, isAbsolute } from 'node:path';
 import { safePiOmpAncestors } from "./pi-omp-native.js";
 import { authenticatedAccountLogins, providerLogin, usableNativeApiKey } from "./account-login.js";
+import { accountLoginId } from "../shared/account-links.js";
 const object = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
 const text = (value) => typeof value === 'string' && !!value.trim();
 export const OPENCODE_OAUTH_UNSUPPORTED = 'OpenCode OAuth 暂无法安全续期，请使用该 CLI 自身 API 配置';
+/** OpenCode 1.19 uses XDG paths on Windows too, not LOCALAPPDATA. */
+export function openCodeNativePaths(options = {}) {
+    const home = options.nativeHome ?? homedir();
+    return {
+        data: (!options.nativeHome && process.env.XDG_DATA_HOME) || join(home, '.local/share'),
+        config: (!options.nativeHome && process.env.XDG_CONFIG_HOME) || join(home, '.config'),
+        models: options.modelsPath || (!options.nativeHome && process.env.OPENCODE_MODELS_PATH) ||
+            join((!options.nativeHome && process.env.XDG_CACHE_HOME) || join(home, '.cache'), 'opencode/models.json'),
+    };
+}
 /** JSONC comments/trailing commas, without changing quoted model IDs or URLs. */
 function jsonc(raw) {
     let result = '', quoted = false, escaped = false;
@@ -246,13 +257,7 @@ export async function assertOpenCodeManagedAuth(authDirectory, signal) {
 }
 /** The same native+plugin sources supply metadata queries and worker execution. */
 export async function readOpenCodeProfile(authDirectory, options = {}) {
-    const home = options.nativeHome ?? homedir();
-    const data = options.nativeHome
-        ? join(home, '.local/share')
-        : process.env.XDG_DATA_HOME || join(home, '.local/share');
-    const config = options.nativeHome
-        ? join(home, '.config')
-        : process.env.XDG_CONFIG_HOME || join(home, '.config');
+    const { data, config, models: cache } = openCodeNativePaths(options);
     const ownRoots = [
         join(config, 'opencode'),
         join(data, 'opencode'),
@@ -285,6 +290,16 @@ export async function readOpenCodeProfile(authDirectory, options = {}) {
     if (!object(providers))
         throw new Error('OpenCode 原生提供商配置无效');
     const auth = { ...globalAuth, ...localAuth };
+    const removableAuth = Object.create(null);
+    for (const id of Object.keys(auth)) {
+        const sources = new Set([
+            ...(Object.hasOwn(globalAuth, id) ? [resolve(data)] : []),
+            ...(Object.hasOwn(localAuth, id) ? [resolve(authDirectory)] : []),
+        ]);
+        // Removing only one of two sources would expose the other login again.
+        if (sources.size === 1)
+            removableAuth[id] = [...sources][0];
+    }
     for (const [id, provider] of Object.entries(providers)) {
         if (!object(provider))
             throw new Error('OpenCode 原生提供商配置无效');
@@ -294,6 +309,8 @@ export async function readOpenCodeProfile(authDirectory, options = {}) {
                 throw new Error('OpenCode 不执行凭据命令');
             // Keep the explicit API source identical in metadata and the private runtime auth store.
             auth[id] = { type: 'api', key };
+            // Native auth logout cannot remove an apiKey supplied by opencode.json.
+            delete removableAuth[id];
         }
     }
     const disabled = settings.disabled_providers ?? [], enabled = settings.enabled_providers;
@@ -301,16 +318,13 @@ export async function readOpenCodeProfile(authDirectory, options = {}) {
         !disabled.every(text) ||
         (enabled !== undefined && (!Array.isArray(enabled) || !enabled.every(text))))
         throw new Error('OpenCode 原生提供商开关配置无效');
-    const cache = options.modelsPath ??
-        (options.nativeHome
-            ? join(home, '.cache/opencode/models.json')
-            : process.env.OPENCODE_MODELS_PATH || join(home, '.cache/opencode/models.json'));
     return {
         sourceIds: [...sourceIds].sort(),
         auth,
         providers,
         disabled,
         enabled,
+        removableAuth,
         modelsPath: cache,
         // The installed public multi-provider cache is 4.4 MB; scoped CLI output
         // remains capped at 4 MB. This larger cap does not apply to credential files.
@@ -383,10 +397,16 @@ export async function inspectOpenCodeProfile(authDirectory, options = {}) {
                 expired = true;
             if (api || oauth) {
                 const config = profile.providers[id];
-                logins.push(providerLogin(id, api ? 'api' : 'oauth', {
-                    baseUrl: config?.options?.baseURL,
-                    name: config?.name,
-                }));
+                // Keep the stable provider identity for login refresh/proof even when logout
+                // must reject an ambiguous source. Removing the handle would hide a new login.
+                const handle = accountLoginId('opencode', id);
+                logins.push({
+                    ...providerLogin(id, api ? 'api' : 'oauth', {
+                        baseUrl: config?.options?.baseURL,
+                        name: config?.name,
+                    }),
+                    ...(handle ? { id: handle } : {}),
+                });
             }
         }
         if (logins.length)

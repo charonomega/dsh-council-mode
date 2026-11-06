@@ -2,13 +2,14 @@ import { StringDecoder } from 'node:string_decoder';
 import { EFFORTS } from "../shared/types.js";
 import { ProcessCleanupUnconfirmedError } from "./process.js";
 import { probeAccountModels } from './account-models.mjs';
-import { readCodexOwnAccountSource } from "./cli-account-binding.js";
+import { readCodexCustomRouteVersion, readCodexOwnAccountSource } from "./cli-account-binding.js";
 const record = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const validId = (v) => typeof v === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(v);
 export function parseCodexNativeModels(values) {
     const models = new Map();
     for (const value of values) {
-        if (!record(value) || !validId(value.model) || value.hidden === true || value.availabilityNux)
+        // availabilityNux is promotional copy for a new model, not an availability denial.
+        if (!record(value) || !validId(value.model) || value.hidden === true)
             continue;
         const efforts = EFFORTS.filter((e) => Array.isArray(value.supportedReasoningEfforts) &&
             value.supportedReasoningEfforts.some((item) => record(item) && item.reasoningEffort === e));
@@ -153,6 +154,15 @@ export async function readCodexNativeModels(backend, config, executable, cwd, si
     }
 }
 export async function discoverCodexModels(backend, config, executable, cwd, signal) {
+    // A relay has no account scope to query: Codex's own list, as its /model shows it.
+    const route = await readCodexCustomRouteVersion(cwd, signal);
+    if (route !== undefined) {
+        const models = await readCodexNativeModels(backend, config, executable, cwd, signal);
+        signal.throwIfAborted();
+        if ((await readCodexCustomRouteVersion(cwd, signal)) !== route)
+            throw new Error('Codex 路由配置已变化，请刷新');
+        return models.map((model) => ({ ...model, cost: 'unknown' }));
+    }
     // Resolve the native source before opening the server, then reread after its normal OAuth refresh.
     const before = await readCodexOwnAccountSource(cwd, signal);
     if (!before.nativeRouteConfirmed)

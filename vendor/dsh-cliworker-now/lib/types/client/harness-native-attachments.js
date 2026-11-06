@@ -1,4 +1,5 @@
 import { IconPaperclipOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives';
+import { t } from "./i18n.js";
 const SOURCE = 'cliworker-selected-files';
 const items = [
     // Native Add-section face: the root composer's File row name, label and glyph.
@@ -10,7 +11,7 @@ function pathsOf(ref) {
     const paths = JSON.parse(ref);
     if (!Array.isArray(paths) || !paths.length || paths.length > 20 || paths.some(path => typeof path !== 'string' || path.length > 8192 || /[\0\r\n]/u.test(path) ||
         !(/^(?:\/|[a-z]:[\\/]|\\\\)/iu.test(path))))
-        throw new Error('文件引用无效');
+        throw new Error(t('文件引用无效'));
     return paths;
 }
 /** Public native input/codec contracts; ordinary Desktop files stay path references,
@@ -43,7 +44,8 @@ export function installHarnessNativeAttachments(ctx, bindings) {
         candidates(sessionId) {
             if (!owned(sessionId))
                 return [];
-            return items.filter(item => item.name !== 'file' || hostPaths());
+            return items.filter(item => item.name !== 'file' || hostPaths())
+                .map(item => ({ ...item, label: t(item.label), description: t(item.description) }));
         },
         pick(pick) {
             const target = owned(pick.session.sessionId);
@@ -55,7 +57,7 @@ export function installHarnessNativeAttachments(ctx, bindings) {
                 // it owns the mounted picker, MIME checks, draft bytes and upload retirement.
                 void ctx.inputTriggers.sessionOf(target.scope.ctx).adjudicate('/file', lifetime.signal, { attachments: 0 })
                     .then(outcome => { if (outcome === undefined && !lifetime.signal.aborted)
-                    input.notify('error', '原生图片上传入口暂不可用，请重新打开子会话'); })
+                    input.notify('error', t('原生图片上传入口暂不可用，请重新打开子会话')); })
                     .catch(error => input.notify('error', error instanceof Error ? error.message : String(error)));
                 return true;
             }
@@ -85,9 +87,9 @@ export function installHarnessNativeAttachments(ctx, bindings) {
                     const end = state.draft.length - state.occurrences.reduce((sum, occurrence) => sum + occurrence.length - 1, 0)
                         - (state.claim ? state.claim.token.length - 1 : 0);
                     if (!input.insertReference({ source: SOURCE, ref,
-                        label: files.length === 1 ? files[0].name : `${files[0].name} 等 ${files.length} 个文件`,
+                        label: files.length === 1 ? files[0].name : t('{name} 等 {count} 个文件', { name: files[0].name, count: files.length }),
                         appearance: 'file', clipboardText: pathsOf(ref).map(path => `@${JSON.stringify(path)}`).join(' '), }, { start: end, end, draftRev: state.draftRev }))
-                        input.notify('error', '当前输入正在提交，请稍后重新添加文件');
+                        input.notify('error', t('当前输入正在提交，请稍后重新添加文件'));
                     input.focus();
                 }
                 catch (error) {

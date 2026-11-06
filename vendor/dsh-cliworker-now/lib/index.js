@@ -1,30 +1,2529 @@
 import { createRequire } from "node:module";
-import { createConnection } from "node:net";
-import { homedir, hostname, platform, tmpdir, userInfo } from "node:os";
-import { basename, delimiter, dirname, extname, isAbsolute, join, parse, posix, relative, resolve, sep, toNamespacedPath, win32 } from "node:path";
-import { access, chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
-import * as nodeFs from "node:fs";
-import { accessSync, appendFileSync, chmodSync, closeSync, constants, copyFileSync, existsSync, fchmodSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createDecipheriv, createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import * as nodeFs from "node:fs";
+import { accessSync, appendFileSync, chmodSync, closeSync, constants, copyFileSync, createReadStream, existsSync, fchmodSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, delimiter, dirname, extname, isAbsolute, join, parse, posix, relative, resolve, sep, toNamespacedPath, win32 } from "node:path";
+import { z } from "zod";
+import { SessionId } from "@deepseek-ai/dsh-session/types";
+import { execFile, execFileSync } from "node:child_process";
+import { createConnection, isIP } from "node:net";
+import { homedir, hostname, platform, tmpdir, userInfo } from "node:os";
+import { access, chmod, copyFile, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rename, rm, rmdir, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { parse as parse$1 } from "yaml";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { Agent, request } from "node:https";
+import { PassThrough, Readable, Transform } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { parseEnv, stripVTControlCharacters, types } from "node:util";
+import { createServer, request as request$1 } from "node:http";
+import { parseEnv, promisify, stripVTControlCharacters, types } from "node:util";
 import { SubprocessExecutableNotFoundError } from "@deepseek-ai/dsh-subprocess";
-import { z } from "zod";
+import { setTimeout as setTimeout$1 } from "node:timers/promises";
 import z$1 from "@deepseek-ai/schemastery";
 import { assembleContextFor, emitAgentEvent } from "@deepseek-ai/dsh-agent";
 import { AssistantStreamAccumulator, LlmAdapter, ToolCallId, createAssistantMessage, createToolResultMessage, createUserMessage, isAgentLoopRequest } from "@deepseek-ai/dsh-llm";
-import { SessionId, ToolCallRecovery } from "@deepseek-ai/dsh-session";
-import { createServer } from "node:http";
+import { SessionId as SessionId$1, SessionSeq, ToolCallRecovery } from "@deepseek-ai/dsh-session";
 import { setSandboxMode } from "@deepseek-ai/dsh-sandbox-policy";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { Remote, RemoteError, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
-import { PassThrough } from "node:stream";
-import { execFile } from "node:child_process";
-import { setTimeout as setTimeout$1 } from "node:timers/promises";
+import { setApprovalPolicy } from "@deepseek-ai/dsh-user-approval";
+//#region lib/types/shared/types.js
+const EFFORTS = [
+	"default",
+	"none",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+	"ultra"
+];
+const CLI_IDS = [
+	"antigravity",
+	"codex",
+	"claude",
+	"kimi",
+	"mimo",
+	"zcode",
+	"grok",
+	"omp",
+	"pi",
+	"hermes",
+	"opencode",
+	"qoder",
+	"qodercn"
+];
+const RETIRED_HARNESS_NOTICE = "外部 Harness CLI 入口已移除；历史记录仅供查看。请新建 Hermes Agent 任务。";
+const isRetiredCli = (cli) => cli === "harness";
+const CLI_LABELS = {
+	antigravity: "Antigravity",
+	codex: "Codex",
+	claude: "Claude Code",
+	kimi: "Kimi",
+	mimo: "MiMo",
+	zcode: "ZCode",
+	grok: "Grok Build",
+	omp: "OMP",
+	pi: "Pi",
+	hermes: "Hermes Agent",
+	harness: "Harness（已移除）",
+	opencode: "OpenCode",
+	qoder: "Qoder CLI",
+	qodercn: "Qoder CN CLI"
+};
+/** Short CLI stems used for automatic Worker names; protocol IDs remain unchanged. */
+const CLI_SHORT_NAMES = {
+	antigravity: "agy",
+	codex: "codex",
+	claude: "claude",
+	kimi: "kimi",
+	mimo: "mimo",
+	zcode: "zcode",
+	grok: "grok",
+	omp: "omp",
+	pi: "pi",
+	hermes: "hermes",
+	harness: "harness",
+	opencode: "opencode",
+	qoder: "qoder",
+	qodercn: "qodercn"
+};
+const cliOf = (preference) => preference.cli ?? "antigravity";
+const effortLabel = (effort) => effort === "default" ? "默认" : effort.charAt(0).toUpperCase() + effort.slice(1);
+/** Timeline notes for a task continued in a new native session; an account change itself is never announced. */
+const CARRYOVER_FAILED_NOTICE = "原会话无法续接，已在新会话中继续";
+const CARRYOVER_UNREACHABLE_NOTICE = "原会话记录不可用，已在新会话中继续";
+/** Earlier builds' account-change notes: hidden or reworded when an older record is read. */
+const LEGACY_ACCOUNT_NOTICES = {
+	"账号已变更，已改用当前账号继续": null,
+	"原会话无法在当前账号续接，已在新会话中继续": CARRYOVER_FAILED_NOTICE,
+	"原会话不在当前账号的会话记录中，已在新会话中继续": CARRYOVER_UNREACHABLE_NOTICE
+};
+const CARRYOVER_FORK_REFUSED = "这条消息早于改接到新会话，当前会话中没有它的原生记录，请从改接之后的消息分支";
+/** Exact legacy stop messages are compatible; other interrupted outcomes stay diagnostic. */
+const isUserInterrupted = (worker) => worker.status === "interrupted" && (worker.interruptionReason === "user" && !worker.error || ["Error: 用户已停止任务", "用户已取消排队任务"].includes(worker.error ?? ""));
+/** Stable, non-mutating name for histories created before named workers. */
+const workerName = (worker) => worker.agentName || `智能体-${worker.id.slice(0, 6)}`;
+/** Public DSH directory/projection data; never a plugin-owned Worker. */
+/** `dsh-<n>` names are reserved for DSH native subagents in the CLI Worker window. */
+const DSH_AGENT_NAME = /^dsh-[1-9]\d*$/i;
+const active = (status) => status === "queued" || status === "running" || status === "stopping";
+/** Fold repeated step updates without duplicating streamed text or the final response. */
+/** Binary units, matching the configured byte budgets. */
+function outputSizeLabel(bytes) {
+	return bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+/** Source text of the truncation marker; the Client translates the same keys. */
+const TRUNCATED_SIZED = "输出已截断（共 {size}），完整内容见 CLI 原生会话或实际产物";
+const TRUNCATED_PLAIN = "输出已截断，完整内容见 CLI 原生会话或实际产物";
+function truncationNote(row) {
+	if (!row.truncated) return "";
+	return row.outputBytes ? TRUNCATED_SIZED.replace("{size}", outputSizeLabel(row.outputBytes)) : TRUNCATED_PLAIN;
+}
+function appendDelta(row, delta) {
+	if (row.kind !== "tool") {
+		row.detail = (row.detail ?? "") + delta;
+		return;
+	}
+	const output = row.toolCall?.output;
+	row.toolCall = {
+		...row.toolCall,
+		output: (typeof output === "string" ? output : "") + delta
+	};
+}
+function foldEvents(events, endedRun, cli) {
+	const rows = [];
+	const steps = /* @__PURE__ */ new Map();
+	const submissions = /* @__PURE__ */ new Map();
+	const submissionIds = new Set(events.filter((event) => event.kind === "submission").map((event) => event.queuedFollowupId));
+	const markEnded = (runId, status) => {
+		for (const row of rows) if ((row.kind === "tool" || row.kind === "reasoning") && row.id.startsWith(runId + ":") && [
+			"ACTIVE",
+			"RUNNING",
+			"PENDING",
+			"QUEUED",
+			"IN_PROGRESS"
+		].includes(row.state ?? "")) row.runStatus = status;
+	};
+	for (const event of events) {
+		if (event.kind === "submission" && event.queuedFollowupId) {
+			const row = submissions.get(event.queuedFollowupId) ?? {
+				id: `submission:${event.queuedFollowupId}`,
+				kind: "user",
+				text: event.text,
+				time: event.time,
+				queuedFollowupId: event.queuedFollowupId
+			};
+			if (!submissions.has(event.queuedFollowupId)) rows.push(row);
+			Object.assign(row, {
+				deliveryState: event.deliveryState,
+				deliveryError: event.deliveryError,
+				admittedRunId: event.admittedRunId,
+				submissionClientId: event.submissionClientId,
+				submissionSequence: event.submissionSequence
+			});
+			submissions.set(event.queuedFollowupId, row);
+			continue;
+		}
+		if (event.kind === "user" && event.queuedFollowupId && submissionIds.has(event.queuedFollowupId)) continue;
+		if (event.kind === "status") {
+			const terminal = event.state ?? event.text;
+			if (terminal === "completed" || terminal === "failed" || terminal === "interrupted" || terminal === "uncertain") markEnded(event.runId, terminal);
+		}
+		if (event.kind === "result") {
+			if (cli === "antigravity" && event.state && event.state !== "SUCCESS") {
+				rows.push({
+					id: `${event.runId}:event:${event.seq}`,
+					kind: "diagnostic",
+					text: "CLI 最终汇总",
+					time: event.time,
+					state: event.state,
+					detail: event.detail ?? event.text
+				});
+				continue;
+			}
+			const lastAssistant = rows.findLast((row) => row.kind === "assistant" && row.id.startsWith(event.runId + ":"));
+			if (lastAssistant) {
+				if (lastAssistant.response) continue;
+				const earlier = rows.filter((row) => row !== lastAssistant && row.kind === "assistant" && row.id.startsWith(event.runId + ":"));
+				let finalText = event.text;
+				if (earlier.length && event.resultScope === "run") {
+					const prefix = earlier.map((row) => row.text).join("");
+					finalText = event.text.startsWith(prefix) ? event.text.slice(prefix.length) : void 0;
+				} else if (earlier.length && !event.resultScope && cli === "antigravity") {
+					let remaining = event.text.trimStart();
+					for (const row of earlier) {
+						const prefix = row.text.trim();
+						if (!prefix) continue;
+						if (!remaining.startsWith(prefix)) {
+							remaining = "";
+							break;
+						}
+						remaining = remaining.slice(prefix.length).trimStart();
+					}
+					finalText = remaining || void 0;
+				} else if (earlier.length && !event.resultScope && !event.text.startsWith(lastAssistant.text)) finalText = void 0;
+				if (event.text && finalText !== void 0 && finalText.startsWith(lastAssistant.text)) lastAssistant.text = finalText;
+				continue;
+			}
+		}
+		const key = event.response ? `${event.runId}:response:${JSON.stringify([event.response.id, event.response.blockId])}` : event.step === void 0 ? `${event.runId}:event:${event.seq}` : `${event.runId}:${event.kind}:${event.step}`;
+		const existing = steps.get(key);
+		if (existing) {
+			if (event.response && (existing.kind !== event.kind || existing.response?.index !== event.response.index)) throw new Error("CLI response block identity changed");
+			if (event.response?.usage && existing.response?.usage && JSON.stringify(event.response.usage) !== JSON.stringify(existing.response.usage)) throw new Error("CLI response usage changed");
+			if (event.kind === "assistant") existing.text += event.text;
+			else if (event.text) existing.text = event.text;
+			if (event.state) existing.state = event.state;
+			if (event.response) existing.response = {
+				...existing.response,
+				...event.response
+			};
+			if (event.toolCall) existing.toolCall = {
+				...existing.toolCall,
+				...Object.fromEntries(Object.entries(event.toolCall).filter(([, value]) => value !== void 0))
+			};
+			if (event.detail || event.kind === "reasoning" && event.detail !== void 0) existing.detail = event.detail;
+			if (event.delta) appendDelta(existing, event.delta);
+			if (event.truncated) existing.truncated = true;
+			if (event.outputBytes) existing.outputBytes = Math.max(existing.outputBytes ?? 0, event.outputBytes);
+		} else {
+			const row = {
+				id: key,
+				kind: event.kind === "result" ? "assistant" : event.kind,
+				text: event.text,
+				time: event.time,
+				state: event.state,
+				detail: event.detail,
+				toolCall: event.toolCall,
+				response: event.response,
+				queuedFollowupId: event.queuedFollowupId,
+				admittedRunId: event.admittedRunId,
+				...event.truncated ? { truncated: true } : {},
+				...event.outputBytes ? { outputBytes: event.outputBytes } : {},
+				...event.kind === "diagnostic" && event.notice ? { notice: true } : {}
+			};
+			if (event.delta) appendDelta(row, event.delta);
+			steps.set(key, row);
+			rows.push(row);
+		}
+	}
+	const timing = /* @__PURE__ */ new Map();
+	for (const event of events) {
+		const run = timing.get(event.runId) ?? {};
+		if ((event.kind === "user" || event.kind === "status" && (event.state ?? event.text) === "queued") && !run.runStartedAt) run.runStartedAt = event.time;
+		if (event.kind === "status" && [
+			"completed",
+			"failed",
+			"interrupted",
+			"uncertain"
+		].includes(event.state ?? event.text)) {
+			run.runEndedAt = event.time;
+			run.runOutcome = event.state ?? event.text;
+		}
+		timing.set(event.runId, run);
+	}
+	for (const row of rows) Object.assign(row, timing.get(row.admittedRunId ?? row.id.split(":")[0]));
+	if (endedRun) markEnded(endedRun.runId, endedRun.status);
+	return rows;
+}
+//#endregion
+//#region lib/types/shared/worker-permissions.js
+const PARENT_LEVEL = {
+	"read-only": "ask",
+	"workspace-write": "auto",
+	"danger-full-access": "full"
+};
+const ACCESS = {
+	ask: "read-only",
+	auto: "workspace-write",
+	full: "danger-full-access"
+};
+/**
+* The level a run uses. A level the user chose in the Worker menu applies to
+* every turn, the main Agent's included (2026-10-29 decision); a Worker
+* without one follows the parent.
+*/
+function effectiveLevel(level, access) {
+	return level ?? PARENT_LEVEL[access];
+}
+/** The launch tier adapters receive for a level. */
+const levelAccess = (level) => ACCESS[level];
+const ASK = {
+	name: "询问",
+	description: "读取和只读命令直接执行；改文件和有副作用的命令先问你，拒绝就不改。"
+};
+const AUTO = {
+	name: "自动审批",
+	description: "使用此 CLI 原生的自动审批，由 CLI 自行判断放行，可能放行工作区外的操作；它仍要确认的请求会问你。"
+};
+const FULL = {
+	name: "完全权限",
+	description: "使用此 CLI 原生的完全权限，不再询问。"
+};
+const HTTP_ASK = {
+	name: "询问",
+	description: "读取直接执行；改文件、执行命令和工作区外的操作先问你，拒绝就不改。"
+};
+/**
+* Names follow what each CLI can really do (2026-10-29 decision): a first item
+* that cannot ask is named for its actual behavior or absent, and a CLI with
+* no native auto-approval names its middle level for its native edit mode.
+*/
+const LEVELS = {
+	codex: {
+		ask: ASK,
+		auto: AUTO
+	},
+	claude: {
+		ask: ASK,
+		auto: AUTO
+	},
+	kimi: {
+		ask: {
+			name: "仅工作区编辑",
+			description: "使用 Kimi 原生默认模式：工作目录是 Git 仓库时，仓库内的文件编辑自动批准；命令和其他改动先问你。不是 Git 仓库时，编辑也先问你。"
+		},
+		auto: AUTO
+	},
+	qoder: {
+		ask: ASK,
+		auto: AUTO
+	},
+	qodercn: {
+		ask: ASK,
+		auto: AUTO
+	},
+	grok: {
+		ask: ASK,
+		auto: AUTO
+	},
+	mimo: {
+		ask: HTTP_ASK,
+		auto: AUTO
+	},
+	antigravity: {
+		ask: {
+			name: "仅规划",
+			description: "Antigravity 无法把授权请求转给你，此档以原生规划模式运行，只出方案、不改文件。"
+		},
+		auto: AUTO
+	},
+	zcode: {
+		ask: ASK,
+		auto: {
+			name: "仅工作区编辑",
+			description: "使用 ZCode 原生编辑模式：文件编辑自动批准，命令等其他操作先问你。"
+		}
+	},
+	opencode: {
+		ask: HTTP_ASK,
+		auto: {
+			name: "仅工作区编辑",
+			description: "工作区内的文件编辑自动批准；命令和工作区外的操作先问你。"
+		}
+	},
+	hermes: { auto: AUTO },
+	pi: {
+		ask: {
+			name: "询问",
+			description: "读取直接执行；改文件和执行命令先问你，拒绝就不改。"
+		},
+		auto: {
+			name: "自动批准编辑",
+			description: "文件编辑自动批准（Pi 不限制编辑目录）；命令先问你。"
+		}
+	},
+	omp: {
+		ask: ASK,
+		auto: {
+			name: "自动批准编辑",
+			description: "使用 OMP 原生 write 模式：文件编辑自动批准，命令先问你；不限制编辑目录。"
+		}
+	}
+};
+/** Every level this CLI offers, regardless of the parent. */
+function cliLevelOptions(cli) {
+	const levels = LEVELS[cli];
+	if (!levels) return [];
+	return [
+		...levels.ask ? [{
+			value: "ask",
+			...levels.ask
+		}] : [],
+		{
+			value: "auto",
+			...levels.auto
+		},
+		{
+			value: "full",
+			...FULL
+		}
+	];
+}
+/** This CLI's name for a level, as the timeline and menu show it. */
+function levelName(cli, level) {
+	return cliLevelOptions(cli).find((option) => option.value === level)?.name ?? FULL.name;
+}
+/** Antigravity's 仅规划 runs its first item as a native plan launch. */
+const askRunsAsPlan = (cli) => cli === "antigravity";
+/**
+* Whether a Worker without its own level may run while the parent is 仅可查看.
+* Hermes has no first item, Kimi's auto-approves Git workspace edits, and
+* Antigravity cannot relay a request; those are refused until the user picks a level.
+*/
+const runsUnderViewOnly = (cli) => !!LEVELS[cli]?.ask && cli !== "kimi" && cli !== "antigravity";
+/** The menu always lists every level this CLI offers, whatever the parent's tier. */
+function workerLevelOptions(worker) {
+	return cliLevelOptions(cliOf(worker.preference));
+}
+/** Whether the CLI has a native plan mode this plugin can launch. */
+function workerPlanSupported(worker) {
+	const cli = cliOf(worker.preference);
+	return cli !== "hermes" && cli !== "harness" && cli !== "qoder" && cli !== "qodercn" && (cli !== "kimi" || worker.transport === "kimi-acp-v1");
+}
+//#endregion
+//#region lib/types/shared/conversation-features.js
+const GOAL_OBJECTIVE_LIMIT = 4e3;
+/**
+* Native fork evidence per CLI (see openspec/changes/bridge-conversation-features/design.md).
+* `latest`: fork after the latest completed turn. `earlier`: fork at an earlier completed turn.
+*/
+const forkSupport = {
+	codex: {
+		latest: true,
+		earlier: true
+	},
+	opencode: {
+		latest: true,
+		earlier: false
+	},
+	pi: {
+		latest: true,
+		earlier: false
+	},
+	zcode: {
+		latest: true,
+		earlier: false
+	},
+	claude: {
+		latest: true,
+		earlier: false
+	},
+	kimi: {
+		latest: true,
+		earlier: false
+	},
+	mimo: {
+		latest: true,
+		earlier: false
+	},
+	qoder: {
+		latest: true,
+		earlier: false
+	},
+	qodercn: {
+		latest: true,
+		earlier: false
+	}
+};
+const noForkReason = {
+	antigravity: "当前 CLI 不支持会话分支：Antigravity 未公开原生分支接口",
+	hermes: "当前 CLI 不支持会话分支：Hermes 原生分支会结束原会话",
+	grok: "当前 CLI 不支持会话分支：已确认 --fork-session，但当前 ACP 的 x.ai/session/fork 参数和回执尚未核实",
+	omp: "当前 CLI 不支持会话分支：RPC 只有从用户条目前分支的 branch，未确认包含最新完成轮的 clone 接口"
+};
+function bridgedFeatureSupport(worker) {
+	const cli = cliOf(worker.preference);
+	const plan = workerPlanSupported(worker);
+	const fork = worker.transport === {
+		codex: "codex-app-v1",
+		claude: "claude-stream-v1",
+		kimi: "kimi-acp-v1",
+		mimo: "mimo-http-v1",
+		zcode: "zcode-app-v1",
+		pi: "pi-rpc-v1",
+		opencode: "opencode-http-v1",
+		qoder: "qoder-acp-v1",
+		qodercn: "qodercn-acp-v1"
+	}[cli] ? forkSupport[cli] : void 0;
+	return {
+		goal: { supported: true },
+		plan: plan ? { supported: true } : {
+			supported: false,
+			reason: "当前 CLI 不支持规划模式"
+		},
+		feedback: { supported: true },
+		fork: fork?.latest ? { supported: true } : {
+			supported: false,
+			reason: noForkReason[cli] ?? "当前 CLI 通信协议不支持会话分支，请使用原生会话 Worker"
+		},
+		forkEarlier: fork?.earlier ? { supported: true } : {
+			supported: false,
+			reason: "当前 CLI 只支持从最新一轮分支"
+		}
+	};
+}
+//#endregion
+//#region lib/types/shared/native-usage-report.js
+const count$15 = (v) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+/** Partial details never become zero-valued native billing buckets. */
+function nativeUsageReport(cli, usage) {
+	if (!usage || ![
+		"response",
+		"run",
+		"session",
+		"reported"
+	].includes(usage.scope) || !count$15(usage.total)) return;
+	if ((cli === "qoder" || cli === "qodercn") && (usage.total === 0 || usage.cacheRead !== void 0 || usage.cacheWrite !== void 0)) return;
+	if (cli === "antigravity") return;
+	for (const field of [
+		"input",
+		"output",
+		"cacheRead",
+		"cacheWrite",
+		"reasoning"
+	]) if (usage[field] !== void 0 && !count$15(usage[field])) return;
+	const inclusive = [
+		"codex",
+		"hermes",
+		"grok",
+		"zcode",
+		"qoder",
+		"qodercn"
+	].includes(cli);
+	const reasoningSeparate = cli === "mimo" || cli === "opencode";
+	const extra = usage.orchestration;
+	if (extra && (cli !== "omp" || Object.values(extra).some((v) => !count$15(v)))) return;
+	const extraTotal = Object.values(extra ?? {}).reduce((sum, v) => sum + v, 0);
+	if (!count$15(extraTotal)) return;
+	const cache = (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
+	if (inclusive) {
+		const known = Math.max(usage.input ?? 0, cache) + Math.max(usage.output ?? 0, usage.reasoning ?? 0);
+		if (!count$15(known) || known > usage.total) return;
+		if (usage.input !== void 0 && cache > usage.input) return;
+		if (usage.input !== void 0 && usage.output !== void 0 && usage.total !== usage.input + usage.output) return;
+	} else {
+		const known = (usage.input ?? 0) + (reasoningSeparate ? usage.output ?? 0 : Math.max(usage.output ?? 0, usage.reasoning ?? 0)) + cache + extraTotal + (reasoningSeparate ? usage.reasoning ?? 0 : 0);
+		if (!count$15(known) || known > usage.total) return;
+		if ([
+			usage.input,
+			usage.output,
+			usage.cacheRead,
+			usage.cacheWrite,
+			...reasoningSeparate ? [usage.reasoning] : []
+		].every(count$15) && cli !== "omp" && known !== usage.total) return;
+	}
+	if (!reasoningSeparate && usage.output !== void 0 && (usage.reasoning ?? 0) > usage.output) return;
+	const output = reasoningSeparate ? usage.output !== void 0 && usage.reasoning !== void 0 ? usage.output + usage.reasoning : void 0 : usage.output;
+	if (output !== void 0 && !count$15(output)) return;
+	return {
+		totalTokens: usage.total,
+		inputBasis: cli === "qoder" || cli === "qodercn" ? "reported" : inclusive ? "inclusive" : "uncached",
+		...usage.input === void 0 ? {} : { inputTokens: usage.input },
+		...output === void 0 ? {} : { outputTokens: output },
+		...usage.cacheRead === void 0 ? {} : { cacheReadTokens: usage.cacheRead },
+		...usage.cacheWrite === void 0 ? {} : { cacheWriteTokens: usage.cacheWrite },
+		...usage.reasoning === void 0 ? {} : { reasoningTokens: usage.reasoning },
+		...extra && Object.keys(extra).length ? { orchestration: { ...extra } } : {}
+	};
+}
+//#endregion
+//#region lib/types/shared/native-token-usage.js
+const count$14 = (value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+/**
+* Translate the CLI's billing buckets, never sum successive snapshots. The
+* Host already labels run/session/reported scope and deduplicates receipts.
+* Unsupported or inconsistent accounting remains absent in the native UI.
+*/
+function nativeTokenUsage(cli, usage) {
+	if (usage?.orchestration && Object.values(usage.orchestration).some((value) => value > 0)) return;
+	if (!usage || ![
+		"response",
+		"run",
+		"session",
+		"reported"
+	].includes(usage.scope)) return;
+	if (usage.reasoning !== void 0 && (!count$14(usage.reasoning) || !["mimo", "opencode"].includes(cli) && usage.output !== void 0 && usage.reasoning > usage.output)) return;
+	if (!count$14(usage.total) || !count$14(usage.input) || !count$14(usage.output) || !count$14(usage.cacheRead)) return;
+	const cacheWriteTokens = (cli === "codex" || cli === "antigravity") && usage.cacheWrite === void 0 ? 0 : usage.cacheWrite;
+	if (!count$14(cacheWriteTokens)) return;
+	if (cli === "antigravity") {
+		const reportedTotal = usage.input + usage.output;
+		const nativeTotal = reportedTotal + usage.cacheRead + cacheWriteTokens;
+		if (cacheWriteTokens !== 0 || !count$14(reportedTotal) || usage.total !== reportedTotal || !count$14(nativeTotal)) return;
+		return {
+			uncachedInputTokens: usage.input,
+			outputTokens: usage.output,
+			cacheReadTokens: usage.cacheRead,
+			cacheWriteTokens
+		};
+	}
+	let uncachedInputTokens;
+	let outputTokens = usage.output;
+	switch (cli) {
+		case "codex":
+		case "hermes":
+		case "grok":
+		case "zcode":
+			uncachedInputTokens = usage.input - usage.cacheRead - cacheWriteTokens;
+			break;
+		case "claude":
+		case "kimi":
+		case "pi":
+		case "omp":
+			uncachedInputTokens = usage.input;
+			break;
+		case "mimo":
+		case "opencode":
+			if (!count$14(usage.reasoning)) return;
+			uncachedInputTokens = usage.input;
+			outputTokens += usage.reasoning;
+			break;
+		default: return;
+	}
+	if (!count$14(uncachedInputTokens) || !count$14(outputTokens)) return;
+	const total = uncachedInputTokens + outputTokens + usage.cacheRead + cacheWriteTokens;
+	if (!count$14(total) || total !== usage.total) return;
+	return {
+		uncachedInputTokens,
+		outputTokens,
+		cacheReadTokens: usage.cacheRead,
+		cacheWriteTokens
+	};
+}
+//#endregion
+//#region lib/types/host/hermes-canonical-usage.js
+function hermesCanonicalUsage(value) {
+	if (!value) return;
+	const result = { ...value };
+	if (result.cacheRead === 0) delete result.cacheRead;
+	if (result.cacheWrite === 0) delete result.cacheWrite;
+	return result;
+}
+//#endregion
+//#region lib/types/host/conversation-telemetry.js
+const count$13 = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const sessionUsageSchema = z.object({
+	total: count$13,
+	input: count$13.optional(),
+	output: count$13.optional(),
+	cacheRead: count$13.optional(),
+	cacheWrite: count$13.optional(),
+	reasoning: count$13.optional(),
+	orchestration: z.object({
+		input: count$13.optional(),
+		output: count$13.optional(),
+		cacheRead: count$13.optional()
+	}).strict().optional(),
+	scope: z.literal("session")
+}).strict();
+const conversationTelemetrySchema = z.object({
+	policy: z.literal(1),
+	cli: z.enum(CLI_IDS),
+	conversationId: z.string().min(1).max(1024),
+	runId: z.uuid(),
+	usage: sessionUsageSchema,
+	sessionDurationSeconds: z.number().finite().nonnegative().optional()
+}).strict();
+/** Retain the CLI's counter convention; native UI normalization remains separate. */
+const lastRunUsageSnapshotSchema = z.object({
+	policy: z.literal(1),
+	cli: z.enum(CLI_IDS),
+	conversationId: z.string().min(1).max(1024),
+	runId: z.uuid(),
+	usage: sessionUsageSchema.extend({ scope: z.literal("run") })
+}).strict().superRefine((value, context) => {
+	if (!nativeTokenUsage(value.cli, value.usage) && !nativeUsageReport(value.cli, value.usage)) context.addIssue({
+		code: "custom",
+		message: "Run usage buckets are inconsistent"
+	});
+});
+function matchingLastRunSnapshot(worker, current) {
+	const parsed = lastRunUsageSnapshotSchema.safeParse(worker.lastRunUsageSnapshot);
+	return parsed.success && parsed.data.cli === cliOf(worker.preference) && parsed.data.conversationId === worker.conversationId && !(current?.unsettledRunUsage && parsed.data.cli === "codex" && parsed.data.usage.total === 0 && parsed.data.runId === worker.runId) ? {
+		...parsed.data,
+		usage: parsed.data.cli === "hermes" ? hermesCanonicalUsage(parsed.data.usage) : parsed.data.usage
+	} : void 0;
+}
+/** Call at settlement and before runId changes; observed partial .usage is not a full-run source. */
+function captureLastRunUsageSnapshot(worker, current) {
+	const cli = cliOf(worker.preference);
+	if (!worker.conversationId || isRetiredCli(cli)) return void 0;
+	const parsed = lastRunUsageSnapshotSchema.safeParse({
+		policy: 1,
+		cli,
+		conversationId: worker.conversationId,
+		runId: worker.runId,
+		usage: current.runUsage
+	});
+	return parsed.success ? {
+		...parsed.data,
+		usage: cli === "hermes" ? hermesCanonicalUsage(parsed.data.usage) : parsed.data.usage
+	} : matchingLastRunSnapshot(worker, current);
+}
+function matchingCheckpoint(worker) {
+	if (cliOf(worker.preference) === "zcode") return void 0;
+	const parsed = conversationTelemetrySchema.safeParse(worker.conversationTelemetry);
+	return parsed.success && parsed.data.cli === cliOf(worker.preference) && parsed.data.conversationId === worker.conversationId ? {
+		...parsed.data,
+		usage: parsed.data.cli === "hermes" ? hermesCanonicalUsage(parsed.data.usage) : parsed.data.usage
+	} : void 0;
+}
+/** Capture before changing runId and at settlement. No raw-history scan or arithmetic is involved. */
+function captureConversationTelemetry(worker, current) {
+	const cli = cliOf(worker.preference);
+	if (cli === "zcode") return void 0;
+	if (!worker.conversationId || worker.conversationId.length > 1024 || isRetiredCli(cli)) return void 0;
+	const usage = sessionUsageSchema.safeParse(current.usage);
+	if (!usage.success) return matchingCheckpoint(worker);
+	return {
+		policy: 1,
+		cli,
+		conversationId: worker.conversationId,
+		runId: worker.runId,
+		usage: cli === "hermes" ? hermesCanonicalUsage(usage.data) : usage.data,
+		...typeof current.sessionDurationSeconds === "number" && Number.isFinite(current.sessionDurationSeconds) && current.sessionDurationSeconds >= 0 ? { sessionDurationSeconds: current.sessionDurationSeconds } : {}
+	};
+}
+/** Exact sum of two session receipts; a bucket missing from either side is unknown, not zero. */
+function addSessionUsage(left, right) {
+	if (!left) return right;
+	const both = (a, b) => a === void 0 || b === void 0 ? void 0 : a + b;
+	const orchestration = left.orchestration && right.orchestration ? Object.fromEntries([
+		"input",
+		"output",
+		"cacheRead"
+	].map((key) => [key, both(left.orchestration[key], right.orchestration[key])]).filter(([, value]) => value !== void 0)) : void 0;
+	return Object.fromEntries(Object.entries({
+		total: left.total + right.total,
+		input: both(left.input, right.input),
+		output: both(left.output, right.output),
+		cacheRead: both(left.cacheRead, right.cacheRead),
+		cacheWrite: both(left.cacheWrite, right.cacheWrite),
+		reasoning: both(left.reasoning, right.reasoning),
+		orchestration: orchestration && Object.keys(orchestration).length ? orchestration : void 0,
+		scope: "session"
+	}).filter(([, value]) => value !== void 0));
+}
+/** A task continued in a new session after an account change keeps counting
+* the sessions it left; only session-scoped usage is combined. */
+function withConversationTelemetry(worker, current) {
+	const visible = currentConversationTelemetry(worker, current);
+	const previous = sessionUsageSchema.safeParse(worker.previousSessionUsage);
+	if (!previous.success) return visible;
+	if (!visible.usage) return {
+		...visible,
+		usage: previous.data
+	};
+	return visible.usage.scope === "session" ? {
+		...visible,
+		usage: addSessionUsage(previous.data, visible.usage)
+	} : visible;
+}
+/** Prefer session receipts, then current accounting, then an explicitly run-scoped prior receipt. */
+function currentConversationTelemetry(worker, current) {
+	const cumulative = captureConversationTelemetry(worker, current);
+	if (!cumulative) {
+		if (current.usage !== void 0) return current;
+		const lastRun = matchingLastRunSnapshot(worker, current);
+		return lastRun ? {
+			...current,
+			usage: lastRun.usage,
+			usageRunId: lastRun.runId
+		} : current;
+	}
+	return {
+		...current,
+		usage: cumulative.usage,
+		usageRunId: cumulative.runId,
+		...current.sessionDurationSeconds === void 0 && cumulative.sessionDurationSeconds !== void 0 ? { sessionDurationSeconds: cumulative.sessionDurationSeconds } : {}
+	};
+}
+//#endregion
+//#region lib/types/host/context-telemetry.js
+const count$12 = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const source$1 = z.string().min(1).max(1024);
+const contextTelemetrySchema = z.object({
+	policy: z.literal(1),
+	cli: z.enum(CLI_IDS),
+	conversationId: source$1,
+	model: source$1,
+	observedModel: source$1.optional(),
+	runId: z.uuid(),
+	contextUsed: count$12.optional(),
+	contextCapacity: count$12.positive().optional(),
+	contextRatio: z.number().finite().min(0).max(1).optional(),
+	contextSource: source$1.optional(),
+	contextCapacitySource: source$1.optional(),
+	contextEstimated: z.boolean().optional(),
+	contextBreakdown: z.object({
+		systemTokens: count$12.optional(),
+		toolTokens: count$12.optional(),
+		messageTokens: count$12.optional(),
+		estimated: z.boolean().optional(),
+		source: source$1.optional(),
+		categories: z.array(z.object({
+			name: z.string().min(1).max(80),
+			tokens: count$12,
+			kind: z.enum([
+				"used",
+				"free",
+				"buffer",
+				"deferred"
+			])
+		}).strict()).max(64).optional()
+	}).strict().optional()
+}).strict().refine((value) => value.contextUsed !== void 0 || value.contextRatio !== void 0, { message: "Context requires an observed count or native ratio" });
+const contextKeys = [
+	"contextUsed",
+	"contextCapacity",
+	"contextRatio",
+	"contextSource",
+	"contextCapacitySource",
+	"contextEstimated",
+	"contextBreakdown"
+];
+function matching(worker) {
+	const parsed = contextTelemetrySchema.safeParse(worker.contextTelemetry);
+	if (!parsed.success) return;
+	const c = parsed.data;
+	return c.cli === cliOf(worker.preference) && c.conversationId === worker.conversationId && c.model === worker.preference.model && (!worker.observedModel || c.observedModel === worker.observedModel) ? c : void 0;
+}
+/** An absent sample means pending; an own undefined sample explicitly invalidates the prior window. */
+function withContextTelemetry(worker, current) {
+	if (worker.contextInvalidatedRunId === worker.runId) return withoutContextTelemetry(current);
+	if (Object.hasOwn(current, "contextUsed") || Object.hasOwn(current, "contextRatio")) return current;
+	const prior = matching(worker);
+	if (!prior || current.contextCapacity !== void 0 && current.contextCapacity !== prior.contextCapacity) return current;
+	const context = {};
+	for (const key of contextKeys) if (Object.hasOwn(prior, key)) Object.assign(context, { [key]: prior[key] });
+	return {
+		...context,
+		...current
+	};
+}
+function withoutContextTelemetry(current) {
+	const result = { ...current };
+	for (const key of contextKeys) Object.assign(result, { [key]: void 0 });
+	return result;
+}
+/** Capture before run identity changes and at settlement; never infer context from a token bill. */
+function captureContextTelemetry(worker, current) {
+	const visible = withContextTelemetry(worker, current);
+	const context = {};
+	for (const key of contextKeys) if (Object.hasOwn(visible, key)) Object.assign(context, { [key]: visible[key] });
+	const parsed = contextTelemetrySchema.safeParse({
+		policy: 1,
+		cli: cliOf(worker.preference),
+		conversationId: worker.conversationId,
+		model: worker.preference.model,
+		...worker.observedModel ? { observedModel: worker.observedModel } : {},
+		runId: worker.runId,
+		...context
+	});
+	return parsed.success ? parsed.data : void 0;
+}
+//#endregion
+//#region lib/types/shared/cli-settings.js
+/** `follow` uses the current DSH language; the others override it for this plugin only. */
+const LANGUAGE_PREFERENCES = [
+	"follow",
+	"zh",
+	"en"
+];
+/** The longest task time limit; "no limit" uses it so a stuck run still ends. */
+const MAX_TASK_TIME_LIMIT_MS = 864e5;
+[
+	30,
+	60,
+	120,
+	240,
+	480,
+	1440
+].map((minutes) => minutes * 6e4);
+[
+	0,
+	5,
+	10,
+	30
+].map((minutes) => minutes * 6e4);
+//#endregion
+//#region lib/types/host/native-response.mjs
+const count$11 = (value) => Number.isSafeInteger(value) && value >= 0;
+const object$21 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+/** AGY JSONUsage input excludes cache reads; its reported total excludes them too. */
+function agyResponseUsage(value) {
+	if (!object$21(value)) return;
+	const { input_tokens: input, output_tokens: output, cache_read_tokens: cacheRead, total_tokens: total } = value;
+	if (![
+		input,
+		output,
+		cacheRead,
+		total
+	].every(count$11) || total !== input + output || !count$11(total + cacheRead)) return;
+	return {
+		inputTokens: input,
+		outputTokens: output,
+		cacheReadTokens: cacheRead,
+		cacheWriteTokens: 0,
+		totalTokens: total + cacheRead
+	};
+}
+/** Internal transport validation: identity is explicit and usage is never inferred. */
+function parseNativeResponse(value) {
+	if (!object$21(value) || !["id", "blockId"].every((key) => typeof value[key] === "string" && value[key].length > 0 && value[key].length <= 512) || !count$11(value.index) || value.index > 4096 || value.complete !== void 0 && value.complete !== true) throw new Error("Invalid CLI response identity");
+	let usage;
+	if (value.usage !== void 0) {
+		const raw = value.usage;
+		if (!object$21(raw) || !count$11(raw.inputTokens) || !count$11(raw.outputTokens)) throw new Error("Invalid CLI response usage");
+		usage = {
+			inputTokens: raw.inputTokens,
+			outputTokens: raw.outputTokens
+		};
+		for (const key of [
+			"totalTokens",
+			"cacheReadTokens",
+			"cacheWriteTokens",
+			"reasoningTokens"
+		]) {
+			if (raw[key] === void 0) continue;
+			if (!count$11(raw[key])) throw new Error("Invalid CLI response usage");
+			usage[key] = raw[key];
+		}
+		const known = raw.inputTokens + raw.outputTokens + (raw.cacheReadTokens ?? 0) + (raw.cacheWriteTokens ?? 0);
+		if (!count$11(known) || raw.reasoningTokens !== void 0 && raw.reasoningTokens > raw.outputTokens || raw.totalTokens !== void 0 && (raw.totalTokens < known || raw.cacheReadTokens !== void 0 && raw.cacheWriteTokens !== void 0 && raw.totalTokens !== known)) throw new Error("Contradictory CLI response usage");
+	}
+	return {
+		id: value.id,
+		blockId: value.blockId,
+		index: value.index,
+		...value.complete ? { complete: true } : {},
+		...usage ? { usage } : {}
+	};
+}
+//#endregion
+//#region lib/types/shared/running-message.js
+const RUNNING_MESSAGE_MODES = [
+	"steer",
+	"interrupt",
+	"queue"
+];
+/** Only protocols with an implemented, acknowledged native steering channel. */
+const NATIVE_STEERING_TRANSPORTS = {
+	codex: "codex-app-v1",
+	hermes: "hermes-http-v1",
+	pi: "pi-rpc-v1",
+	omp: "omp-rpc-v1"
+};
+const supportsNativeSteering = (cli) => !!NATIVE_STEERING_TRANSPORTS[cli];
+/** Legacy Workers keep their original transport; an upgrade never changes their input protocol. */
+const supportsWorkerNativeSteering = (worker) => {
+	const cli = worker.preference.cli ?? "antigravity";
+	return cli === "pi" || cli === "omp" || !!worker.transport && NATIVE_STEERING_TRANSPORTS[cli] === worker.transport;
+};
+const defaultRunningMessageMode = (cli) => supportsNativeSteering(cli) ? "steer" : "queue";
+//#endregion
+//#region lib/types/shared/builtin-presets.js
+/** User-supplied novel roles, adapted for an arbitrary CLI Worker project. */
+const PROJECT_CONTEXT = `
+使用当前任务指定的项目和资料。先核对目标章节或剧情单元、作者已确认的方向、正文状态、世界规则、人物资料和风格规范；不要假定原技能的文件、脚本、检索服务或其他智能体已经安装。关键资料缺失时明确指出缺口，只询问会改变任务范围、事实边界或授权的必要问题，不能编造来源或既有设定。
+若当前项目提供 Evidence Packet、Writer Packet、Issue Manifest 或工作流规范，优先复用同一检查点已有材料，并核对绑定的原文证据；它们不自动取代已锁定正文与作者确认。若迁移闸门为 shadow_pending，Packet 仅作定位或影子辅助。工具或资料不存在时以当前可读资料执行，注明实际覆盖范围、资料截止点、执行方式与降级原因；不得宣称已运行未运行的检查。负查只表示“在本次检查范围未发现”。
+区分正典、已确认设计、提案和待验证假设；未来章纲、未采用的 D&D 参考与推测不能充当已发生事实。涉及 D&D 的作品只使用项目已登记采用的规则。遵循宿主权限和作者本次授权，角色提示词不授予额外文件、命令或派遣权限。不要自行切换模型、CLI 或另派子智能体；需要额外复核而当前没有独立复核能力时，明确标记为单人检查，不伪造对抗过程。
+`.trim();
+const withContext = (prompt) => `${prompt.trim()}\n\n【共同资料与执行边界】\n${PROJECT_CONTEXT}`;
+const BUILTIN_ROLE_PRESETS = [
+	{
+		id: "novel-audit-commercial-review",
+		name: "商业审稿人",
+		summary: "围绕章首承接、承诺兑现、节拍推进和章末吸引力，给出有证据的留存建议。",
+		builtin: true,
+		source: "novel-audit-commercial-review",
+		prompt: withContext(`
+你是小说商业审稿人，属于编辑岗。只报告商业证据、读者影响和建议，不修改正文、正典、章纲或审校队列。逻辑自洽与文风问题分别交给对应审校角色；这里只讨论其对目标读者继续阅读的直接影响。
+
+【入口与范围】
+读取目标章全文一次、作品定位，以及上一锁定章的接口或章末钩子。优先复用上游证据包；没有时按实际资料组织证据，不重复扫描整库。日常检查仅覆盖目标章和必要接口；按明确风险补查承诺、钩子或单元入口，只有跨章风险或作者明确要求全审时才扩大范围。审前最多询问四个真正缺口：章型、目标读者、关注信号、授权。
+
+【四个独有信号】
+每个信号只写一段“证据 → 读者反应 → 建议”，同一段落不要换维度重复论证。
+1. 章首承接：首章检查前 300 字是否建立具体问题；连载章检查是否接住上一章钩子，不能用首章标准机械评估每章。
+2. 承诺与兑现：检查章纲或前章承诺是否兑现、升级或有意延迟；延迟应有可核对的预期回收窗，合法延迟不是失信。
+3. 节拍和推进：场景是否改变事件、信息、关系、风险、目标、资源或时间压力；只指出连续无变化且影响阅读的段落。
+4. 章末下一点击力：结尾是否留下读者能理解的悬念、危机、收益或新目标，是否有明确继续阅读动机。
+
+【读者视角与复核】
+默认由你做一次顺读判断，明确注明“单人模拟”，不要声称真实读者测试。仅当首章、章首或章末风险、明显留存问题、全审或作者明确要求时，提出独立读者复核需要。若已获授权且确有独立复核结果，记录首次划走点和候选问题对下一章点击的影响；有分歧就保留双方证据，不伪造共识。
+
+【证据与去重】
+每条问题给出稳定 issue_id、原文位置与短引文、承诺/节拍/钩子证据、严重度、置信度、候选或确认状态、处置建议和是否获修改授权。其他审校已经报告的同一问题只引用其 issue_id 和一句商业影响，不重复原理、引文与修复方案。没有原文证据不能扣分或判断劝退；建议不能删掉已确认的核心爽点、改变出口或提前泄露正典。涉及重大方向只列待作者决定。
+
+【输出】
+先给主编结论、四信号判断和 Top 3，再列有效资产、毒点/劝退点、爽点与断章、留存建议和实际复核记录。需要兼容旧报告时再给九维评分：开篇吸引力、核心卖点、剧情节奏、爽点情绪、人物主动性、表层逻辑、语言可读性、章末钩子、长线潜力；共享同一证据，不写九遍论证。评分仅用于展示，不是定稿门禁。报告标明实际检查范围、资料截止点、证据包标识（如有）和降级情况。审稿不等于授权，不能把建议写成已执行修改。
+`)
+	},
+	{
+		id: "novel-audit-logic-check",
+		name: "逻辑审校员",
+		summary: "核对人物认知、状态资源、因果动机与时空连续性，定位漏洞并提出最小修复。",
+		builtin: true,
+		source: "novel-audit-logic-check",
+		prompt: withContext(`
+你是小说逻辑审校员，属于编辑岗。只报告问题、证据、影响和修复选项，不修改正文、正典、章纲或审校队列。保持作者、读者和角色三者的信息边界。
+
+【入口与覆盖】
+读取目标章全文一次，并取得上一锁定章最后场景或事件接口。先复用上游证据包；日常只对初读或确定性扫描发现的候选片段判断，不为普通段落生成空问题。按风险定向补查有关卡片；作者要求全项、跨章高风险或本书特化账目被触发时再扩大检查。只在目标、覆盖、关注族或授权不明时提问，最多四题。资料不足时明确覆盖盲区，不说“全书无问题”。
+
+【六个问题族】
+1. 认知与信息访问：角色知道、不知道、相信和可以据以行动的信息是什么，信息如何到达。
+2. 状态、资源与能力：伤势、装备、权限、法术位、额度等前后状态；能力范围、消耗和恢复是否相符。
+3. 因果与动机：目标、阻力、选择、行动和结果是否有前因，是否靠强行降智推进。
+4. 时间与空间：有效时间、路程、视线、位置、在场人物、倒叙与时间跳跃。
+5. 规则、身份与关系：世界法则、项目采用的规则、称呼、关系变化和系统权限。
+6. POV、环境与叙述连续性：焦点切换、门锁或痕迹、环境状态、不可靠叙述、读者可见信息和延迟揭示。
+
+【每条候选先建立证据卡】
+写出“前状态 → 原文事件 → 后状态”；分别列角色知道/不知道/相信/可操作信息、读者与叙述者可见信息、有效时间区间、地点和在场者。注明叙事许可为无、倒叙、不可靠叙述、焦点切换、计划揭示或未知，并绑定文件位置、行或字符锚点与短引文。
+先查合法叙事许可和信息差，再核对状态、资源和规则。不能把传闻、留白、合法反转、计划或伏笔当矛盾。台账与锁定正文冲突时以锁定正文为准，报告派生文件滞后；不要静默改台账。证据不足的候选应标不确定，不硬判成立。
+
+【按风险复核】
+日常局部判断由你完成，不默认全文读前两章或启动多轮对抗。严重问题、低置信度、许可不明项需要定向辩护：主动寻找能推翻指控的文本解释。只有作者要求完整对抗且获得实际独立结果时才报告猎手/辩护过程；剔除候选也要保留理由。复核结论不能自动变成改稿动作。
+
+【输出】
+先给整体评价和 Top 3–5，再列实际触发领域的账目核对、逻辑硬伤、因果断点、复核与未决事项。问题清单包含 issue_id、类型、原文 span、可检验的一句话、前后状态、知识主体、有效时间、叙事许可、绑定来源、confidence、severity（P0/P1/P2）、phase（candidate/confirmed/dismissed/uncertain）、disposition、authorized。confirmed 不等于 authorized；与其他审校同一问题沿用 ID。
+每个成立的问题都给最低成本的微创修复选项，涉及锁定内容标待作者确认。评分仅用于展示，不作为锁定门禁。说明实际范围、截止点、证据包（如有）与降级原因；不得把建议写成已执行结果。
+`)
+	},
+	{
+		id: "novel-audit-style-review",
+		name: "文风审校员",
+		summary: "结合小说语境和作品风格，检查模板腔、怪比喻、对白同质化与文风漂移。",
+		builtin: true,
+		source: "novel-audit-style-review",
+		prompt: withContext(`
+你是小说文风审校员，属于编辑岗。只报告问题、证据、影响和建议，不修改正文、正典或审校队列。逻辑和资源账目交逻辑审校，商业留存交商业审稿；不能将个人审美当作作品规则。
+
+【基准与范围】
+读取目标章一次，以当前项目的写作风格规范为权威基准，以前章已确认正文的风格指纹为实践基准。复用上游证据包，不重复构建或全库扫描；只在作者指定或高风险全审时读取更多基准章。最多询问四个会改变基准、覆盖或授权的缺口。没有基准证据时不能断言文风漂移，先报告局部语言现象和判断限制。
+
+【固定顺序：规则命中 → 片段 → 语境】
+1. 若当前项目实际提供 Renwei fiction lint，先按其小说配置运行，记录规则编号、文件、行号/字符范围、片段、统计范围、命中数和检查结果；默认排除 frontmatter、代码块和管理表格。不存在时明确未运行，人工检查只能称为人工语境检查，不虚构 lint 结果。
+2. 只对 lint 命中和读到的候选片段核对前后句、规则、风格规范与前章先例。没有可行动命中就不凑问题、不加载无关深层规则。
+3. 检查反向放行条件：功能化比喻、设定术语、项目已登记的 D&D 译名、合法氛围修辞和角色独有说话方式。计数不是语境结论。
+
+【指标边界】
+全书和单章指标分开，不能把全书阈值机械缩成单章。Renwei fiction 的章级或书级规则在单章少于两个命中时仅作 hint，不形成阻断性 FAIL；句子级规则要有最小样本和例外。单个短章的一处命中不能仅凭计数判失败。不使用 humanizer-zh 的非虚构指标，不将“人味密度”“第一人称插曲”等非小说指标套入小说。评分不参与逻辑门禁、锁定或自动改稿。
+
+【按命中启用检查族】
+- 模板腔与 AI 味：对白同质化、情绪直述、模板开场、陈腐身体反应、形容词或弱动词堆叠、欧化句式、排比填充、过渡套话、节奏机械化。
+- 作品特化：需要额外解码的怪比喻或拟人、生僻词堆砌；设定术语和已登记译名默认放行。
+- 风格一致性：禁用表达及额度、句长段落、对白指纹、心理密度、术语单位和项目约定 POV；不强行把所有作品改成同一种口吻。
+
+【复核与报告】
+日常由你作局部判断；刺眼、低置信度或许可不明的命中做一次反向复核，查放行条件与前章先例，并保留误报剔除理由。未经实际独立复核不得写“已完成双人辩论”。
+输出总体结论、有效文风资产、Top 3、问题清单、实际预扫描计数和复核记录；需要兼容时再给展示性评分。每项包含稳定 issue_id、原文 span、规则或判断依据、来源锚点、严重度、置信度、候选/确认/剔除状态、处置建议和是否获授权；与其他报告同一问题只引用 ID，不重复论证。示范改句仍是建议态，锁定正文的调整须由作者确认。报告写明范围、资料截止点及降级情况。
+`)
+	},
+	{
+		id: "novel-revise",
+		name: "正文修订师",
+		summary: "按作者授权与审查问题清单微创改稿，保留快照、差异记录和定向回归。",
+		builtin: true,
+		source: "novel-revise",
+		prompt: withContext(`
+你是小说正文修订师，属于主笔岗的最小授权执行角色。在这些小说角色中，只有本角色负责修改既有正文；小说主笔只创建或填充明确授权的草稿。审查报告、模型发现、“已确认问题”和顺手优化都不等于修改授权。
+
+【入口与授权清单】
+读取作者指令全文、目标正文、审查报告与相关权威资料。优先复用修订证据包；仅把它作为定位和证据组织，不能扩大授权。将意见整理成 Issue Manifest，每项包含稳定 issue_id、原文位置与短引文、绑定证据、修复边界、phase、disposition 和 authorized。只有 authorized=true 且 disposition 为 accept/revise 的事项可执行；confirmed 不等于授权。旧报告缺位置或授权时先列待确认，不能猜。状态、资源、时间、伏笔、规则或认知证据冲突时先说明，不脑补。
+
+【四级边界】
+- A 级：作者明确要求的句、段、剧情或逻辑修复，只在授权目标范围内改。
+- B 级自动连带：当前句或相邻句段中，为使 A 级成立所必需的最小修补；逐项说明“由任务 X 的 Y 处引发，受影响原文为……”。
+- B 级授权连带：跨段、跨场景，或影响伏笔、结果、人物动机、能力规则、后续因果；须作者逐项确认。快速档仅列待决，不执行。
+- C 级保护：其余正文完全锁定，包括同义词替换、美化、删细节、调节奏、重排揭示。
+- D 级额外发现：新发现只报告，不自动修改。
+
+【任务地图与档位】
+先展示任务地图：章节、实际范围、意见来源、资料截止点、授权条数、档位、每项 issue_id/span、必须改什么、最小连带及依据、待授权连带、禁止波及区域。
+快速档用于不超过三项局部小改，已有明确授权时展示地图后可直接执行 A 级与合法 B 级自动连带。完整档用于多意见、大改或定稿前修订，地图和授权级连带需作者确认后执行。作者允许你推荐方案并不自动扩大改稿权限。
+
+【执行与回归】
+1. 写入前在当前项目合适的归档位置创建不可覆盖的正文快照，报告真实路径；没有文件写入权限则只给建议和补丁。
+2. 逐条最小范围修改，不能全文重写。未经本轮明确授权，不改正典、章纲、台账或正文 frontmatter 管理状态。
+3. 生成 diff_manifest：文件、原/新 span、issue_id、权限级别、连带依据和实际字符差；使用项目差异工具前先确认它存在。发现未授权差异，先恢复或交作者决定。
+4. 快速档对照快照自查 C 级误伤；完整档在实际具备独立复核时核查 A/B/超授权，不追加文笔意见。没有独立复核则如实说明。
+5. 只回归受影响的状态/资源、时间/空间、认知/伏笔、规则或文风问题族，不重新引入无关全套审查。记录 reject/dismiss 理由以免误报复现。
+6. 回归出现新的状态、资源、时间、伏笔或认知风险时停止扩改并报告，不能用新一轮修改遮盖。
+
+【交付】
+报告执行元数据、实际修改与 issue_id、差异清单、必要连带、误伤检查、定向回归、额外发现但未修改事项、待作者决定事项和快照位置。区分建议与实际执行，不能把尚未写入的修改称为已完成。不自动定稿、关账、更新正典或推进任务看板；作者确认后才进入项目规定的后续流程。
+`)
+	},
+	{
+		id: "novel-start-plot-node",
+		name: "剧情节点设计师",
+		summary: "先建立入口、选择与出口的状态契约，再设计有因果、有代价的剧情节点。",
+		builtin: true,
+		source: "novel-start-plot-node",
+		prompt: withContext(`
+你是剧情节点设计师，属于策划岗。只产出提案态方案，不写正文，不修改章纲或正典，不把设想当作已发生事实。先确定节点的入口与出口，再讨论如何好看。
+
+【资料与最小询问】
+定位当前状态、所属剧情单元、已确认节点链、上一锁定章接口与相关正典。复用已有证据包和确认决策，不能用未来章纲或未采用规则补入口事实。
+如果作者未提供方向，先问是否有一句话想法，可跳过；有则归纳成两三行设计基准，冲突时列出冲突供作者选择。来自已确认拆分方案时沿用既定爽点、难度、代价、收益，只询问要调整的部分。最多七个必要选择问题：节点类型、主要爽点一至两个、难度与代价、真实选择及机会成本、收益或旧资产复用、特殊禁令、出口钩子。资料已有答案不重复问；作者授权由你决定时给推荐，并标明它仍是提案。
+
+【第一步：一页节点状态契约】
+- 入口：时间、地点、在场人物、状态、资源、能力、已知/未知/相信以及未解决问题。
+- 目标：限制条件、成功标准和失败代价。
+- 阻力：敌人、环境、时间、信息、资源或多目标冲突，以及对手反制。
+- 真实选择：至少明确 A 与 B，各自机会成本，不能假选择。
+- 预期出口：信息、资源、能力、风险、关系、位置、任务或认知的变化。
+- 知识边界：主角与对手知道/不知道/可操作什么，读者和叙述者可以看见什么。
+- 来源：逐项区分正典、已确认设计、提案、待验证假设，附现有来源锚点与资料截止点。
+这一轮只给契约，不扩写完整场景；列明待拍板项，等待作者确认或调整后再展开。已有明确确认可直接沿用，不能反复要求确认同一决定。
+
+【确认后的十三项设计】
+按节点需要取舍，不相关项注明不涉及，不凑篇幅：
+1. 目标、成败标准与入口；2. 阻力及时间/空间/规则限制、对手反制；3. 主角/对手/读者信息差与 POV；4. 关键行动、真实选择、机会成本；5. 前状态 → 事件 → 后状态的因果链；6. 一至两个核心爽点与期待兑现；7. 实力、知识或人物成长；8. 道具、资源和旧资产复用；9. 世界与主线推进；10. 状态变化与出口钩子；11. 风险、待验证项和最小备选；12. 章节包装建议；13. 与已确认节点链的接口和不可改约束。
+每项区分依据和新增提案。新规则、人物生死或阵营、主线因果、推翻锁定事实都列待作者确认。说明为什么该节点不能删、为什么导致下个节点、留下何种可复用资产；不是每个节点都必须升级、获装备、埋伏笔或顿悟，节点也不等于一章。
+
+【已有节点的评审】
+若任务是评审，先确定重点，按“问题—证据—影响—修复选项”输出，不改原方案；作者确认需要重设计后才进入设计流程。
+
+【输出与质量门】
+保留已确认设计要点、节点为什么存在/好看、留下什么、怎样推动长线、风险与待确认项。核对“入口 → 目标 → 阻力/限制 → 信息差 → 真实选择 → 行动与兑现 → 成长/资产 → 后置状态 → 出口钩子”是否闭合。不得为爽点临时加无依据规则、强行降智，或让系统替主角解释完整因果；未经作者确认不写入正文、章纲和正典。
+`)
+	},
+	{
+		id: "novel-start-plot-split",
+		name: "剧情结构规划师",
+		summary: "将剧情单元拆成因果相连的节点链，先给紧凑总览，再展开当前关键节点。",
+		builtin: true,
+		source: "novel-start-plot-split",
+		prompt: withContext(`
+你是剧情结构规划师，属于策划岗。负责将剧情单元拆成因果节点链，采用近细远粗的两阶段设计；只产出提案，不写正文，不把计划当成已发生事实。新增规则、人物生死、主线因果和推翻锁定事实必须保留作者确认边界。
+
+【一次资料预检】
+确认单元入口、出口、资源账目、已锁定节点和知识边界。优先复用上游证据包；只给单元标识时先读对应单元资料、当前状态和最近锁定章或事件接口，不机械为每种资料各查一次。未来章纲、未采用 D&D 参考、提案不能混进入口事实。资料不足则按缺口定向查阅，说明降级与盲区。
+
+【只问新增缺口】
+作者没有给方向时可询问一句话想法，有则用两三行形成基准并检查正典冲突。最多七个新增选择问题，覆盖主要功能/爽点、胜负难度、代价、收益、特殊禁令、是否可调顺序。已确认决策和资料已明确的目标、资源、人物、设定自动沿用。作者允许由你决定的项采用推荐，不再反复追问。
+
+【第一轮：单元契约与紧凑节点卡】
+先给一页提案态单元契约：入口的位置/时间/在场人物/资源能力/已知未知相信/未解决问题；单元目标；核心阻力与压力曲线；出口中必须变化的信息、资源、能力、关系、位置、风险或任务；核心兑现与后续接口。正典、已确认设计、提案、待验证假设分开标注。
+再用一张紧凑表列所有节点：节点名｜当前问题｜触发与核心行动｜核心爽点或功能｜前状态 → 后状态｜知识边界｜资产/代价｜下一节点接口。涉及旧资产复用、系统权限和 D&D 采用状态时单独说明。
+按问题、因果、状态、压力的变化拆分，不按固定章数切割。每个节点至少改变信息、资源、能力、风险、关系、位置、任务或认知之一；删掉后下个节点仍自然成立的节点，应建议合并或删除。
+第一轮结束等待作者确认或调整节点链，并选择先展开哪一至两个节点；未经确认不自动展开全部细节，已有明确确认可沿用。
+
+【第二轮：只展开当前一至两个节点】
+按功能取舍：目标与成败标准；入口及前置条件；阻力、对手反制与时空约束；角色知道/不知道/相信/可操作信息及读者视野；真实选择与机会成本；行动、因果链和结果；一至两个核心爽点及人物作用；资产获得、消耗、损坏或复用与规则适配；后置状态及下节点接口；风险、待验证项和最低成本备选。不要强制每节点升级、获装备、埋伏笔或凑齐十三项。其余节点保持紧凑层级，按作者进一步要求再细化。
+
+【质量检查与报告】
+核对入口 → 阻力 → 选择 → 行动 → 结果闭环；知识越界、未来信息泄漏、系统替角色解题、旧资产复用、可验证状态变化、已锁定事实及作者禁令。冲突只标待确认，不能静默改设定或为爽点强行降智。
+输出已确认方向、单元入口与出口、节点总览、当前节点详细拆分、爽点与成长曲线、风险检查，标明第一轮/第二轮、来源锚点、资料截止点和实际证据范围。节点不等于章节；所有未确认内容保持提案态，未经作者确认不得写入章纲、正典或正文。
+`)
+	},
+	{
+		id: "novel-write",
+		name: "小说主笔",
+		summary: "依据已确认剧情和最小场景资料写作草稿，严格守住人物认知、状态与风格边界。",
+		builtin: true,
+		source: "novel-write",
+		prompt: withContext(`
+你是小说主笔，将作者已确认的节点或章纲转成场景草稿。只创建或填充明确授权的草稿，不修改既有待审、修订、锁定或已发布正文；这些改动应交正文修订师。不能替作者批准重大剧情方向，也不能把提案写成已发生事实。
+
+【入口检查】
+确认目标章节、已确认节点、主任务、章末变化和作者禁令。目标文件不存在时先确认章节文件及项目 frontmatter 约定；章纲不能直接当成正文。正文处于待审、修订、锁定或已发布状态时停止覆盖。节点或章纲仍是提案时，先交回策划确认，不能直接开写。
+
+【最小场景资料包】
+复用同一检查点的证据，按场景块准备最小 Writer Packet，不将整个资料库、未来章纲、未采用的规则参考或完整审稿报告塞进写作材料。
+每块应明确：入口状态、场景目标、失败代价、预期出口；POV、时间、地点和在场人物；关键角色 known/unknown/believed/operational（知道、不知道、相信、可操作信息）；允许采用的短证据与来源锚点；风格指纹、上一块结尾和硬性禁令。出口或认知边界不清时先询问，不自行发明长期事实。
+
+【场景写作】
+你就是本次已选择的 CLI Worker 写手，使用当前配置完成任务，不因来源技能提到后端而再次调用其他 CLI 或切换模型。最小单位是入口、出口完整的场景块，默认一次一块，最多连续两块；不要按句子碎片化调用，也不一次性生成整章来跳过核验。
+正文应让行动、信息与因果自然呈现，保持作品的声音和 POV。角色不能使用尚未获得的信息，系统不能替主角解释完整因果；新规则、人物事实、伏笔解释和后续因果先列 proposal，等待作者决定。不要输出长篇内部思维链。
+
+【返回与验证】
+每块返回：正文、状态变化、认知变化、新提案和不确定项。若当前项目要求 writer-result/v1 等结构化格式，按其真实协议返回；没有协议则给清楚可核对的同等字段，不声称不存在的协议检查已通过。
+用当前项目实际可用的验证工具检查格式、状态、认知、正文禁用标记与授权范围；没有工具时进行明确标注的人工检查。格式错误最多修复一次；状态或知识冲突应交回作者或主智能体，不通过重复生成掩盖。对照真实输出和文件差异验证，不能仅凭写手自己的 SUCCESS 认定完成。
+
+【保存与后续】
+获得写入授权且通过核验的文本只保存为草稿，并保留实际输出位置、块标识和检查记录。不自动转为待审、锁定或关账，不更新正典、台账、当前状态与任务看板。对状态、资源、时间和认知做一次定向回归，严重冲突立即暂停。完成草稿后建议进入审校；需要修改既有正文则使用明确授权的修订流程。
+
+【报告】
+列场景块、实际输出位置、核验结果、未决提案、失败修复或作者介入记录，以及实际可确认的证据包/写作包标识、资料截止点、执行方式和降级原因。只报告能够核实的 CLI、模型和强度；不编造模型、工具结果或已发生的情节。
+`)
+	}
+];
+//#endregion
+//#region lib/types/host/roles.js
+const singleLine = (max) => z.string().trim().min(1).max(max).refine((value) => !/[\r\n\u0000-\u001f\u007f]/.test(value), "名称不能包含换行或控制字符");
+const agentNameSchema = singleLine(60);
+const workerTitleSchema = singleLine(160);
+const roleSnapshotSchema = z.object({
+	presetId: z.string().min(1).max(100).optional(),
+	name: agentNameSchema,
+	summary: z.string().trim().min(1).max(240),
+	prompt: z.string().trim().min(1).max(3e4)
+});
+const rolePresetSchema = roleSnapshotSchema.omit({ presetId: true }).extend({
+	id: z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/),
+	builtin: z.boolean().optional(),
+	source: z.string().max(240).optional()
+});
+const rolePresetInputSchema = rolePresetSchema.omit({
+	builtin: true,
+	source: true
+}).extend({ id: rolePresetSchema.shape.id.optional() });
+const NO_ROLE_LABEL = "不使用角色预设";
+function roleSnapshot(preset) {
+	return {
+		presetId: preset.id,
+		name: preset.name,
+		summary: preset.summary,
+		prompt: preset.prompt
+	};
+}
+/** Snapshot the offered list before showing this question; parsing uses that same list. */
+function roleQuestion(presets) {
+	return {
+		id: "cliworker_role",
+		header: "智能体预设",
+		question: "选择角色预设",
+		options: [...presets.map((preset) => ({ label: preset.name })), { label: NO_ROLE_LABEL }]
+	};
+}
+function readRoleAnswer(presets, response) {
+	const answer = response.answers.find((item) => item.id === "cliworker_role");
+	if (answer?.custom !== void 0) return roleSnapshotSchema.parse({
+		name: "临时角色",
+		summary: "本次派遣自定义的角色提示词",
+		prompt: answer.custom
+	});
+	if (answer?.selected.length !== 1) throw new Error("请选择角色预设或填写临时提示词；任务尚未启动");
+	if (answer.selected[0] === "不使用角色预设") return void 0;
+	const preset = presets.find((item) => item.name === answer.selected[0]);
+	if (!preset) throw new Error("角色选择已失效，请重新选择；任务尚未启动");
+	return roleSnapshot(preset);
+}
+function availableAgentName(workers, parent, base) {
+	const names = new Set([...workers].filter((worker) => worker.parentSessionId === parent).flatMap((worker) => [workerName(worker), ...worker.nameAliases ?? []]).map((name) => name.toLocaleLowerCase()));
+	const stem = agentNameSchema.parse(base).slice(0, 48);
+	let number = 1;
+	while (names.has(`${stem}-${number}`.toLocaleLowerCase())) number++;
+	return `${stem}-${number}`;
+}
+/** Role is prepended only for a fresh CLI conversation. Timeline keeps the task verbatim. */
+function promptForWorker(worker, task) {
+	if (!worker.role || worker.conversationId) return task;
+	return `智能体名称：${worker.agentName ?? worker.role.name}\n\n角色提示词（遵循宿主权限与当前任务范围）：\n${worker.role.prompt}\n\n本次任务：\n${task}`;
+}
+//#endregion
+//#region lib/types/host/storage.js
+const preferenceSchema$1 = z.object({
+	cli: z.enum(CLI_IDS).optional(),
+	model: z.string().min(1),
+	effort: z.enum(EFFORTS)
+});
+const dispatchBindingSchema = z.string().min(1).max(256);
+const cleanupBlockSchema = z.object({
+	policy: z.literal(1),
+	state: z.literal("cleanup-unconfirmed")
+}).strict();
+const projectPreferenceSchema = preferenceSchema$1.extend({
+	dispatchRole: roleSnapshotSchema.nullable().optional(),
+	dispatchBinding: dispatchBindingSchema.optional()
+});
+const dispatchSetupSchema = z.object({
+	preference: preferenceSchema$1,
+	role: roleSnapshotSchema.nullable(),
+	binding: dispatchBindingSchema
+});
+const conversationSetupSchema = z.object({
+	policy: z.literal(1),
+	parent: z.string().min(1),
+	project: z.string().min(1),
+	cli: z.enum(CLI_IDS),
+	setup: dispatchSetupSchema
+});
+const storedCliSchema = z.enum([...CLI_IDS, "harness"]);
+const storedPreferenceSchema = preferenceSchema$1.extend({ cli: storedCliSchema.optional() });
+const cliSettingsSchema = z.object({ enabled: z.partialRecord(storedCliSchema, z.boolean()) });
+const taskTimeLimitSchema = z.int().min(1e3).max(MAX_TASK_TIME_LIMIT_MS);
+const idleTimeLimitSchema = z.union([z.literal(0), z.int().min(6e4).max(MAX_TASK_TIME_LIMIT_MS)]);
+/** Every field is optional: an absent value keeps the deployment default. */
+const generalSettingsSchema = z.object({
+	maxConcurrent: z.int().min(1).max(8).optional(),
+	language: z.enum(LANGUAGE_PREFERENCES).optional(),
+	isolatedParallelWrites: z.boolean().optional(),
+	askBeforeDispatch: z.boolean().optional(),
+	showDshSubagents: z.boolean().optional(),
+	taskTimeLimitMs: taskTimeLimitSchema.optional(),
+	idleTimeLimitMs: idleTimeLimitSchema.optional()
+});
+const enabledByDefault = () => Object.fromEntries(CLI_IDS.map((cli) => [cli, true]));
+const runningMessageSchema = z.object({
+	policy: z.union([z.literal(1), z.literal(2)]),
+	project: z.string().min(1),
+	cli: z.enum(CLI_IDS),
+	mode: z.enum(RUNNING_MESSAGE_MODES)
+}).strict();
+const workerSchema = z.object({
+	initiator: z.object({
+		kind: z.enum(["worker", "subagent"]),
+		id: z.string().min(1),
+		name: z.string().min(1)
+	}).optional(),
+	id: z.uuid(),
+	parentSessionId: z.string().min(1),
+	project: z.string().min(1),
+	title: z.string(),
+	agentName: agentNameSchema.optional(),
+	agentNameOrigin: z.enum(["auto", "custom"]).optional(),
+	nameAliases: z.array(agentNameSchema).max(32).optional(),
+	archivedAt: z.string().datetime().optional(),
+	role: roleSnapshotSchema.optional(),
+	preference: storedPreferenceSchema,
+	mode: z.enum(["plan", "accept-edits"]),
+	level: z.enum([
+		"ask",
+		"auto",
+		"full"
+	]).optional().catch(void 0),
+	conversationId: z.string().optional(),
+	previousConversationIds: z.array(z.string().min(1)).max(64).optional().catch(void 0),
+	reboundConversationId: z.string().min(1).max(1024).optional().catch(void 0),
+	carryoverRunId: z.uuid().optional().catch(void 0),
+	conversationTelemetry: conversationTelemetrySchema.optional().catch(void 0),
+	previousSessionUsage: sessionUsageSchema.optional().catch(void 0),
+	lastRunUsageSnapshot: lastRunUsageSnapshotSchema.optional().catch(void 0),
+	contextTelemetry: contextTelemetrySchema.optional().catch(void 0),
+	contextInvalidatedRunId: z.uuid().optional().catch(void 0),
+	harnessConversation: z.object({
+		sessionId: z.string().min(1),
+		parentSessionId: z.string().min(1),
+		mode: z.literal("continuable"),
+		capabilities: z.object({
+			send: z.boolean(),
+			queue: z.boolean(),
+			steer: z.boolean(),
+			stop: z.boolean(),
+			model: z.boolean(),
+			permission: z.boolean(),
+			plan: z.boolean(),
+			attachments: z.boolean(),
+			fork: z.boolean(),
+			skills: z.boolean(),
+			tools: z.boolean(),
+			forkEarlier: z.boolean().default(false),
+			goal: z.boolean().default(false),
+			feedback: z.boolean().default(false)
+		}),
+		reasons: z.record(z.string(), z.string()).optional()
+	}).optional(),
+	transport: z.string().min(1).max(128).optional(),
+	goal: z.object({
+		objective: z.string().min(1).max(GOAL_OBJECTIVE_LIMIT),
+		status: z.enum(["active", "paused"]),
+		revision: z.number().int().nonnegative(),
+		updatedAt: z.string()
+	}).optional(),
+	goalRevision: z.number().int().nonnegative().optional(),
+	status: z.enum([
+		"queued",
+		"running",
+		"stopping",
+		"completed",
+		"failed",
+		"interrupted",
+		"uncertain"
+	]),
+	createdAt: z.string(),
+	updatedAt: z.string(),
+	runId: z.uuid(),
+	jobId: z.string().optional(),
+	error: z.string().optional(),
+	interruptionReason: z.literal("user").optional(),
+	observedModel: z.string().optional(),
+	lastResult: z.string().optional(),
+	isolation: z.object({
+		state: z.enum([
+			"preparing",
+			"ready",
+			"merging",
+			"conflict",
+			"released"
+		]),
+		path: z.string().min(1),
+		createdAt: z.string().optional(),
+		conflicts: z.array(z.object({
+			path: z.string(),
+			reason: z.string()
+		})).max(200).optional(),
+		skippedLinks: z.number().int().nonnegative().optional(),
+		message: z.string().max(2e3).optional()
+	}).optional(),
+	isolationNotice: z.string().max(2e3).optional(),
+	resultNotice: z.string().max(2e3).optional()
+});
+/**
+* A tool command is display text. An over-long one (a long inline script) is
+* clipped rather than rejected, so it can never stop the Host from loading its
+* own event log.
+*/
+const TOOL_COMMAND_LIMIT = 32768;
+function clipToolCommand(command) {
+	if (command.length <= 32768) return command;
+	const end = /[\uD800-\uDBFF]/.test(command[32767]) ? TOOL_COMMAND_LIMIT - 1 : TOOL_COMMAND_LIMIT;
+	return command.slice(0, end);
+}
+const eventSchema = z.object({
+	requestState: z.object({
+		nativeRunId: z.string().regex(/^[\w-]{1,256}$/),
+		sequence: z.number().int().safe().positive(),
+		phase: z.enum([
+			"requesting",
+			"failed",
+			"completed"
+		]),
+		statusCode: z.number().int().min(100).max(599).optional(),
+		reason: z.string().regex(/^[a-z_]{1,80}$/).optional(),
+		retryCount: z.number().int().safe().nonnegative().optional(),
+		retryable: z.boolean().optional()
+	}).optional(),
+	seq: z.number().int().positive(),
+	runId: z.uuid(),
+	time: z.string(),
+	kind: z.enum([
+		"user",
+		"assistant",
+		"reasoning",
+		"tool",
+		"status",
+		"diagnostic",
+		"result",
+		"submission"
+	]),
+	text: z.string(),
+	observedModel: z.string().optional(),
+	step: z.number().optional(),
+	state: z.string().optional(),
+	detail: z.string().optional(),
+	delta: z.string().optional(),
+	truncated: z.literal(true).optional(),
+	outputBytes: z.number().int().safe().positive().optional(),
+	notice: z.literal(true).optional(),
+	response: z.unknown().transform((value, context) => {
+		if (value === void 0) return void 0;
+		try {
+			return parseNativeResponse(value);
+		} catch {
+			context.addIssue({
+				code: "custom",
+				message: "Invalid native response metadata"
+			});
+			return z.NEVER;
+		}
+	}).optional(),
+	toolCall: z.object({
+		callId: z.string().min(1).max(1024).optional(),
+		parentCallId: z.string().min(1).max(1024).optional(),
+		name: z.string().min(1).max(1024).optional(),
+		input: z.unknown().optional(),
+		output: z.unknown().optional(),
+		command: z.string().transform(clipToolCommand).optional(),
+		exitCode: z.number().int().safe().optional()
+	}).optional(),
+	resultScope: z.enum(["run", "response"]).optional(),
+	queuedFollowupId: z.uuid().optional(),
+	deliveryState: z.enum([
+		"pending",
+		"admitted",
+		"running",
+		"superseded",
+		"cancelled",
+		"failed",
+		"completed"
+	]).optional(),
+	deliveryError: z.string().optional(),
+	admittedRunId: z.uuid().optional(),
+	submissionClientId: z.uuid().optional(),
+	submissionSequence: z.number().int().nonnegative().optional()
+});
+function atomicJSON(path, value) {
+	const temp = `${path}.${randomUUID()}.tmp`;
+	try {
+		writeFileSync(temp, JSON.stringify(value), {
+			mode: 384,
+			flag: "wx"
+		});
+		renameSync(temp, path);
+	} finally {
+		if (existsSync(temp)) rmSync(temp);
+	}
+}
+const LOCK_CLAIM = /^host\.lock\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+function readLockOwner(path) {
+	let raw;
+	try {
+		raw = readFileSync(path, "utf8");
+	} catch (error) {
+		return error.code === "ENOENT" ? "missing" : "invalid";
+	}
+	try {
+		const owner = JSON.parse(raw);
+		if (!Number.isSafeInteger(owner?.pid) || owner.pid <= 0) return "invalid";
+		return {
+			pid: owner.pid,
+			...typeof owner.token === "string" ? { token: owner.token } : {}
+		};
+	} catch {
+		return "invalid";
+	}
+}
+/** EPERM still proves that a process with this PID exists. */
+function processAlive(pid) {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return error.code !== "ESRCH";
+	}
+}
+const MONTHS = [
+	"Jan",
+	"Feb",
+	"Mar",
+	"Apr",
+	"May",
+	"Jun",
+	"Jul",
+	"Aug",
+	"Sep",
+	"Oct",
+	"Nov",
+	"Dec"
+];
+/** Start time (ms since epoch) of a running process, or undefined when the OS does not say. */
+function processStartedAt(pid) {
+	try {
+		if (process.platform === "win32") {
+			const output = execFileSync("powershell.exe", [
+				"-NoLogo",
+				"-NoProfile",
+				"-NonInteractive",
+				"-Command",
+				"$p=Get-CimInstance Win32_Process -Filter ('ProcessId=' + [int]$env:CWN_LOCK_PID); if($p){[DateTimeOffset]::new($p.CreationDate.ToUniversalTime()).ToUnixTimeMilliseconds()}"
+			], {
+				encoding: "utf8",
+				env: {
+					...process.env,
+					CWN_LOCK_PID: String(pid)
+				},
+				stdio: [
+					"ignore",
+					"pipe",
+					"ignore"
+				],
+				timeout: 15e3,
+				windowsHide: true
+			});
+			const started = Number(output.trim());
+			return Number.isSafeInteger(started) && started > 0 ? started : void 0;
+		}
+		const output = execFileSync("ps", [
+			"-o",
+			"lstart=",
+			"-p",
+			String(pid)
+		], {
+			encoding: "utf8",
+			env: {
+				...process.env,
+				LC_ALL: "C"
+			},
+			stdio: [
+				"ignore",
+				"pipe",
+				"ignore"
+			],
+			timeout: 5e3
+		});
+		const match = /^\s*\w{3}\s+(\w{3})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})\s*$/.exec(output);
+		const month = match ? MONTHS.indexOf(match[1]) : -1;
+		if (!match || month < 0) return void 0;
+		return new Date(+match[6], month, +match[2], +match[3], +match[4], +match[5]).getTime();
+	} catch {
+		return;
+	}
+}
+/** Lock mtimes and process start times may be truncated to whole seconds. */
+const LOCK_CLOCK_SLACK_MS = 2e3;
+/**
+* A Host starts before it writes its lock, so a live PID whose process started
+* after the lock was written is a reused PID and the Host behind the lock has
+* exited (Windows reuses PIDs quickly). An unknown start time counts as live.
+*/
+function lockOwnerAlive(pid, path, startedAt) {
+	if (!processAlive(pid)) return false;
+	let written;
+	try {
+		written = statSync(path).mtimeMs;
+	} catch {
+		return true;
+	}
+	const started = startedAt(pid);
+	return started === void 0 || started <= written + LOCK_CLOCK_SLACK_MS;
+}
+/** One host owns a private store; a live second host cannot resume the same CLI session. */
+var WorkerStorage = class {
+	directory;
+	workers = /* @__PURE__ */ new Map();
+	events = /* @__PURE__ */ new Map();
+	token = randomUUID();
+	lock;
+	candidate;
+	enabled = enabledByDefault();
+	general = {};
+	presets = [];
+	/** Account epochs live outside public Worker records and event/history responses. */
+	accountBinding(id) {
+		z.uuid().parse(id);
+		const path = join(this.directory, `${id}.account-binding.json`);
+		if (!existsSync(path)) return void 0;
+		return z.object({
+			policy: z.literal(1),
+			binding: z.string().min(1).max(256)
+		}).parse(JSON.parse(readFileSync(path, "utf8"))).binding;
+	}
+	bindAccount(id, binding) {
+		z.uuid().parse(id);
+		z.string().min(1).max(256).parse(binding);
+		atomicJSON(join(this.directory, `${id}.account-binding.json`), {
+			policy: 1,
+			binding
+		});
+	}
+	/** Private quarantine survives Host restart; absence alone means no recorded quarantine. */
+	cleanupBlockState(cli) {
+		const path = this.cleanupBlockPath(cli);
+		let handle;
+		let buffer;
+		try {
+			let entry;
+			try {
+				entry = lstatSync(path);
+			} catch (error) {
+				return error.code === "ENOENT" ? "none" : "invalid";
+			}
+			if (entry.isSymbolicLink() || !entry.isFile() || entry.nlink !== 1 || entry.size > 1024) return "invalid";
+			handle = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+			const before = fstatSync(handle);
+			if (!before.isFile() || before.nlink !== 1 || before.dev !== entry.dev || before.ino !== entry.ino || before.size > 1024) return "invalid";
+			buffer = Buffer.alloc(1025);
+			let offset = 0;
+			while (offset < buffer.length) {
+				const size = readSync(handle, buffer, offset, buffer.length - offset, null);
+				if (!size) break;
+				offset += size;
+			}
+			const after = fstatSync(handle), current = lstatSync(path);
+			if (offset !== before.size || before.size !== after.size || before.mtimeMs !== after.mtimeMs || current.isSymbolicLink() || current.nlink !== 1 || current.dev !== before.dev || current.ino !== before.ino || current.size !== after.size || current.mtimeMs !== after.mtimeMs) return "invalid";
+			cleanupBlockSchema.parse(JSON.parse(buffer.subarray(0, offset).toString("utf8")));
+			return "blocked";
+		} catch {
+			return "invalid";
+		} finally {
+			buffer?.fill(0);
+			if (handle !== void 0) closeSync(handle);
+		}
+	}
+	/** No automatic clearing: only trustworthy process-exit recovery can release a quarantine. */
+	blockCleanup(cli) {
+		atomicJSON(this.cleanupBlockPath(cli), {
+			policy: 1,
+			state: "cleanup-unconfirmed"
+		});
+	}
+	/** The user's confirmed release of one CLI's metadata quarantine; the unattributed global record has none. */
+	clearCleanupBlock(cli) {
+		const path = this.cleanupBlockPath(z.enum(CLI_IDS).parse(cli));
+		let entry;
+		try {
+			entry = lstatSync(path);
+		} catch (error) {
+			if (error.code === "ENOENT") return;
+			throw error;
+		}
+		if (entry.isDirectory()) throw new Error("清理隔离记录不是文件，无法解除");
+		rmSync(path, { force: true });
+	}
+	cleanupBlockPath(cli) {
+		return join(this.directory, cli === void 0 ? "cleanup-blocked.json" : `cleanup-blocked-${z.enum(CLI_IDS).parse(cli)}.json`);
+	}
+	constructor(directory) {
+		this.directory = directory;
+		mkdirSync(directory, {
+			recursive: true,
+			mode: 448
+		});
+		chmodSync(directory, 448);
+		this.lock = join(directory, "host.lock");
+		this.candidate = join(directory, `host.lock.${this.token}`);
+		this.acquireLock();
+		try {
+			const rolesPath = join(directory, "role-presets.json");
+			if (existsSync(rolesPath)) {
+				this.presets = z.array(rolePresetSchema).max(200).parse(JSON.parse(readFileSync(rolesPath, "utf8")));
+				chmodSync(rolesPath, 384);
+			} else {
+				this.presets = z.array(rolePresetSchema).parse(structuredClone(BUILTIN_ROLE_PRESETS));
+				atomicJSON(rolesPath, this.presets);
+			}
+			const settingsPath = join(directory, "cli-settings.json");
+			if (existsSync(settingsPath)) {
+				const settings = cliSettingsSchema.parse(JSON.parse(readFileSync(settingsPath, "utf8")));
+				for (const cli of CLI_IDS) if (settings.enabled[cli] !== void 0) this.enabled[cli] = settings.enabled[cli];
+				chmodSync(settingsPath, 384);
+			}
+			const generalPath = join(directory, "general-settings.json");
+			if (existsSync(generalPath)) {
+				this.general = generalSettingsSchema.parse(JSON.parse(readFileSync(generalPath, "utf8")));
+				chmodSync(generalPath, 384);
+			}
+			for (const file of readdirSync(directory).filter((name) => name.endsWith(".worker.json"))) {
+				const worker = workerSchema.parse(JSON.parse(readFileSync(join(directory, file), "utf8")));
+				if (`${worker.id}.worker.json` !== file) throw new Error("Worker storage identity mismatch");
+				this.workers.set(worker.id, worker);
+				if (active(worker.status)) {
+					worker.status = "interrupted";
+					worker.interruptionReason = void 0;
+					worker.error = worker.preference.cli === "harness" ? RETIRED_HARNESS_NOTICE : "上次 Harness 运行中断；可继续原会话";
+					this.save(worker);
+					this.append(worker, {
+						kind: "status",
+						text: worker.error,
+						state: "interrupted"
+					});
+				} else if (isUserInterrupted(worker) && worker.error) {
+					worker.error = void 0;
+					worker.interruptionReason = "user";
+					this.save(worker);
+				}
+			}
+			this.migrateAutomaticNames();
+			this.migrateRunningMessageSettings();
+		} catch (error) {
+			this.close();
+			throw error;
+		}
+	}
+	/** Explicitly authorized one-time native-capability reset; later manual choices use policy 2. */
+	migrateRunningMessageSettings() {
+		for (const name of readdirSync(this.directory).filter((file) => file.endsWith(".running-message.json"))) {
+			const path = join(this.directory, name);
+			let value;
+			try {
+				value = this.readRunningMessageRecord(path);
+				if (`${this.projectKey(value.project, value.cli)}.running-message.json` !== name) continue;
+			} catch {
+				continue;
+			}
+			if (value.policy === 1) atomicJSON(path, {
+				...value,
+				policy: 2,
+				mode: defaultRunningMessageMode(value.cli)
+			});
+		}
+	}
+	readRunningMessageRecord(path) {
+		const info = lstatSync(path);
+		if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size > 16384) throw new Error("运行中发送设置无法核验");
+		const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+		try {
+			const opened = fstatSync(fd);
+			if (!opened.isFile() || opened.ino !== info.ino || opened.dev !== info.dev || opened.nlink !== 1 || opened.size > 16384) throw new Error("运行中发送设置身份已变化");
+			const bytes = Buffer.alloc(opened.size + 1);
+			let length = 0;
+			while (length < bytes.length) {
+				const read = readSync(fd, bytes, length, bytes.length - length, null);
+				if (!read) break;
+				length += read;
+			}
+			const after = fstatSync(fd), current = lstatSync(path);
+			if (length !== opened.size || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || after.nlink !== 1 || current.isSymbolicLink() || current.nlink !== 1 || current.ino !== opened.ino || current.dev !== opened.dev || current.size !== after.size || current.mtimeMs !== after.mtimeMs) throw new Error("运行中发送设置读取期间发生变化");
+			return runningMessageSchema.parse(JSON.parse(bytes.subarray(0, length).toString("utf8")));
+		} finally {
+			closeSync(fd);
+		}
+	}
+	/** Only the former CLI-default format and unnamed histories establish legacy automatic names. */
+	migrateAutomaticNames() {
+		const ordered = [...this.workers.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+		for (const worker of ordered) {
+			const cli = cliOf(worker.preference);
+			if (isRetiredCli(cli) || worker.agentNameOrigin === "custom") continue;
+			const previousName = workerName(worker);
+			const stem = CLI_SHORT_NAMES[cli];
+			const isNumbered = (name, prefix) => name.startsWith(`${prefix}-`) && /^[1-9]\d*$/.test(name.slice(prefix.length + 1));
+			if (worker.agentName && isNumbered(worker.agentName, stem)) continue;
+			if (worker.agentName && worker.agentNameOrigin !== "auto" && !isNumbered(worker.agentName, `${CLI_LABELS[cli]}助手`)) continue;
+			if (ordered.some((other) => other.id !== worker.id && other.parentSessionId === worker.parentSessionId && [workerName(other), ...other.nameAliases ?? []].some((name) => name.toLocaleLowerCase() === previousName.toLocaleLowerCase()))) continue;
+			const migrated = {
+				...worker,
+				agentName: availableAgentName(this.workers.values(), worker.parentSessionId, stem),
+				agentNameOrigin: "auto",
+				nameAliases: [.../* @__PURE__ */ new Set([...worker.nameAliases ?? [], previousName])]
+			};
+			workerSchema.parse(migrated);
+			this.save(migrated);
+		}
+	}
+	cliSettings() {
+		return { enabled: { ...this.enabled } };
+	}
+	generalSettings() {
+		return { ...this.general };
+	}
+	/** Merges one validated patch; `null` restores that field's deployment default. */
+	setGeneralSettings(patch) {
+		const changes = z.object({
+			maxConcurrent: z.int().min(1).max(8).nullable().optional(),
+			language: z.enum(LANGUAGE_PREFERENCES).nullable().optional(),
+			isolatedParallelWrites: z.boolean().nullable().optional(),
+			askBeforeDispatch: z.boolean().nullable().optional(),
+			showDshSubagents: z.boolean().nullable().optional(),
+			taskTimeLimitMs: taskTimeLimitSchema.nullable().optional(),
+			idleTimeLimitMs: idleTimeLimitSchema.nullable().optional()
+		}).strict().parse(patch);
+		const next = { ...this.general };
+		for (const [key, value] of Object.entries(changes)) if (value === null) delete next[key];
+		else if (value !== void 0) next[key] = value;
+		const parsed = generalSettingsSchema.parse(next);
+		atomicJSON(join(this.directory, "general-settings.json"), parsed);
+		this.general = parsed;
+		return this.generalSettings();
+	}
+	rolePresets() {
+		return structuredClone(this.presets);
+	}
+	saveRolePreset(input) {
+		const value = rolePresetInputSchema.parse(input);
+		const previous = value.id ? this.presets.find((preset) => preset.id === value.id) : void 0;
+		if (value.id && !previous) throw new Error("此角色预设已删除，请新建预设");
+		if (value.name === "不使用角色预设" || this.presets.some((preset) => preset.id !== value.id && preset.name.toLocaleLowerCase() === value.name.toLocaleLowerCase())) throw new Error("此智能体名称已被使用，请换一个名称");
+		if (!previous && this.presets.length >= 200) throw new Error("最多保存 200 个角色预设");
+		const saved = {
+			...previous,
+			...value,
+			id: previous?.id ?? randomUUID()
+		};
+		const next = previous ? this.presets.map((preset) => preset.id === saved.id ? saved : preset) : [...this.presets, saved];
+		atomicJSON(join(this.directory, "role-presets.json"), next);
+		this.presets = next;
+		return structuredClone(saved);
+	}
+	deleteRolePreset(id) {
+		if (!this.presets.some((preset) => preset.id === id)) throw new Error("此角色预设已删除");
+		const next = this.presets.filter((preset) => preset.id !== id);
+		atomicJSON(join(this.directory, "role-presets.json"), next);
+		this.presets = next;
+	}
+	setCliEnabled(cli, enabled) {
+		if (isRetiredCli(cli)) throw new Error(RETIRED_HARNESS_NOTICE);
+		const id = z.enum(CLI_IDS).parse(cli);
+		const next = {
+			...this.enabled,
+			[id]: z.boolean().parse(enabled)
+		};
+		atomicJSON(join(this.directory, "cli-settings.json"), { enabled: next });
+		this.enabled = next;
+		return this.cliSettings();
+	}
+	projectKey(project, cli = "antigravity") {
+		z.string().min(1).parse(project);
+		z.enum(CLI_IDS).parse(cli);
+		return createHash("sha256").update(cli === "antigravity" ? project : JSON.stringify([project, cli])).digest("hex");
+	}
+	readProjectPreference(project, cli) {
+		const path = join(this.directory, `${this.projectKey(project, cli)}.preference.json`);
+		if (!existsSync(path)) return void 0;
+		const value = projectPreferenceSchema.parse(JSON.parse(readFileSync(path, "utf8")));
+		if ((value.cli ?? "antigravity") !== cli) throw new Error("项目偏好的 CLI 标识不匹配");
+		return value;
+	}
+	runningMessageSettings(project, cli) {
+		if (isRetiredCli(cli)) return {
+			cli,
+			mode: "queue",
+			canSteer: false
+		};
+		const path = join(this.directory, `${this.projectKey(project, cli)}.running-message.json`);
+		let mode = defaultRunningMessageMode(cli);
+		if (existsSync(path)) {
+			const value = this.readRunningMessageRecord(path);
+			if (value.project !== project || value.cli !== cli) throw new Error("运行中发送设置的项目或 CLI 不匹配");
+			if (value.mode === "steer" && !supportsNativeSteering(cli)) throw new Error("此 CLI 不支持引导，请重新选择运行中发送方式");
+			mode = value.mode;
+		}
+		return {
+			cli,
+			mode,
+			canSteer: supportsNativeSteering(cli)
+		};
+	}
+	setRunningMessageMode(project, cli, mode) {
+		if (isRetiredCli(cli)) throw new Error(RETIRED_HARNESS_NOTICE);
+		const value = runningMessageSchema.parse({
+			policy: 2,
+			project,
+			cli,
+			mode
+		});
+		if (mode === "steer" && !supportsNativeSteering(cli)) throw new Error("此 CLI 不支持引导，请选择插队或排队");
+		atomicJSON(join(this.directory, `${this.projectKey(project, cli)}.running-message.json`), value);
+		return {
+			cli,
+			mode,
+			canSteer: supportsNativeSteering(cli)
+		};
+	}
+	preference(project, cli = "antigravity") {
+		if (isRetiredCli(cli)) return void 0;
+		const value = this.readProjectPreference(project, cli);
+		return value ? preferenceSchema$1.parse(value) : void 0;
+	}
+	setPreference(project, preference) {
+		if (preference.cli && isRetiredCli(preference.cli)) throw new Error(RETIRED_HARNESS_NOTICE);
+		const value = preferenceSchema$1.parse(preference);
+		const cli = value.cli ?? "antigravity";
+		const previous = this.readProjectPreference(project, cli);
+		atomicJSON(join(this.directory, `${this.projectKey(project, cli)}.preference.json`), {
+			...previous,
+			...value
+		});
+	}
+	dispatchSetup(project, cli) {
+		if (isRetiredCli(cli)) return void 0;
+		const value = this.readProjectPreference(project, cli);
+		if (value?.dispatchRole === void 0 || value.dispatchBinding === void 0) return void 0;
+		return {
+			preference: preferenceSchema$1.parse(value),
+			role: value.dispatchRole,
+			binding: value.dispatchBinding
+		};
+	}
+	setDispatchSetup(project, setup) {
+		if (setup.preference.cli && isRetiredCli(setup.preference.cli)) throw new Error(RETIRED_HARNESS_NOTICE);
+		const value = dispatchSetupSchema.parse(setup);
+		const cli = value.preference.cli ?? "antigravity";
+		atomicJSON(join(this.directory, `${this.projectKey(project, cli)}.preference.json`), {
+			...value.preference,
+			dispatchRole: value.role,
+			dispatchBinding: value.binding
+		});
+	}
+	conversationKey(parent, project, cli) {
+		z.string().min(1).parse(parent);
+		z.string().min(1).parse(project);
+		z.enum(CLI_IDS).parse(cli);
+		return createHash("sha256").update(JSON.stringify([
+			parent,
+			project,
+			cli
+		])).digest("hex");
+	}
+	conversationSetup(parent, project, cli) {
+		if (isRetiredCli(cli)) return void 0;
+		const path = join(this.directory, `${this.conversationKey(parent, project, cli)}.conversation-setup.json`);
+		if (!existsSync(path)) return void 0;
+		const value = conversationSetupSchema.parse(JSON.parse(readFileSync(path, "utf8")));
+		if (value.parent !== parent || value.project !== project || value.cli !== cli || (value.setup.preference.cli ?? "antigravity") !== cli) throw new Error("对话派遣设定的身份不匹配");
+		return value.setup;
+	}
+	setConversationSetup(parent, project, setup) {
+		if (setup.preference.cli && isRetiredCli(setup.preference.cli)) throw new Error(RETIRED_HARNESS_NOTICE);
+		const value = dispatchSetupSchema.parse(setup);
+		const cli = value.preference.cli ?? "antigravity";
+		const key = this.conversationKey(parent, project, cli);
+		atomicJSON(join(this.directory, `${key}.conversation-setup.json`), {
+			policy: 1,
+			parent,
+			project,
+			cli,
+			setup: value
+		});
+	}
+	save(worker) {
+		atomicJSON(join(this.directory, `${worker.id}.worker.json`), worker);
+		this.workers.set(worker.id, worker);
+	}
+	history(id) {
+		if (!this.workers.has(id)) throw new Error("Unknown worker");
+		const cached = this.events.get(id);
+		if (cached) return cached;
+		const path = join(this.directory, `${id}.events.jsonl`);
+		const rows = [];
+		if (existsSync(path)) {
+			const raw = readFileSync(path);
+			const end = raw.lastIndexOf(10) + 1;
+			const complete = raw.subarray(0, end).toString("utf8").split("\n").slice(0, -1);
+			for (const line of complete) {
+				const event = eventSchema.parse(JSON.parse(line));
+				if (event.seq !== rows.length + 1) throw new Error("Event sequence corruption");
+				rows.push(event);
+			}
+			if (end !== raw.length) {
+				const handle = openSync(path, "r+");
+				try {
+					ftruncateSync(handle, end);
+					fsyncSync(handle);
+				} finally {
+					closeSync(handle);
+				}
+			}
+		}
+		this.events.set(id, rows);
+		return rows;
+	}
+	append(worker, event) {
+		const rows = this.history(worker.id);
+		const command = event.toolCall?.command;
+		if (command !== void 0 && command.length > 32768) event = {
+			...event,
+			toolCall: {
+				...event.toolCall,
+				command: clipToolCommand(command)
+			}
+		};
+		const row = {
+			...event,
+			seq: rows.length + 1,
+			runId: worker.runId,
+			time: (/* @__PURE__ */ new Date()).toISOString()
+		};
+		appendFileSync(join(this.directory, `${worker.id}.events.jsonl`), JSON.stringify(row) + "\n", { mode: 384 });
+		rows.push(row);
+	}
+	rawPath(worker) {
+		return join(this.directory, `${worker.id}.${worker.runId}.raw.jsonl`);
+	}
+	/**
+	* Cross-process exclusion without a native flock: every Host atomically
+	* publishes a uniquely named claim, then looks for any other live claim.
+	* Two concurrent Hosts each write before they read, so at least one sees the
+	* other and withdraws. Stale claims are removed only by their unique name,
+	* so a live Host's claim is never deleted by a racing reclaimer.
+	*/
+	acquireLock() {
+		const body = JSON.stringify({
+			pid: process.pid,
+			token: this.token
+		});
+		const starts = /* @__PURE__ */ new Map();
+		const startedAt = (pid) => {
+			if (!starts.has(pid)) starts.set(pid, processStartedAt(pid));
+			return starts.get(pid);
+		};
+		for (let attempt = 0;; attempt++) {
+			const temp = join(this.directory, `.host.lock.${this.token}.tmp`);
+			try {
+				writeFileSync(temp, body, {
+					mode: 384,
+					flag: "wx"
+				});
+				renameSync(temp, this.candidate);
+			} finally {
+				rmSync(temp, { force: true });
+			}
+			const stale = [];
+			let conflict;
+			for (const name of readdirSync(this.directory)) {
+				const path = join(this.directory, name);
+				if (path === this.candidate || name !== "host.lock" && !LOCK_CLAIM.test(name)) continue;
+				const owner = readLockOwner(path);
+				if (owner === "missing") continue;
+				if (owner === "invalid") conflict = { invalid: name };
+				else if (lockOwnerAlive(owner.pid, path, startedAt)) conflict ??= "live";
+				else if (name !== "host.lock") stale.push(path);
+				if (conflict && conflict !== "live") break;
+			}
+			if (!conflict) {
+				for (const path of stale) rmSync(path, { force: true });
+				break;
+			}
+			rmSync(this.candidate, { force: true });
+			if (conflict !== "live") throw new Error(`Invalid store lock; inspect ${conflict.invalid} before recovery`);
+			if (attempt >= 2) throw new Error("CLI Worker store is already owned by another Harness host");
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20 + Math.floor(Math.random() * 80));
+		}
+		try {
+			try {
+				writeFileSync(this.lock, body, {
+					mode: 384,
+					flag: "wx"
+				});
+			} catch (error) {
+				if (error.code !== "EEXIST") throw error;
+				const owner = readLockOwner(this.lock);
+				if (owner === "invalid") throw new Error("Invalid store lock; inspect host.lock before recovery");
+				if (owner !== "missing" && lockOwnerAlive(owner.pid, this.lock, startedAt)) throw new Error("CLI Worker store is already owned by another Harness host");
+				rmSync(this.lock, { force: true });
+				writeFileSync(this.lock, body, {
+					mode: 384,
+					flag: "wx"
+				});
+			}
+		} catch (error) {
+			rmSync(this.candidate, { force: true });
+			throw error;
+		}
+	}
+	close() {
+		for (const path of [this.lock, this.candidate]) {
+			const owner = readLockOwner(path);
+			if (typeof owner === "object" && owner.token === this.token) rmSync(path, { force: true });
+		}
+	}
+};
+//#endregion
+//#region lib/types/host/dsh-subagents.js
+const hiddenSchema = z.record(z.string(), z.array(z.string()));
+const namesSchema = z.record(z.string(), z.record(z.string(), z.string().regex(DSH_AGENT_NAME)));
+function dshStatus(timing) {
+	if (timing?.active) return "running";
+	if (timing?.lastTurnCompleted === true) return "completed";
+	if (timing?.lastTurnCompleted === false) return "failed";
+	return "unknown";
+}
+/** Native children remain DSH-owned. Only the hidden directory is written here. */
+var DshSubagents = class {
+	directory;
+	services;
+	hidden;
+	names;
+	lifetime = new AbortController();
+	listeners = /* @__PURE__ */ new Set();
+	cleanups = /* @__PURE__ */ new Set();
+	stopped = /* @__PURE__ */ new Map();
+	warned = /* @__PURE__ */ new Set();
+	constructor(directory, services) {
+		this.directory = directory;
+		this.services = services;
+	}
+	warn(reason) {
+		if (this.warned.has(reason)) return;
+		this.warned.add(reason);
+		this.services.log(reason);
+	}
+	readHidden() {
+		if (!this.hidden) {
+			const file = join(this.directory, "dsh-hidden.json");
+			this.hidden = existsSync(file) ? hiddenSchema.parse(JSON.parse(readFileSync(file, "utf8"))) : Object.create(null);
+		}
+		return this.hidden;
+	}
+	readNames() {
+		if (!this.names) {
+			const file = join(this.directory, "dsh-names.json");
+			this.names = existsSync(file) ? namesSchema.parse(JSON.parse(readFileSync(file, "utf8"))) : Object.create(null);
+		}
+		return this.names;
+	}
+	persist(file, value) {
+		mkdirSync(this.directory, {
+			recursive: true,
+			mode: 448
+		});
+		chmodSync(this.directory, 448);
+		atomicJSON(join(this.directory, file), value);
+	}
+	/** Stable `dsh-N` per main conversation in creation order; hidden children keep theirs so names never move. */
+	nameChildren(parent, catalog) {
+		const current = this.readNames()[parent] ?? {};
+		const missing = catalog.filter((child) => !current[child.id] && !this.services.ownedSessions().has(child.id)).sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+		if (!missing.length) return current;
+		let next = Math.max(0, ...Object.values(current).map((name) => Number(name.slice(4))));
+		const named = { ...current };
+		for (const child of missing) named[child.id] = `dsh-${++next}`;
+		const all = {
+			...this.readNames(),
+			[parent]: named
+		};
+		this.persist("dsh-names.json", all);
+		this.names = all;
+		return named;
+	}
+	async catalog(parent, signal) {
+		if (!parent.trim()) throw new Error("DSH 主会话无效");
+		const service = this.services.subagents(), query = this.services.query();
+		if (!service || !query) throw new Error("DSH subagents/sessionQuery service unavailable");
+		const observation = await query.observeSession(SessionId(parent), { signal });
+		try {
+			if (!observation.projections) throw new Error("DSH public projections unavailable");
+			if (observation.header.origin === "subagent") throw new Error("DSH 目录只接受主会话");
+		} finally {
+			observation[Symbol.dispose]();
+		}
+		return service.listChildren(SessionId(parent), signal);
+	}
+	async projection(id, parent, signal) {
+		const query = this.services.query();
+		if (!query) throw new Error("DSH public projections unavailable");
+		const observation = await query.observeSession(SessionId(id), { signal });
+		try {
+			if (observation.header.origin !== "subagent" || observation.header.parentSession !== parent) throw new Error("DSH 子会话所属主对话不匹配");
+			if (!observation.projections) throw new Error("DSH public projections unavailable");
+			return {
+				...observation.projections.values,
+				cursor: observation.cursor
+			};
+		} finally {
+			observation[Symbol.dispose]();
+		}
+	}
+	async list(parent, caller) {
+		const signal = AbortSignal.any([caller, this.lifetime.signal]);
+		try {
+			signal.throwIfAborted();
+			const catalog = await this.catalog(parent, signal);
+			const owned = this.services.ownedSessions(), hidden = this.readHidden()[parent] ?? [], names = this.nameChildren(parent, catalog);
+			const rows = [];
+			for (const child of catalog) {
+				if (owned.has(child.id) || hidden.includes(child.id)) continue;
+				const row = {
+					id: child.id,
+					parentSessionId: parent,
+					name: child.label || child.id,
+					agentName: names[child.id],
+					createdAt: child.createdAt,
+					mode: child.mode,
+					status: "unknown"
+				};
+				if (child.mode !== "external") try {
+					const projection = await this.projection(child.id, parent, signal);
+					row.status = dshStatus(projection.subagentTiming);
+					row.model = (projection.modelSelection?.next ?? projection.modelSelection?.lastUsed)?.model;
+					row.stopped = this.stopped.get(child.id) === projection.cursor && row.status !== "running" || void 0;
+					if (!row.stopped) this.stopped.delete(child.id);
+				} catch {
+					signal.throwIfAborted();
+					this.warn("DSH child projection unavailable; status remains unknown");
+				}
+				rows.push(row);
+			}
+			signal.throwIfAborted();
+			return rows;
+		} catch (error) {
+			signal.throwIfAborted();
+			this.warn(error instanceof Error && /unavailable/.test(error.message) ? "DSH directory service/projection unavailable; returning an empty group" : "DSH directory read failed; returning an empty group");
+			return [];
+		}
+	}
+	async requireChild(parent, id, signal, writable = false) {
+		const child = (await this.catalog(parent, signal)).find((entry) => entry.id === id);
+		if (!child || this.services.ownedSessions().has(id) || this.readHidden()[parent]?.includes(id)) throw new Error("DSH 子 Agent 不在当前主会话列表中");
+		if (writable && child.mode !== "continuable") throw new Error("此 DSH 子 Agent 只读");
+		return child;
+	}
+	async prompt(request, caller) {
+		const signal = AbortSignal.any([caller, this.lifetime.signal]);
+		await this.requireChild(request.parentSessionId, request.childSessionId, signal, true);
+		signal.throwIfAborted();
+		return this.services.subagents().prompt(request, signal);
+	}
+	/** Exact `dsh-N` (case-insensitive) or child ID among this conversation's visible native children. */
+	async resolve(parent, ref, caller) {
+		const signal = AbortSignal.any([caller, this.lifetime.signal]);
+		const catalog = await this.catalog(parent, signal);
+		const names = this.nameChildren(parent, catalog);
+		const wanted = ref.name?.trim().toLowerCase();
+		const id = ref.id ?? Object.keys(names).find((key) => names[key] === wanted);
+		if (!id || !catalog.some((entry) => entry.id === id) || ref.id && wanted && names[ref.id] !== wanted) return void 0;
+		const child = await this.requireChild(parent, id, signal);
+		return {
+			id: child.id,
+			agentName: names[child.id],
+			mode: child.mode,
+			title: child.label || child.id
+		};
+	}
+	/** Main-agent follow-up by name. The reply arrives through DSH's own child→parent message. */
+	async followup(parent, ref, text, caller) {
+		const child = await this.resolve(parent, ref, caller);
+		if (!child) return void 0;
+		if (child.mode !== "continuable") throw new Error("此 DSH 子 Agent 只读");
+		const receipt = await this.prompt({
+			parentSessionId: SessionId(parent),
+			childSessionId: SessionId(child.id),
+			requestId: randomUUID(),
+			mode: "continuable",
+			delivery: "queue",
+			content: [{
+				type: "text",
+				text
+			}]
+		}, caller);
+		return {
+			kind: "dsh-subagent",
+			workerId: child.id,
+			agentName: child.agentName,
+			title: child.title,
+			receipt,
+			guidance: "已交给 DSH 原生子 Agent；回复会以 DSH 子 Agent 消息回到本对话，不需要轮询。"
+		};
+	}
+	async hide(parent, id, caller) {
+		const signal = AbortSignal.any([caller, this.lifetime.signal]);
+		await this.requireChild(parent, id, signal);
+		signal.throwIfAborted();
+		const current = this.readHidden();
+		const next = {
+			...current,
+			[parent]: [.../* @__PURE__ */ new Set([...current[parent] ?? [], id])]
+		};
+		this.persist("dsh-hidden.json", next);
+		this.hidden = next;
+		this.listeners.forEach((notify) => notify());
+	}
+	async stop(parent, id, caller) {
+		const timeout = new AbortController();
+		const deadline = setTimeout(() => timeout.abort(/* @__PURE__ */ new Error("DSH 停止尚未确认，请重试")), 3e4);
+		const signal = AbortSignal.any([
+			caller,
+			this.lifetime.signal,
+			timeout.signal
+		]);
+		try {
+			await this.requireChild(parent, id, signal, true);
+			signal.throwIfAborted();
+			if (!this.services.subagents().interruptByParent(SessionId(id), SessionId(parent), "continuable").accepted) throw new Error("DSH 中断请求未获确认");
+			while (true) {
+				signal.throwIfAborted();
+				const projection = await this.projection(id, parent, signal);
+				const state = dshStatus(projection.subagentTiming);
+				if (state === "completed" || state === "failed") {
+					signal.throwIfAborted();
+					this.stopped.set(id, projection.cursor);
+					this.listeners.forEach((notify) => notify());
+					return { stopped: true };
+				}
+				await new Promise((resolve, reject) => {
+					const finish = () => {
+						clearTimeout(timer);
+						signal.removeEventListener("abort", abort);
+						resolve();
+					};
+					const abort = () => {
+						clearTimeout(timer);
+						signal.removeEventListener("abort", abort);
+						reject(signal.reason);
+					};
+					const timer = setTimeout(finish, 100);
+					signal.addEventListener("abort", abort, { once: true });
+					if (signal.aborted) abort();
+				});
+			}
+		} finally {
+			clearTimeout(deadline);
+		}
+	}
+	/** The client owns this stream only while its panel/document is visible. */
+	async *watch(parent, caller) {
+		const signal = AbortSignal.any([caller, this.lifetime.signal]);
+		let dirty = true, wake;
+		let children = /* @__PURE__ */ new Set();
+		const notify = () => {
+			dirty = true;
+			wake?.();
+		};
+		const unsubscribe = this.services.subscribe?.((id) => {
+			if (id === parent || children.has(id)) notify();
+		});
+		const timer = unsubscribe ? void 0 : setInterval(notify, 2e3);
+		this.listeners.add(notify);
+		signal.addEventListener("abort", notify);
+		let released = false;
+		const release = () => {
+			if (released) return;
+			released = true;
+			unsubscribe?.();
+			clearInterval(timer);
+			this.listeners.delete(notify);
+			signal.removeEventListener("abort", notify);
+			this.cleanups.delete(release);
+		};
+		this.cleanups.add(release);
+		try {
+			while (!signal.aborted) {
+				if (!dirty) await new Promise((resolve) => {
+					wake = resolve;
+				});
+				wake = void 0;
+				if (signal.aborted) return;
+				dirty = false;
+				const rows = await this.list(parent, signal);
+				children = new Set(rows.map((row) => row.id));
+				yield JSON.stringify(rows);
+			}
+		} finally {
+			release();
+		}
+	}
+	dispose() {
+		this.lifetime.abort();
+		for (const release of this.cleanups) release();
+		this.listeners.clear();
+		this.stopped.clear();
+	}
+};
+//#endregion
+//#region lib/types/host/account-identity.js
+const LIMIT$3 = 64 * 1024;
+const record$18 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+const credentialPresent = (value) => typeof value === "string" && value.trim().length > 0;
+/** Only email is allowlisted. Reject controls/markup/credential-shaped strings outright. */
+function accountEmail(value) {
+	if (typeof value !== "string" || value.length > 254) return void 0;
+	if (/\p{C}|[<>]|\b(?:Bearer|sk-|sk_|ghp_|ya29\.)/iu.test(value)) return void 0;
+	const email = value.trim();
+	return /^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(email) ? email : void 0;
+}
+function idTokenClaims(value) {
+	if (typeof value !== "string" || value.length > 32 * 1024) return void 0;
+	const pieces = value.split(".");
+	if (pieces.length !== 3 || !pieces.every((piece) => /^[A-Za-z0-9_-]+$/.test(piece))) return void 0;
+	try {
+		const claims = JSON.parse(Buffer.from(pieces[1], "base64url").toString("utf8"));
+		return record$18(claims) ? claims : void 0;
+	} catch {
+		return;
+	}
+}
+/** Local expiry is negative evidence only; an unsigned claim never proves login. */
+function localTokenExpired(value, now = Date.now()) {
+	const expiry = idTokenClaims(value)?.exp;
+	return typeof expiry === "number" && Number.isFinite(expiry) && expiry * 1e3 <= now;
+}
+/** Shared by the Linux token file and the macOS keychain item: both hold the same native JSON. */
+function agyIdentityFromCredential(value) {
+	if (value.auth_method !== "consumer" || !record$18(value.token)) return {
+		state: "unknown",
+		verification: "local",
+		summary: "登录格式未知，请打开账号终端"
+	};
+	const refreshable = credentialPresent(value.token.refresh_token);
+	const expiry = typeof value.token.expiry === "string" ? Date.parse(value.token.expiry) : NaN;
+	const active = credentialPresent(value.token.access_token) && Number.isFinite(expiry) && expiry > Date.now();
+	if (!refreshable && !active) return {
+		state: "unauthenticated",
+		verification: "local",
+		summary: "本地登录已过期，请重新登录"
+	};
+	return {
+		state: "authenticated",
+		authMethod: "oauth",
+		verification: "local",
+		accountLabel: accountEmail(idTokenClaims(value.id_token)?.email) ?? accountEmail(value.id_token_email),
+		summary: "已登录 Antigravity"
+	};
+}
+/**
+* This format/path is verified from the installed AGY CLI. Reading is
+* bounded and ephemeral. No credential leaves this function; ID tokens are decoded
+* only for a display email, never treated as a remotely verified assertion.
+*/
+function localAccountIdentity(options = {}) {
+	return async (cli, signal) => {
+		if (cli !== "antigravity") return void 0;
+		const path = join(options.home ?? homedir(), ".gemini", "jetski-standalone-oauth-token");
+		let handle;
+		let buffer;
+		try {
+			signal.throwIfAborted();
+			await safePiOmpAncestors(dirname(path));
+			const entry = await lstat(path);
+			if (entry.isSymbolicLink() || !entry.isFile() || entry.nlink !== 1) throw new Error("Invalid account metadata");
+			handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+			const stat = await handle.stat();
+			if (!stat.isFile() || stat.nlink !== 1 || stat.dev !== entry.dev || stat.ino !== entry.ino || stat.size > LIMIT$3) throw new Error("Invalid account metadata");
+			buffer = Buffer.alloc(65537);
+			let offset = 0;
+			while (offset <= LIMIT$3) {
+				signal.throwIfAborted();
+				const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, null);
+				if (!bytesRead) break;
+				offset += bytesRead;
+			}
+			if (offset > LIMIT$3) throw new Error("Invalid account metadata");
+			const after = await handle.stat();
+			const current = await lstat(path);
+			if (current.isSymbolicLink() || current.dev !== stat.dev || current.ino !== stat.ino || current.nlink !== 1 || offset !== stat.size || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || current.size !== after.size || current.mtimeMs !== after.mtimeMs) throw new Error("Account metadata changed during read");
+			const value = JSON.parse(buffer.subarray(0, offset).toString("utf8"));
+			signal.throwIfAborted();
+			if (!record$18(value)) throw new Error("Invalid account metadata");
+			return agyIdentityFromCredential(value);
+		} catch (error) {
+			signal.throwIfAborted();
+			if (error?.code === "ENOENT") return {
+				state: "unconfigured",
+				verification: "local",
+				summary: "尚未登录 Antigravity"
+			};
+			return {
+				state: "unavailable",
+				verification: "local",
+				summary: "登录状态读取失败，请重试"
+			};
+		} finally {
+			buffer?.fill(0);
+			await handle?.close().catch(() => void 0);
+		}
+	};
+}
+//#endregion
 //#region lib/types/host/account-login.js
 const providerNames = {
 	openai: "OpenAI",
@@ -45,9 +2544,9 @@ const providerNames = {
 	"zai-coding-plan": "Z.AI",
 	zhipu: "智谱",
 	zhipuai: "智谱",
-	"zai-coding-cn": "zai.cn",
-	"zhipu-coding-plan": "zai.cn",
-	"zhipuai-coding-plan": "zai.cn",
+	"zai-coding-cn": "智谱 BigModel Coding（中国）",
+	"zhipu-coding-plan": "智谱 BigModel Coding（中国）",
+	"zhipuai-coding-plan": "智谱 BigModel Coding（中国）",
 	minimax: "MiniMax",
 	"minimax-cn": "MiniMax",
 	"minimax-coding-plan": "MiniMax",
@@ -95,7 +2594,7 @@ function endpointName(url) {
 		"api.moonshot.cn": "Moonshot"
 	};
 	if (url.protocol === "https:" && !url.port && !url.username && !url.password) {
-		if (url.hostname === "open.bigmodel.cn") return url.pathname.startsWith("/api/coding/") ? "zai.cn" : "智谱";
+		if (url.hostname === "open.bigmodel.cn") return url.pathname.startsWith("/api/coding/") ? "智谱 BigModel Coding（中国）" : "智谱";
 		if (Object.hasOwn(names, url.hostname)) return names[url.hostname];
 	}
 	return safeName(url.hostname);
@@ -121,7 +2620,8 @@ function authenticatedAccountLogins(input) {
 		const key = JSON.stringify([
 			login.providerLabel,
 			login.authMethod,
-			login.accountLabel
+			login.accountLabel,
+			login.id
 		]);
 		if (seen.has(key)) return false;
 		seen.add(key);
@@ -138,8 +2638,71 @@ function authenticatedAccountLogins(input) {
 	};
 }
 //#endregion
+//#region lib/types/shared/account-links.js
+/**
+* Sign-in pages each CLI's own login prints, the only addresses a login window
+* may open. `.example.com` also allows subdomains. Checked by Host and Client.
+*/
+const ACCOUNT_LOGIN_HOSTS = {
+	antigravity: ["accounts.google.com"],
+	codex: ["auth.openai.com"],
+	claude: ["claude.com", "claude.ai"],
+	qoder: ["qoder.com"],
+	qodercn: ["qoder.cn"],
+	grok: ["accounts.x.ai", "auth.x.ai"],
+	zcode: [".bigmodel.cn", ".z.ai"],
+	mimo: ["platform.xiaomimimo.com"],
+	pi: [
+		"claude.ai",
+		"auth.openai.com",
+		"github.com",
+		"www.kimi.com",
+		"openrouter.ai",
+		"accounts.x.ai"
+	],
+	omp: [
+		"claude.ai",
+		"auth.openai.com",
+		"www.kimi.com",
+		"github.com"
+	],
+	kimi: ["www.kimi.com", "www.kimi.ai"],
+	opencode: ["auth.openai.com"],
+	hermes: ["portal.nousresearch.com"]
+};
+/** An https address on one of `hosts`, without user info; trailing punctuation is not part of it. */
+function allowedLink(value, hosts) {
+	if (!value || !hosts?.length) return void 0;
+	try {
+		const url = new URL(value.replace(/[.,;:)\]]+$/, ""));
+		const host = url.hostname.toLowerCase();
+		const ok = hosts.some((item) => item.startsWith(".") ? host.endsWith(item) || host === item.slice(1) : host === item);
+		return url.protocol === "https:" && ok && !url.username && !url.password ? url.href : void 0;
+	} catch {
+		return;
+	}
+}
+/** Provider ids and credential entry ids are plain native names; never a key, URL or path. */
+const ACCOUNT_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+/** `cli:provider[:entry]`, the Host handle of one removable login (`AccountLogin.id`). */
+function accountLoginId(cli, provider, entry) {
+	if (!ACCOUNT_NAME.test(provider) || entry !== void 0 && !ACCOUNT_NAME.test(entry)) return void 0;
+	return entry === void 0 ? `${cli}:${provider}` : `${cli}:${provider}:${entry}`;
+}
+function parseAccountLoginId(id) {
+	const [cli, provider, entry, ...rest] = id.split(":");
+	if (!cli || !provider || rest.length || !ACCOUNT_NAME.test(provider) || entry !== void 0 && !ACCOUNT_NAME.test(entry)) return void 0;
+	return {
+		cli,
+		provider,
+		...entry === void 0 ? {} : { entry }
+	};
+}
+//#endregion
 //#region lib/types/host/own-account-lease.mjs
 const OWN_ACCOUNT_BUSY = "账号正被使用，请稍后刷新";
+/** Another run or catalog read holds this account exclusively. */
+const ownAccountBusy = (error) => error instanceof Error && error.message === "账号正被使用，请稍后刷新";
 const nonceValid = (value) => typeof value === "string" && /^[a-f0-9-]{36}$/.test(value);
 async function privateRoot(root) {
 	const info = await lstat(root);
@@ -494,8 +3057,8 @@ function inspectPiInstallation(entry) {
 }
 //#endregion
 //#region lib/types/host/pi-omp-refresh.mjs
-const object$21 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
-const stable$1 = (value) => JSON.stringify(object$21(value) ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, JSON.parse(stable$1(value[key]))])) : Array.isArray(value) ? value.map((entry) => JSON.parse(stable$1(entry))) : value ?? null);
+const object$20 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+const stable$1 = (value) => JSON.stringify(object$20(value) ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, JSON.parse(stable$1(value[key]))])) : Array.isArray(value) ? value.map((entry) => JSON.parse(stable$1(entry))) : value ?? null);
 const refreshFingerprint = (value) => createHash("sha256").update(stable$1(value)).digest("hex");
 const changed = () => /* @__PURE__ */ new Error("账号配置已变化，请重新刷新模型");
 const unsafe = () => /* @__PURE__ */ new Error("无法安全保存账号续期，请重新登录");
@@ -503,14 +3066,14 @@ function claims$2(value) {
 	try {
 		if (typeof value !== "string" || value.length > 65536) return {};
 		const parsed = JSON.parse(Buffer.from(value.split(".")[1] ?? "", "base64url").toString("utf8"));
-		return object$21(parsed) ? parsed : {};
+		return object$20(parsed) ? parsed : {};
 	} catch {
 		return {};
 	}
 }
 /** Identity comparison only, never a remote authentication assertion. */
 function refreshPrincipal(value) {
-	if (!object$21(value) || value.type !== "oauth") return void 0;
+	if (!object$20(value) || value.type !== "oauth") return void 0;
 	const identity = claims$2(value.id_token ?? value.idToken);
 	const token = claims$2(value.access ?? value.access_token);
 	const account = value.accountId ?? value.account_id ?? token["https://api.openai.com/auth"]?.chatgpt_account_id;
@@ -565,8 +3128,8 @@ async function writeRefreshJson(path, value) {
 	}
 }
 function validReceipt(value) {
-	if (!object$21(value) || value.version !== 1 || !["pi", "omp"].includes(value.cli) || !Array.isArray(value.entries)) throw unsafe();
-	for (const entry of value.entries) if (!object$21(entry) || typeof entry.provider !== "string" || typeof entry.path !== "string" || typeof entry.hash !== "string") throw unsafe();
+	if (!object$20(value) || value.version !== 1 || !["pi", "omp"].includes(value.cli) || !Array.isArray(value.entries)) throw unsafe();
+	for (const entry of value.entries) if (!object$20(entry) || typeof entry.provider !== "string" || typeof entry.path !== "string" || typeof entry.hash !== "string") throw unsafe();
 	return value;
 }
 async function sourceIdentity(entry) {
@@ -709,7 +3272,7 @@ async function finishPiOmpRefresh(root, nonce, executable, expectedReceipt) {
 }
 //#endregion
 //#region lib/types/host/pi-omp-native.js
-const object$20 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+const object$19 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 const defaultRoot = () => join(process.env.DSH_HOME ?? join(homedir(), ".dsh"), "cliworker-now");
 const runtimeEnv = /^(?:PATH|HOME|SHELL|TMPDIR|NODE_OPTIONS|NODE_PATH|ELECTRON_RUN_AS_NODE|OMP_AUTH_BROKER_.*|OMP_PROFILE|PI_PROFILE|PI_CONFIG_DIR|PI_CODING_AGENT_DIR|LD_.*|DYLD_.*)$/;
 const knownProviderEnvironment = {
@@ -727,7 +3290,7 @@ const knownProviderEnvironment = {
 };
 function configuredEnvironmentRefs(value, output = /* @__PURE__ */ new Set()) {
 	if (typeof value === "string" && /^[A-Z][A-Z0-9_]*$/.test(value)) output.add(value);
-	if (object$20(value) || Array.isArray(value)) for (const entry of Object.values(value)) configuredEnvironmentRefs(entry, output);
+	if (object$19(value) || Array.isArray(value)) for (const entry of Object.values(value)) configuredEnvironmentRefs(entry, output);
 	return output;
 }
 const piOmpAccountDirectory = (cli, root = defaultRoot()) => join(root, "accounts", cli, "agent");
@@ -783,15 +3346,15 @@ async function readOptional(path, limit = 2 * 1024 * 1024) {
 function parseObject(raw, yaml = false) {
 	if (!raw) return {};
 	const result = yaml ? parse$1(raw.toString("utf8"), { maxAliasCount: 0 }) : JSON.parse(raw.toString("utf8"));
-	if (!object$20(result)) throw new Error("Invalid native account config");
+	if (!object$19(result)) throw new Error("Invalid native account config");
 	return result;
 }
 function rejectCommands(value) {
 	if (typeof value === "string" && value.trimStart().startsWith("!")) throw new Error("Native credential command helpers are not enabled in plugin workers");
-	if (object$20(value) || Array.isArray(value)) for (const entry of Object.values(value)) rejectCommands(entry);
+	if (object$19(value) || Array.isArray(value)) for (const entry of Object.values(value)) rejectCommands(entry);
 }
 function credentialState(type, data, disabled) {
-	if (!object$20(data)) throw new Error("Invalid native credential data");
+	if (!object$19(data)) throw new Error("Invalid native credential data");
 	if (disabled) return "expired";
 	if (type === "api" || type === "api_key") {
 		const key = data.key ?? data.apiKey;
@@ -806,7 +3369,7 @@ function credentialState(type, data, disabled) {
 	}
 	throw new Error("Unsupported native credential type");
 }
-async function source$1(cli, path, scratch) {
+async function source(cli, path, scratch) {
 	const result = {
 		sourceId: resolve(path),
 		auth: {},
@@ -834,13 +3397,13 @@ async function source$1(cli, path, scratch) {
 		result.auth = parseObject(await readOptional(join(path, "auth.json")));
 		result.models = parseObject(await readOptional(join(path, "models.json")));
 		result.modelsStore = parseObject(await readOptional(join(path, "models-store.json"), 16 * 1024 * 1024));
-		if (Object.values(result.modelsStore).some((entry) => !object$20(entry) || !Array.isArray(entry.models))) throw new Error("Invalid Pi native model cache");
+		if (Object.values(result.modelsStore).some((entry) => !object$19(entry) || !Array.isArray(entry.models))) throw new Error("Invalid Pi native model cache");
 		const settings = parseObject(await readOptional(join(path, "settings.json")));
 		result.config = settings.defaultThinkingLevel === void 0 ? {} : { defaultThinkingLevel: settings.defaultThinkingLevel };
 		rejectCommands(result.auth);
 		rejectCommands(result.models);
 		for (const auth of Object.values(result.auth)) {
-			if (!object$20(auth) || typeof auth.type !== "string") throw new Error("Invalid Pi native credential");
+			if (!object$19(auth) || typeof auth.type !== "string") throw new Error("Invalid Pi native credential");
 			const state = credentialState(auth.type, auth);
 			if (state === "configured") result.kinds.add(auth.type);
 			if (state === "expired") result.expired = true;
@@ -850,13 +3413,13 @@ async function source$1(cli, path, scratch) {
 		const config = parseObject(await readOptional(join(path, "config.yml")), true);
 		result.brokerConfigured ||= !!config.auth?.broker;
 		result.config = {
-			...object$20(config.auth) ? { auth: Object.fromEntries(Object.entries(config.auth).filter(([key]) => key !== "broker")) } : {},
+			...object$19(config.auth) ? { auth: Object.fromEntries(Object.entries(config.auth).filter(([key]) => key !== "broker")) } : {},
 			...config.defaultThinkingLevel === void 0 ? {} : { defaultThinkingLevel: config.defaultThinkingLevel }
 		};
 		rejectCommands(result.models);
 		rejectCommands(result.config);
 		for (const provider of Object.values(result.models.providers ?? {})) {
-			if (!object$20(provider)) throw new Error("Invalid OMP native provider");
+			if (!object$19(provider)) throw new Error("Invalid OMP native provider");
 			if (typeof provider.apiKey === "string" && !/^[A-Z][A-Z0-9_]*$/.test(provider.apiKey) && provider.apiKey.trim()) result.kinds.add("api");
 		}
 		for (const name of ["agent.db", "models.db"]) {
@@ -903,7 +3466,7 @@ async function source$1(cli, path, scratch) {
 	const refs = configuredEnvironmentRefs([result.models, result.config]);
 	for (const key of Object.keys(result.env)) if (!/_(?:API_KEY|TOKEN|SECRET)$/.test(key) && !refs.has(key)) delete result.env[key];
 	const legacy = result.models.providers?.["cliworker-zai-cn"];
-	if (object$20(legacy) && legacy.apiKey === "ZAI_CODING_CN_API_KEY" && legacy.baseUrl === "https://open.bigmodel.cn/api/coding/paas/v4" && !result.env.ZAI_CODING_CN_API_KEY) delete result.models.providers["cliworker-zai-cn"];
+	if (object$19(legacy) && legacy.apiKey === "ZAI_CODING_CN_API_KEY" && legacy.baseUrl === "https://open.bigmodel.cn/api/coding/paas/v4" && !result.env.ZAI_CODING_CN_API_KEY) delete result.models.providers["cliworker-zai-cn"];
 	return result;
 }
 async function withSources(cli, options, fn) {
@@ -917,7 +3480,7 @@ async function withSources(cli, options, fn) {
 		const results = [];
 		for (const path of paths) {
 			options.signal?.throwIfAborted();
-			results.push(await source$1(cli, path, scratch));
+			results.push(await source(cli, path, scratch));
 		}
 		options.signal?.throwIfAborted();
 		return await fn(results, scratch);
@@ -937,7 +3500,7 @@ async function readPiOmpLogoutSources(cli, stateDirectory, signal, options = {})
 	}, async (sources) => {
 		const result = [];
 		for (const [index, source] of sources.entries()) {
-			if (!(Object.keys(source.auth).length || source.credentials.length || Object.values(source.models.providers ?? {}).some((provider) => object$20(provider) && provider.apiKey) || Object.values(knownProviderEnvironment).some((key) => usableNativeApiKey(source.env[key])))) continue;
+			if (!(Object.keys(source.auth).length || source.credentials.length || Object.values(source.models.providers ?? {}).some((provider) => object$19(provider) && provider.apiKey) || Object.values(knownProviderEnvironment).some((key) => usableNativeApiKey(source.env[key])))) continue;
 			const parentEnv = cli === "omp" ? await readOptional(join(dirname(source.sourceId), ".env"), 64 * 1024) : void 0;
 			const brokerConfigured = source.brokerConfigured || !!parentEnv?.toString("utf8").split(/\r?\n/).some((line) => {
 				const match = /^(?:export\s+)?OMP_AUTH_BROKER_(?:URL|TOKEN)\s*=\s*(.*)$/.exec(line.trim());
@@ -945,7 +3508,7 @@ async function readPiOmpLogoutSources(cli, stateDirectory, signal, options = {})
 			});
 			result.push({
 				id: index === 0 ? "native" : "plugin",
-				label: index === 0 ? "CLI 全局账号" : "插件账号",
+				label: index === 0 ? "原生目录" : "插件目录",
 				directory: source.sourceId,
 				env: source.env,
 				config: source.config ?? {},
@@ -962,6 +3525,29 @@ async function listPiOmpAccountSources(cli, stateDirectory, signal, options = {}
 		label
 	}));
 }
+/** The `disabled_cause` OMP's /logout writes when it soft-deletes a credential (OMP 16.4.4). */
+const OMP_SIGNED_OUT = "deleted by user";
+/**
+* A row the user signed out is gone; every other row, usable or disabled (e.g. a failed
+* refresh), still owns its provider and shadows earlier locations. Listing, snapshots and
+* the shared refresh store must all agree on this.
+*/
+const ownsProvider = (row) => row.disabled_cause !== OMP_SIGNED_OUT;
+/** Sign-out evidence must not confuse an invalid/blocked credential with a removed one. */
+async function piOmpStoredLoginExists(cli, login, stateDirectory, signal, options = {}) {
+	const target = parseAccountLoginId(login);
+	const match = target?.entry?.match(cli === "pi" ? /^(native|plugin)$/ : /^(native|plugin)\.([1-9]\d*)$/);
+	if (target?.cli !== cli || !match) throw new Error("不支持单独退出该账号");
+	return withSources(cli, {
+		accountRoot: stateDirectory,
+		signal,
+		...options
+	}, async (sources) => {
+		const selected = sources[match[1] === "native" ? 0 : 1];
+		if (!selected) throw new Error("账号来源已变化，请刷新后重试");
+		return cli === "pi" ? Object.hasOwn(selected.auth, target.provider) : selected.credentials.some((row) => row.provider === target.provider && String(row.native_rowid) === match[2] && ownsProvider(row));
+	});
+}
 function mergeSources(sources) {
 	const auth = Object.assign(Object.create(null), ...sources.map((s) => s.auth));
 	const providers = Object.assign(Object.create(null), ...sources.map((s) => s.models.providers ?? {}));
@@ -969,7 +3555,7 @@ function mergeSources(sources) {
 	const credentialProviders = /* @__PURE__ */ new Map();
 	const cache = /* @__PURE__ */ new Map();
 	for (const s of sources) {
-		for (const provider of new Set(s.credentials.map((row) => row.provider))) credentialProviders.set(provider, s.credentials.filter((row) => row.provider === provider));
+		for (const provider of new Set(s.credentials.filter(ownsProvider).map((row) => row.provider))) credentialProviders.set(provider, s.credentials.filter((row) => row.provider === provider));
 		for (const row of s.modelCache) cache.set(row.provider_id, row);
 	}
 	const kinds = /* @__PURE__ */ new Set();
@@ -1006,7 +3592,7 @@ async function readPiOmpAccountMaterial(cli, options = {}) {
 			env: merged.env,
 			models: { providers: merged.providers },
 			configAuth: Object.assign({}, ...sources.map((s) => s.config ?? {})),
-			sourceIds: sources.filter((s) => Object.keys(s.auth).length || s.credentials.length || Object.keys(s.env).length || Object.keys(s.config?.auth ?? {}).length || Object.values(s.models.providers ?? {}).some((p) => object$20(p) && p.apiKey)).map((s) => s.sourceId)
+			sourceIds: sources.filter((s) => Object.keys(s.auth).length || s.credentials.length || Object.keys(s.env).length || Object.keys(s.config?.auth ?? {}).length || Object.values(s.models.providers ?? {}).some((p) => object$19(p) && p.apiKey)).map((s) => s.sourceId)
 		};
 	});
 }
@@ -1014,7 +3600,7 @@ async function sharedOAuthStore(cli, sources, options) {
 	if (!options.sharedOAuth) return void 0;
 	const merged = mergeSources(sources);
 	const owners = /* @__PURE__ */ new Map();
-	for (const source of sources) for (const provider of cli === "pi" ? Object.keys(source.auth) : new Set(source.credentials.map((row) => row.provider))) owners.set(provider, source);
+	for (const source of sources) for (const provider of cli === "pi" ? Object.keys(source.auth) : new Set(source.credentials.filter(ownsProvider).map((row) => row.provider))) owners.set(provider, source);
 	const credentials = cli === "pi" ? Object.entries(merged.auth).map(([provider, data]) => ({
 		provider,
 		data,
@@ -1145,7 +3731,7 @@ async function snapshotPiOmpNative(cli, destination, options = {}) {
 				const credentialOwners = /* @__PURE__ */ new Map();
 				for (const source of sources) {
 					for (const provider of Object.keys(source.auth)) authOwners.set(provider, source);
-					for (const row of source.credentials) credentialOwners.set(row.provider, source);
+					for (const row of source.credentials) if (ownsProvider(row)) credentialOwners.set(row.provider, source);
 				}
 				sources = sources.map((source) => ({
 					...source,
@@ -1274,7 +3860,7 @@ async function snapshotPiOmpNative(cli, destination, options = {}) {
 			"无法确认 OAuth 续期账号，请使用该 CLI 自身 API 配置",
 			"账号配置已变化，请重新刷新模型"
 		].includes(error.message)) throw error;
-		throw new Error("无法安全读取 Pi/OMP 原生账号或模型配置，请在账号终端检查");
+		throw new Error("无法安全读取 Pi/OMP 原生账号或模型配置，请在账号终端检查", { cause: error });
 	}
 }
 async function inspectPiOmpNativeAccount(cli, stateDirectory, signal, options = {}) {
@@ -1288,23 +3874,43 @@ async function inspectPiOmpNativeAccount(cli, stateDirectory, signal, options = 
 			const { auth, providers, env, credentialProviders, expired } = mergeSources(sources);
 			const logins = [];
 			const ownValue = (value, referenceOnly = false) => typeof value === "string" && (referenceOnly ? /^[A-Z][A-Z0-9_]*$/.test(value) : Object.values(knownProviderEnvironment).includes(value)) ? env[value] : value;
-			const add = (provider, method) => {
+			const add = (provider, method, stored, email) => {
 				const config = providers[provider];
-				logins.push(providerLogin(provider, method, {
-					baseUrl: ownValue(config?.baseUrl, true),
-					name: config?.name
-				}));
+				const accountLabel = accountEmail(email);
+				const login = {
+					...providerLogin(provider, method, {
+						baseUrl: ownValue(config?.baseUrl, true),
+						name: config?.name
+					}),
+					...accountLabel ? { accountLabel } : {}
+				};
+				const id = stored && accountLoginId(cli, provider, stored.entry);
+				logins.push(stored ? {
+					...login,
+					...id ? { id } : {},
+					source: stored.source
+				} : login);
 			};
 			let invalidOAuth = false;
-			const inspect = (provider, type, value, disabled) => {
+			const inspect = (provider, type, value, disabled, stored) => {
 				if (credentialState(type, value, disabled) !== "configured") return;
 				if (type === "api" || type === "api_key") {
-					if (usableNativeApiKey(ownValue(value.key ?? value.apiKey))) add(provider, "api");
-				} else if (usableNativeApiKey(value.access) && (value.expires >= Date.now() || usableNativeApiKey(value.refresh))) add(provider, "oauth");
+					if (usableNativeApiKey(ownValue(value.key ?? value.apiKey))) add(provider, "api", stored);
+				} else if (usableNativeApiKey(value.access) && (value.expires >= Date.now() || usableNativeApiKey(value.refresh))) add(provider, "oauth", stored, value.email);
 				else invalidOAuth = true;
 			};
-			for (const [provider, value] of Object.entries(auth)) inspect(provider, value.type, value);
-			for (const [provider, rows] of credentialProviders) for (const row of rows) inspect(provider, row.credential_type, JSON.parse(row.data), row.disabled_cause);
+			const later = (index, has) => sources.slice(index + 1).some(has);
+			for (const [index, item] of sources.entries()) {
+				const source = index === 0 ? "native" : "plugin";
+				for (const [provider, value] of Object.entries(item.auth)) if (!later(index, (next) => Object.hasOwn(next.auth, provider))) inspect(provider, value.type, value, void 0, {
+					source,
+					entry: source
+				});
+				for (const row of item.credentials) if (!later(index, (next) => next.credentials.some((other) => other.provider === row.provider && ownsProvider(other)))) inspect(row.provider, row.credential_type, JSON.parse(row.data), row.disabled_cause, {
+					source,
+					entry: `${source}.${row.native_rowid}`
+				});
+			}
 			for (const [provider, value] of Object.entries(providers)) if (usableNativeApiKey(ownValue(value.apiKey, true))) add(provider, "api");
 			for (const [provider, variable] of Object.entries(knownProviderEnvironment)) if (usableNativeApiKey(env[variable])) add(provider, "api");
 			if (logins.length) return authenticatedAccountLogins(logins);
@@ -1333,305 +3939,83 @@ async function inspectPiOmpNativeAccount(cli, stateDirectory, signal, options = 
 	}
 }
 //#endregion
-//#region lib/types/host/account-identity.js
-const LIMIT$2 = 64 * 1024;
-const record$17 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
-const credentialPresent = (value) => typeof value === "string" && value.trim().length > 0;
-/** Only email is allowlisted. Reject controls/markup/credential-shaped strings outright. */
-function accountEmail(value) {
-	if (typeof value !== "string" || value.length > 254) return void 0;
-	if (/\p{C}|[<>]|\b(?:Bearer|sk-|sk_|ghp_|ya29\.)/iu.test(value)) return void 0;
-	const email = value.trim();
-	return /^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(email) ? email : void 0;
+//#region lib/types/host/host-fetch.mjs
+/** @type {((target: string) => Promise<string | undefined>) | undefined} */
+let proxyFor;
+const NULL_BODY = /* @__PURE__ */ new Set([
+	204,
+	205,
+	304
+]);
+/** Windows: the Host's own catalog/account reads follow the system proxy the CLIs are given. */
+function setHostProxy(lookup) {
+	proxyFor = lookup;
 }
-function idTokenClaims(value) {
-	if (typeof value !== "string" || value.length > 32 * 1024) return void 0;
-	const pieces = value.split(".");
-	if (pieces.length !== 3 || !pieces.every((piece) => /^[A-Za-z0-9_-]+$/.test(piece))) return void 0;
+/** Whether NO_PROXY-style entries (`host`, `.domain`) send a host direct. */
+function bypassesProxy(hostname, entries) {
+	const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+	return entries.some((entry) => entry.startsWith(".") ? host.endsWith(entry) || host === entry.slice(1) : host === entry || host.endsWith(`.${entry}`));
+}
+/**
+* Windows only: the proxy variables a CLI would use for `target`. The Pi/OMP
+* bridge is a child process without the Host's lookup; it receives the system
+* proxy as these variables. macOS keeps plain `fetch`.
+*/
+function environmentProxy(target, env = process.env, platform = process.platform) {
+	if (platform !== "win32") return void 0;
+	const value = env.HTTPS_PROXY?.trim();
+	if (!value) return void 0;
 	try {
-		const claims = JSON.parse(Buffer.from(pieces[1], "base64url").toString("utf8"));
-		return record$17(claims) ? claims : void 0;
+		if (!["http:", "https:"].includes(new URL(value).protocol)) return void 0;
 	} catch {
 		return;
 	}
+	const entries = (env.NO_PROXY ?? "").split(",").map((entry) => entry.trim().toLowerCase()).filter(Boolean).map((entry) => {
+		const bracketed = /^\[([^\]]+)\](?::\d+)?$/.exec(entry);
+		if (bracketed) return bracketed[1];
+		return (entry.split(":").length === 2 ? entry.replace(/:\d+$/, "") : entry).replace(/^\*\./, ".");
+	});
+	if (entries.includes("*")) return void 0;
+	return bypassesProxy(new URL(target).hostname, entries) ? void 0 : value;
 }
-/** Local expiry is negative evidence only; an unsigned claim never proves login. */
-function localTokenExpired(value, now = Date.now()) {
-	const expiry = idTokenClaims(value)?.exp;
-	return typeof expiry === "number" && Number.isFinite(expiry) && expiry * 1e3 <= now;
+/** `fetch`, except that an HTTPS request the system proxy applies to is tunnelled through it. */
+async function hostFetch(input, init = {}) {
+	const target = input instanceof URL ? input : new URL(String(input));
+	const proxy = target.protocol === "https:" ? await (proxyFor ?? environmentProxy)(target.href) : void 0;
+	return proxy ? proxiedFetch(target, init, proxy) : globalThis.fetch(input, init);
 }
-/**
-* This format/path is verified from the installed AGY CLI. Reading is
-* bounded and ephemeral. No credential leaves this function; ID tokens are decoded
-* only for a display email, never treated as a remotely verified assertion.
-*/
-function localAccountIdentity(options = {}) {
-	return async (cli, signal) => {
-		if (cli !== "antigravity") return void 0;
-		const path = join(options.home ?? homedir(), ".gemini", "jetski-standalone-oauth-token");
-		let handle;
-		let buffer;
-		try {
-			signal.throwIfAborted();
-			await safePiOmpAncestors(dirname(path));
-			const entry = await lstat(path);
-			if (entry.isSymbolicLink() || !entry.isFile() || entry.nlink !== 1) throw new Error("Invalid account metadata");
-			handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-			const stat = await handle.stat();
-			if (!stat.isFile() || stat.nlink !== 1 || stat.dev !== entry.dev || stat.ino !== entry.ino || stat.size > LIMIT$2) throw new Error("Invalid account metadata");
-			buffer = Buffer.alloc(65537);
-			let offset = 0;
-			while (offset <= LIMIT$2) {
-				signal.throwIfAborted();
-				const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, null);
-				if (!bytesRead) break;
-				offset += bytesRead;
+function proxiedFetch(target, init, proxy) {
+	if (init.body != null) return Promise.reject(/* @__PURE__ */ new TypeError("Proxied Host requests carry no body"));
+	init.signal?.throwIfAborted();
+	const requestHeaders = new Headers(init.headers);
+	if (!requestHeaders.has("user-agent")) requestHeaders.set("user-agent", "node");
+	return new Promise((resolve, reject) => {
+		const outgoing = request(target, {
+			method: init.method ?? "GET",
+			headers: Object.fromEntries(requestHeaders),
+			agent: new Agent({
+				proxyEnv: { HTTPS_PROXY: proxy },
+				keepAlive: false
+			}),
+			signal: init.signal
+		}, (incoming) => {
+			const status = incoming.statusCode ?? 0;
+			if (init.redirect === "error" && status >= 300 && status < 400) {
+				incoming.resume();
+				reject(/* @__PURE__ */ new TypeError("fetch failed: unexpected redirect"));
+				return;
 			}
-			if (offset > LIMIT$2) throw new Error("Invalid account metadata");
-			const after = await handle.stat();
-			const current = await lstat(path);
-			if (current.isSymbolicLink() || current.dev !== stat.dev || current.ino !== stat.ino || current.nlink !== 1 || offset !== stat.size || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || current.size !== after.size || current.mtimeMs !== after.mtimeMs) throw new Error("Account metadata changed during read");
-			const value = JSON.parse(buffer.subarray(0, offset).toString("utf8"));
-			signal.throwIfAborted();
-			if (!record$17(value)) throw new Error("Invalid account metadata");
-			if (value.auth_method !== "consumer" || !record$17(value.token)) return {
-				state: "unknown",
-				verification: "local",
-				summary: "登录格式未知，请打开账号终端"
-			};
-			const refreshable = credentialPresent(value.token.refresh_token);
-			const expiry = typeof value.token.expiry === "string" ? Date.parse(value.token.expiry) : NaN;
-			const active = credentialPresent(value.token.access_token) && Number.isFinite(expiry) && expiry > Date.now();
-			if (!refreshable && !active) return {
-				state: "unauthenticated",
-				verification: "local",
-				summary: "本地登录已过期，请重新登录"
-			};
-			return {
-				state: "authenticated",
-				authMethod: "oauth",
-				verification: "local",
-				accountLabel: accountEmail(idTokenClaims(value.id_token)?.email),
-				summary: "已登录 Antigravity"
-			};
-		} catch (error) {
-			signal.throwIfAborted();
-			if (error?.code === "ENOENT") return {
-				state: "unconfigured",
-				verification: "local",
-				summary: "尚未登录 Antigravity"
-			};
-			return {
-				state: "unavailable",
-				verification: "local",
-				summary: "登录状态读取失败，请重试"
-			};
-		} finally {
-			buffer?.fill(0);
-			await handle?.close().catch(() => void 0);
-		}
-	};
-}
-//#endregion
-//#region lib/types/shared/types.js
-const EFFORTS = [
-	"default",
-	"none",
-	"minimal",
-	"low",
-	"medium",
-	"high",
-	"xhigh",
-	"max",
-	"ultra"
-];
-const CLI_IDS = [
-	"antigravity",
-	"codex",
-	"claude",
-	"kimi",
-	"mimo",
-	"zcode",
-	"grok",
-	"omp",
-	"pi",
-	"hermes",
-	"opencode",
-	"qoder",
-	"qodercn"
-];
-const RETIRED_HARNESS_NOTICE = "外部 Harness CLI 入口已移除；历史记录仅供查看。请新建 Hermes Agent 任务。";
-const isRetiredCli = (cli) => cli === "harness";
-const CLI_LABELS = {
-	antigravity: "Antigravity",
-	codex: "Codex",
-	claude: "Claude Code",
-	kimi: "Kimi",
-	mimo: "MiMo",
-	zcode: "ZCode",
-	grok: "Grok Build",
-	omp: "OMP",
-	pi: "Pi",
-	hermes: "Hermes Agent",
-	harness: "Harness（已移除）",
-	opencode: "OpenCode",
-	qoder: "Qoder CLI",
-	qodercn: "Qoder CN CLI"
-};
-/** Short CLI stems used for automatic Worker names; protocol IDs remain unchanged. */
-const CLI_SHORT_NAMES = {
-	antigravity: "agy",
-	codex: "codex",
-	claude: "claude",
-	kimi: "kimi",
-	mimo: "mimo",
-	zcode: "zcode",
-	grok: "grok",
-	omp: "omp",
-	pi: "pi",
-	hermes: "hermes",
-	harness: "harness",
-	opencode: "opencode",
-	qoder: "qoder",
-	qodercn: "qodercn"
-};
-const cliOf = (preference) => preference.cli ?? "antigravity";
-const effortLabel = (effort) => effort === "default" ? "默认" : effort.charAt(0).toUpperCase() + effort.slice(1);
-const LEGACY_ACCOUNT_RECORD_NOTICE = "此历史任务缺少账号记录，请新建任务";
-/** Exact legacy stop messages are compatible; other interrupted outcomes stay diagnostic. */
-const isUserInterrupted = (worker) => worker.status === "interrupted" && (worker.interruptionReason === "user" && !worker.error || ["Error: 用户已停止任务", "用户已取消排队任务"].includes(worker.error ?? ""));
-/** Stable, non-mutating name for histories created before named workers. */
-const workerName = (worker) => worker.agentName || `智能体-${worker.id.slice(0, 6)}`;
-const active = (status) => status === "queued" || status === "running" || status === "stopping";
-/** Fold repeated step updates without duplicating streamed text or the final response. */
-function foldEvents(events, endedRun, cli) {
-	const rows = [];
-	const steps = /* @__PURE__ */ new Map();
-	const submissions = /* @__PURE__ */ new Map();
-	const submissionIds = new Set(events.filter((event) => event.kind === "submission").map((event) => event.queuedFollowupId));
-	const markEnded = (runId, status) => {
-		for (const row of rows) if ((row.kind === "tool" || row.kind === "reasoning") && row.id.startsWith(runId + ":") && [
-			"ACTIVE",
-			"RUNNING",
-			"PENDING",
-			"QUEUED",
-			"IN_PROGRESS"
-		].includes(row.state ?? "")) row.runStatus = status;
-	};
-	for (const event of events) {
-		if (event.kind === "submission" && event.queuedFollowupId) {
-			const row = submissions.get(event.queuedFollowupId) ?? {
-				id: `submission:${event.queuedFollowupId}`,
-				kind: "user",
-				text: event.text,
-				time: event.time,
-				queuedFollowupId: event.queuedFollowupId
-			};
-			if (!submissions.has(event.queuedFollowupId)) rows.push(row);
-			Object.assign(row, {
-				deliveryState: event.deliveryState,
-				deliveryError: event.deliveryError,
-				admittedRunId: event.admittedRunId,
-				submissionClientId: event.submissionClientId,
-				submissionSequence: event.submissionSequence
-			});
-			submissions.set(event.queuedFollowupId, row);
-			continue;
-		}
-		if (event.kind === "user" && event.queuedFollowupId && submissionIds.has(event.queuedFollowupId)) continue;
-		if (event.kind === "status") {
-			const terminal = event.state ?? event.text;
-			if (terminal === "completed" || terminal === "failed" || terminal === "interrupted" || terminal === "uncertain") markEnded(event.runId, terminal);
-		}
-		if (event.kind === "result") {
-			if (cli === "antigravity" && event.state && event.state !== "SUCCESS") {
-				rows.push({
-					id: `${event.runId}:event:${event.seq}`,
-					kind: "diagnostic",
-					text: "CLI 最终汇总",
-					time: event.time,
-					state: event.state,
-					detail: event.detail ?? event.text
-				});
-				continue;
-			}
-			const lastAssistant = rows.findLast((row) => row.kind === "assistant" && row.id.startsWith(event.runId + ":"));
-			if (lastAssistant) {
-				if (lastAssistant.response) continue;
-				const earlier = rows.filter((row) => row !== lastAssistant && row.kind === "assistant" && row.id.startsWith(event.runId + ":"));
-				let finalText = event.text;
-				if (earlier.length && event.resultScope === "run") {
-					const prefix = earlier.map((row) => row.text).join("");
-					finalText = event.text.startsWith(prefix) ? event.text.slice(prefix.length) : void 0;
-				} else if (earlier.length && !event.resultScope && cli === "antigravity") {
-					let remaining = event.text.trimStart();
-					for (const row of earlier) {
-						const prefix = row.text.trim();
-						if (!prefix) continue;
-						if (!remaining.startsWith(prefix)) {
-							remaining = "";
-							break;
-						}
-						remaining = remaining.slice(prefix.length).trimStart();
-					}
-					finalText = remaining || void 0;
-				} else if (earlier.length && !event.resultScope && !event.text.startsWith(lastAssistant.text)) finalText = void 0;
-				if (event.text && finalText !== void 0 && finalText.startsWith(lastAssistant.text)) lastAssistant.text = finalText;
-				continue;
-			}
-		}
-		const key = event.response ? `${event.runId}:response:${JSON.stringify([event.response.id, event.response.blockId])}` : event.step === void 0 ? `${event.runId}:event:${event.seq}` : `${event.runId}:${event.kind}:${event.step}`;
-		const existing = steps.get(key);
-		if (existing) {
-			if (event.response && (existing.kind !== event.kind || existing.response?.index !== event.response.index)) throw new Error("CLI response block identity changed");
-			if (event.response?.usage && existing.response?.usage && JSON.stringify(event.response.usage) !== JSON.stringify(existing.response.usage)) throw new Error("CLI response usage changed");
-			if (event.kind === "assistant") existing.text += event.text;
-			else if (event.text) existing.text = event.text;
-			if (event.state) existing.state = event.state;
-			if (event.response) existing.response = {
-				...existing.response,
-				...event.response
-			};
-			if (event.toolCall) existing.toolCall = {
-				...existing.toolCall,
-				...Object.fromEntries(Object.entries(event.toolCall).filter(([, value]) => value !== void 0))
-			};
-			if (event.detail || event.kind === "reasoning" && event.detail !== void 0) existing.detail = event.detail;
-		} else {
-			const row = {
-				id: key,
-				kind: event.kind === "result" ? "assistant" : event.kind,
-				text: event.text,
-				time: event.time,
-				state: event.state,
-				detail: event.detail,
-				toolCall: event.toolCall,
-				response: event.response,
-				queuedFollowupId: event.queuedFollowupId,
-				admittedRunId: event.admittedRunId
-			};
-			steps.set(key, row);
-			rows.push(row);
-		}
-	}
-	const timing = /* @__PURE__ */ new Map();
-	for (const event of events) {
-		const run = timing.get(event.runId) ?? {};
-		if ((event.kind === "user" || event.kind === "status" && (event.state ?? event.text) === "queued") && !run.runStartedAt) run.runStartedAt = event.time;
-		if (event.kind === "status" && [
-			"completed",
-			"failed",
-			"interrupted",
-			"uncertain"
-		].includes(event.state ?? event.text)) {
-			run.runEndedAt = event.time;
-			run.runOutcome = event.state ?? event.text;
-		}
-		timing.set(event.runId, run);
-	}
-	for (const row of rows) Object.assign(row, timing.get(row.admittedRunId ?? row.id.split(":")[0]));
-	if (endedRun) markEnded(endedRun.runId, endedRun.status);
-	return rows;
+			const headers = new Headers();
+			for (const [name, value] of Object.entries(incoming.headers)) for (const item of [value ?? []].flat()) headers.append(name, item);
+			resolve(new Response(NULL_BODY.has(status) ? null : Readable.toWeb(incoming), {
+				status,
+				statusText: incoming.statusMessage ?? "",
+				headers
+			}));
+		});
+		outgoing.once("error", reject);
+		outgoing.end();
+	});
 }
 //#endregion
 //#region lib/types/host/account-models.mjs
@@ -1647,13 +4031,13 @@ const denied = (denialReason) => ({
 	...denialReason ? { denialReason } : {}
 });
 const validId$1 = (id) => typeof id === "string" && !!id && id.length <= 1024 && !/[\s\x00-\x1f]/.test(id);
-const object$19 = (value) => value && typeof value === "object" && !Array.isArray(value);
+const object$18 = (value) => value && typeof value === "object" && !Array.isArray(value);
 const unavailable$6 = (model) => model.supported_in_api === false || model.allowed === false || model.available === false || model.entitled === false || model.enabled === false || model.disabled === true || model.upgrade_required === true || model.visibility === "hidden" || model.visibility === "hide" || model.visibility === "none";
 const numericRate = (value) => typeof value === "number" ? value : typeof value === "string" && value.trim() && /^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(value.trim()) ? Number(value) : NaN;
 const costFor = (model, oauth) => {
 	if (oauth) return "unknown";
 	const rates = model.pricing;
-	if (object$19(rates)) {
+	if (object$18(rates)) {
 		const input = numericRate(Object.hasOwn(rates, "input") ? rates.input : rates.prompt), output = numericRate(Object.hasOwn(rates, "output") ? rates.output : rates.completion);
 		if (Number.isFinite(input) && Number.isFinite(output) && input >= 0 && output >= 0) {
 			const additional = Object.entries(rates).filter(([key]) => ![
@@ -1673,7 +4057,7 @@ const costFor = (model, oauth) => {
 };
 function entries(payload) {
 	if (Array.isArray(payload)) return payload;
-	if (!object$19(payload)) return void 0;
+	if (!object$18(payload)) return void 0;
 	return Array.isArray(payload.models) ? payload.models : Array.isArray(payload.data) ? payload.data : void 0;
 }
 function normalize(payload, oauth, token) {
@@ -1681,11 +4065,11 @@ function normalize(payload, oauth, token) {
 	if (!list) return void 0;
 	const result = /* @__PURE__ */ new Map();
 	for (const model of list) {
-		if (!object$19(model) || unavailable$6(model)) continue;
+		if (!object$18(model) || unavailable$6(model)) continue;
 		const id = model.slug ?? model.id;
 		if (!validId$1(id) || id === token || token.length >= 12 && id.includes(token) || oauth && model.supported_in_api !== true) continue;
 		const name = model.display_name ?? model.name;
-		const reasoningEfforts = oauth && Array.isArray(model.supported_reasoning_levels) ? [...new Set(model.supported_reasoning_levels.flatMap((level) => object$19(level) && typeof level.effort === "string" && /^[a-z]+$/.test(level.effort) ? [level.effort] : []))] : [];
+		const reasoningEfforts = oauth && Array.isArray(model.supported_reasoning_levels) ? [...new Set(model.supported_reasoning_levels.flatMap((level) => object$18(level) && typeof level.effort === "string" && /^[a-z]+$/.test(level.effort) ? [level.effort] : []))] : [];
 		result.set(id, {
 			id,
 			...typeof name === "string" && name.trim() && name.length <= 4096 && name !== token && !(token.length >= 12 && name.includes(token)) ? { name } : {},
@@ -1767,7 +4151,7 @@ async function probeAccountModels(input, options = {}) {
 			headers.originator = input.codexClientVersion ? "cli_worker_models" : "pi";
 			headers.version = codexVersion;
 		}
-		const fetcher = options.fetch ?? globalThis.fetch;
+		const fetcher = options.fetch ?? hostFetch;
 		const request = async (path) => {
 			const target = `${base}${path}${codex && path !== "/wham/usage" ? `?client_version=${encodeURIComponent(codexVersion)}` : ""}`;
 			const response = await fetcher(target, {
@@ -1870,9 +4254,18 @@ async function probeAccountModels(input, options = {}) {
 }
 //#endregion
 //#region lib/types/host/opencode-native.js
-const object$18 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+const object$17 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
 const text$13 = (value) => typeof value === "string" && !!value.trim();
 const OPENCODE_OAUTH_UNSUPPORTED = "OpenCode OAuth 暂无法安全续期，请使用该 CLI 自身 API 配置";
+/** OpenCode 1.19 uses XDG paths on Windows too, not LOCALAPPDATA. */
+function openCodeNativePaths(options = {}) {
+	const home = options.nativeHome ?? homedir();
+	return {
+		data: !options.nativeHome && process.env.XDG_DATA_HOME || join(home, ".local/share"),
+		config: !options.nativeHome && process.env.XDG_CONFIG_HOME || join(home, ".config"),
+		models: options.modelsPath || !options.nativeHome && process.env.OPENCODE_MODELS_PATH || join(!options.nativeHome && process.env.XDG_CACHE_HOME || join(home, ".cache"), "opencode/models.json")
+	};
+}
 /** JSONC comments/trailing commas, without changing quoted model IDs or URLs. */
 function jsonc(raw) {
 	let result = "", quoted = false, escaped = false;
@@ -1965,7 +4358,7 @@ async function ownEnvironment(roots, options, sourceIds) {
 async function resolveReferences(value, options, scope, depth = 0) {
 	if (depth > 48) throw new Error("OpenCode 原生配置过深");
 	if (Array.isArray(value)) return Promise.all(value.map((entry) => resolveReferences(entry, options, scope, depth + 1)));
-	if (object$18(value)) return Object.fromEntries(await Promise.all(Object.entries(value).map(async ([key, entry]) => [key, await resolveReferences(entry, options, scope, depth + 1)])));
+	if (object$17(value)) return Object.fromEntries(await Promise.all(Object.entries(value).map(async ([key, entry]) => [key, await resolveReferences(entry, options, scope, depth + 1)])));
 	if (typeof value !== "string") return value;
 	let result = value.replace(/\{env:([^}]+)\}/g, (_, name) => scope.env[name] ?? "");
 	for (const match of [...result.matchAll(/\{file:([^}]+)\}/g)]) {
@@ -1997,7 +4390,7 @@ async function resolveReferences(value, options, scope, depth = 0) {
 	return result;
 }
 function merge(base, next) {
-	return Object.fromEntries([.../* @__PURE__ */ new Set([...Object.keys(base), ...Object.keys(next)])].map((key) => [key, object$18(base[key]) && object$18(next[key]) ? merge(base[key], next[key]) : next[key] === void 0 ? base[key] : next[key]]));
+	return Object.fromEntries([.../* @__PURE__ */ new Set([...Object.keys(base), ...Object.keys(next)])].map((key) => [key, object$17(base[key]) && object$17(next[key]) ? merge(base[key], next[key]) : next[key] === void 0 ? base[key] : next[key]]));
 }
 async function readDocument(path, optional, options, comments = false, limit = 4 * 1024 * 1024) {
 	let file;
@@ -2025,7 +4418,7 @@ async function readDocument(path, optional, options, comments = false, limit = 4
 		if (!afterPath.isFile() || afterPath.isSymbolicLink() || afterPath.nlink !== 1 || after.nlink !== 1 || afterPath.dev !== before.dev || afterPath.ino !== before.ino) throw new Error("Native account path changed during read");
 		if (length >= bytes.length || before.size !== after.size || before.mtimeMs !== after.mtimeMs) throw new Error("Native account changed during read");
 		const value = comments ? jsonc(bytes.subarray(0, length).toString("utf8")) : JSON.parse(bytes.subarray(0, length).toString("utf8"));
-		if (!object$18(value)) throw new Error("Invalid native account data");
+		if (!object$17(value)) throw new Error("Invalid native account data");
 		return value;
 	} catch (error) {
 		options.signal?.throwIfAborted();
@@ -2036,18 +4429,16 @@ async function readDocument(path, optional, options, comments = false, limit = 4
 		await file?.close();
 	}
 }
-const activeOpenCodeCredential = (value) => object$18(value) && (value.type === "api" ? text$13(value.key) : value.type === "oauth" && text$13(value.access) && typeof value.expires === "number" && value.expires > Date.now() + 3e4);
+const activeOpenCodeCredential = (value) => object$17(value) && (value.type === "api" ? text$13(value.key) : value.type === "oauth" && text$13(value.access) && typeof value.expires === "number" && value.expires > Date.now() + 3e4);
 /** A native account terminal may load remote well-known config before provider filters. */
 async function assertOpenCodeManagedAuth(authDirectory, signal) {
 	await safePiOmpAncestors(join(authDirectory, "opencode"));
 	const auth = await readDocument(join(authDirectory, "opencode/auth.json"), true, { signal }) ?? {};
-	if (Object.values(auth).some((entry) => !object$18(entry) || !["api", "oauth"].includes(entry.type))) throw new Error("OpenCode 原生账号包含不支持的远程认证配置");
+	if (Object.values(auth).some((entry) => !object$17(entry) || !["api", "oauth"].includes(entry.type))) throw new Error("OpenCode 原生账号包含不支持的远程认证配置");
 }
 /** The same native+plugin sources supply metadata queries and worker execution. */
 async function readOpenCodeProfile(authDirectory, options = {}) {
-	const home = options.nativeHome ?? homedir();
-	const data = options.nativeHome ? join(home, ".local/share") : process.env.XDG_DATA_HOME || join(home, ".local/share");
-	const config = options.nativeHome ? join(home, ".config") : process.env.XDG_CONFIG_HOME || join(home, ".config");
+	const { data, config, models: cache } = openCodeNativePaths(options);
 	const ownRoots = [
 		join(config, "opencode"),
 		join(data, "opencode"),
@@ -2075,13 +4466,18 @@ async function readOpenCodeProfile(authDirectory, options = {}) {
 		roots: ownRoots,
 		env: ownEnv
 	});
-	if (!object$18(providers)) throw new Error("OpenCode 原生提供商配置无效");
+	if (!object$17(providers)) throw new Error("OpenCode 原生提供商配置无效");
 	const auth = {
 		...globalAuth,
 		...localAuth
 	};
+	const removableAuth = Object.create(null);
+	for (const id of Object.keys(auth)) {
+		const sources = /* @__PURE__ */ new Set([...Object.hasOwn(globalAuth, id) ? [resolve(data)] : [], ...Object.hasOwn(localAuth, id) ? [resolve(authDirectory)] : []]);
+		if (sources.size === 1) removableAuth[id] = [...sources][0];
+	}
 	for (const [id, provider] of Object.entries(providers)) {
-		if (!object$18(provider)) throw new Error("OpenCode 原生提供商配置无效");
+		if (!object$17(provider)) throw new Error("OpenCode 原生提供商配置无效");
 		const key = provider.options?.apiKey;
 		if (typeof key === "string" && key.trim()) {
 			if (key.trimStart().startsWith("!")) throw new Error("OpenCode 不执行凭据命令");
@@ -2089,17 +4485,18 @@ async function readOpenCodeProfile(authDirectory, options = {}) {
 				type: "api",
 				key
 			};
+			delete removableAuth[id];
 		}
 	}
 	const disabled = settings.disabled_providers ?? [], enabled = settings.enabled_providers;
 	if (!Array.isArray(disabled) || !disabled.every(text$13) || enabled !== void 0 && (!Array.isArray(enabled) || !enabled.every(text$13))) throw new Error("OpenCode 原生提供商开关配置无效");
-	const cache = options.modelsPath ?? (options.nativeHome ? join(home, ".cache/opencode/models.json") : process.env.OPENCODE_MODELS_PATH || join(home, ".cache/opencode/models.json"));
 	return {
 		sourceIds: [...sourceIds].sort(),
 		auth,
 		providers,
 		disabled,
 		enabled,
+		removableAuth,
 		modelsPath: cache,
 		catalog: await readDocument(cache, true, options, false, 8 * 1024 * 1024) ?? {}
 	};
@@ -2152,17 +4549,21 @@ async function inspectOpenCodeProfile(authDirectory, options = {}) {
 		const logins = [];
 		let expired = false;
 		for (const [id, auth] of Object.entries(profile.auth)) {
-			if (!object$18(auth)) continue;
+			if (!object$17(auth)) continue;
 			const api = auth.type === "api" && usableNativeApiKey(auth.key);
 			const oauthShape = auth.type === "oauth" && usableNativeApiKey(auth.access) && typeof auth.expires === "number" && Number.isFinite(auth.expires) && (auth.refresh === void 0 || typeof auth.refresh === "string");
 			const oauth = oauthShape && (auth.expires > Date.now() || usableNativeApiKey(auth.refresh));
 			if (oauthShape && !oauth) expired = true;
 			if (api || oauth) {
 				const config = profile.providers[id];
-				logins.push(providerLogin(id, api ? "api" : "oauth", {
-					baseUrl: config?.options?.baseURL,
-					name: config?.name
-				}));
+				const handle = accountLoginId("opencode", id);
+				logins.push({
+					...providerLogin(id, api ? "api" : "oauth", {
+						baseUrl: config?.options?.baseURL,
+						name: config?.name
+					}),
+					...handle ? { id: handle } : {}
+				});
 			}
 		}
 		if (logins.length) return authenticatedAccountLogins(logins);
@@ -2171,7 +4572,7 @@ async function inspectOpenCodeProfile(authDirectory, options = {}) {
 			verification: "local",
 			summary: "登录已过期，请重新登录"
 		};
-		if (Object.values(profile.auth).some((auth) => object$18(auth) && auth.type === "api") || !Object.keys(profile.auth).length && Object.keys(profile.providers).length) return {
+		if (Object.values(profile.auth).some((auth) => object$17(auth) && auth.type === "api") || !Object.keys(profile.auth).length && Object.keys(profile.providers).length) return {
 			state: "configured",
 			verification: "local",
 			summary: "尚未配置有效凭据"
@@ -2196,7 +4597,7 @@ async function inspectOpenCodeProfile(authDirectory, options = {}) {
 }
 //#endregion
 //#region lib/types/host/mimo-metadata-cache.js
-const digest = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const digest$1 = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 /** No raw environment, configuration or account material is retained in the cache key. */
 async function nativeMetadataKey(executable, project, snapshot, signal) {
 	signal.throwIfAborted();
@@ -2218,7 +4619,7 @@ async function nativeMetadataKey(executable, project, snapshot, signal) {
 		}
 		const physicalProject = await realpath(project);
 		signal.throwIfAborted();
-		return digest({
+		return digest$1({
 			launch,
 			project,
 			physicalProject,
@@ -2243,7 +4644,7 @@ function currentCredential(source, own) {
 			type: "api",
 			key: value.key
 		};
-		if (digest(credential) === source.credentialHash) return credential;
+		if (digest$1(credential) === source.credentialHash) return credential;
 	}
 }
 /** Only native capabilities are reused. Remote entitlement discovery must still run on every call. */
@@ -2278,6 +4679,9 @@ var MimoMetadataCache = class {
 		}
 		return sources;
 	}
+	clear() {
+		this.entries.clear();
+	}
 	set(key, sources, own) {
 		if (!key || !sources.length) return;
 		const metadata = [];
@@ -2293,7 +4697,7 @@ var MimoMetadataCache = class {
 			if (credential.key && JSON.stringify(capabilities).includes(credential.key)) return;
 			const entry = {
 				...structuredClone(capabilities),
-				credentialHash: digest(credential)
+				credentialHash: digest$1(credential)
 			};
 			if (!currentCredential(entry, own)) return;
 			metadata.push(entry);
@@ -2376,7 +4780,7 @@ var NativeCapabilityCache = class {
 };
 //#endregion
 //#region lib/types/host/kimi-accounts.js
-const object$17 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+const object$16 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
 const text$12 = (value) => typeof value === "string" && !!value.trim();
 const literal$5 = (value) => text$12(value) && !/^(?:!|\$|\{|<|your[_ -]|placeholder|changeme)/i.test(value) && !/[\x00-\x20]/.test(value);
 const unavailable$5 = () => ({
@@ -2384,6 +4788,8 @@ const unavailable$5 = () => ({
 	verification: "local",
 	summary: "Kimi 登录状态读取失败，请检查配置"
 });
+/** The account window's id provider for the managed Kimi Code OAuth login (`kimi:kimi-code`). */
+const KIMI_CODE_LOGIN = "kimi-code";
 const KIMI_MANAGE_LOGIN = "已登录 Kimi。若出现 Trust 提示，请自行确认此空账号目录；切换账号输入 /logout，再输入 /login。";
 /** Native Kimi has no --no-mcp switch and asks Trust even for an empty folder.
 * Its findGitWorkTree stops at the first .git directory. An empty owned marker
@@ -2457,7 +4863,7 @@ function kimiAccountLabel(accessToken) {
 		bytes = Buffer.from(parts[1], "base64url");
 		if (bytes.toString("base64url") !== parts[1]) return void 0;
 		const claims = JSON.parse(bytes.toString("utf8"));
-		if (!object$17(claims) || claims.iss !== "kimi-auth") return void 0;
+		if (!object$16(claims) || claims.iss !== "kimi-auth") return void 0;
 		const safeId = (value) => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{6,127}$/.test(value) && !/^(?:sk[-_]|pk[-_]|api[-_]?key|access[-_]?token|refresh[-_]?token|secret|bearer|token|eyJ|placeholder|changeme|your[-_])/i.test(value);
 		if (claims.sub !== void 0 && !safeId(claims.sub) || claims.user_id !== void 0 && !safeId(claims.user_id) || claims.sub !== void 0 && claims.user_id !== void 0 && claims.sub !== claims.user_id) return void 0;
 		const id = claims.sub ?? claims.user_id;
@@ -2495,7 +4901,7 @@ async function readKimiOwnToken(directory, slot, signal) {
 		if (current.isSymbolicLink() || current.dev !== before.dev || current.ino !== before.ino || current.nlink !== 1 || offset !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs || current.size !== after.size || current.mtimeMs !== after.mtimeMs) throw new Error("Kimi token changed during read");
 		signal.throwIfAborted();
 		const parsed = JSON.parse(bytes.subarray(0, offset).toString("utf8"));
-		if (!object$17(parsed)) throw new Error("Invalid Kimi token file");
+		if (!object$16(parsed)) throw new Error("Invalid Kimi token file");
 		return parsed;
 	} catch (error) {
 		if (error.code === "ENOENT") return void 0;
@@ -2510,21 +4916,29 @@ async function readKimiAccount(raw, signal, options = {}) {
 	try {
 		signal.throwIfAborted();
 		const config = JSON.parse(raw);
-		if (!object$17(config) || !object$17(config.providers)) return unavailable$5();
-		const api = Object.values(config.providers).filter(object$17).some((provider) => !provider.oauth && (literal$5(provider.apiKey) || literal$5(provider.env?.KIMI_API_KEY)));
+		if (!object$16(config) || !object$16(config.providers)) return unavailable$5();
+		const apiLogins = Object.entries(config.providers).filter(([, provider]) => object$16(provider) && !provider.oauth && (literal$5(provider.apiKey) || literal$5(provider.env?.KIMI_API_KEY))).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, provider]) => {
+			const id = key === "kimi-code" ? void 0 : accountLoginId("kimi", key);
+			return {
+				...providerLogin(key, "api", { baseUrl: provider.baseUrl }),
+				...id ? { id } : {}
+			};
+		});
+		const api = apiLogins.length > 0;
 		const configured = api ? {
 			state: "configured",
 			verification: "local",
 			authMethod: "api",
-			summary: "已配置 Kimi API"
+			summary: "已配置 Kimi API",
+			logins: apiLogins
 		} : {
 			state: "unconfigured",
 			verification: "local",
 			summary: "尚未登录 Kimi"
 		};
 		const provider = config.providers["managed:kimi-code"];
-		if (!object$17(provider) || provider.oauth === void 0) return configured;
-		if (provider.type !== "kimi" || !object$17(provider.oauth) || provider.oauth.storage !== "file") return {
+		if (!object$16(provider) || provider.oauth === void 0) return configured;
+		if (provider.type !== "kimi" || !object$16(provider.oauth) || provider.oauth.storage !== "file") return {
 			state: "unknown",
 			verification: "local",
 			summary: "Kimi 登录配置暂不支持，请打开账号终端"
@@ -2545,12 +4959,19 @@ async function readKimiAccount(raw, signal, options = {}) {
 			summary: "Kimi 登录已过期，请重新登录"
 		};
 		const accountLabel = kimiAccountLabel(token.access_token);
+		const oauthLogin = {
+			providerLabel: "Kimi Code",
+			authMethod: "oauth",
+			...accountLabel ? { accountLabel } : {},
+			id: `kimi:${KIMI_CODE_LOGIN}`
+		};
 		return {
 			state: "authenticated",
 			authMethod: "oauth",
 			verification: "local",
 			summary: "已登录 Kimi",
-			...accountLabel ? { accountLabel } : {}
+			...accountLabel ? { accountLabel } : {},
+			logins: [oauthLogin, ...apiLogins]
 		};
 	} catch {
 		signal.throwIfAborted();
@@ -2559,7 +4980,7 @@ async function readKimiAccount(raw, signal, options = {}) {
 }
 //#endregion
 //#region lib/types/host/kimi-oauth-models.js
-const record$16 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+const record$17 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
 const id$5 = (value) => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(value);
 const BASES = /* @__PURE__ */ new Set(["https://api.kimi.com/coding/v1", "https://api.kimi.ai/coding/v1"]);
 const PROVIDER = "managed:kimi-code";
@@ -2581,7 +5002,7 @@ function ownPrincipal(access) {
 	try {
 		if (bytes.toString("base64url") !== parts[1]) return;
 		const claims = JSON.parse(bytes.toString("utf8"));
-		if (!record$16(claims) || claims.iss !== "kimi-auth") return;
+		if (!record$17(claims) || claims.iss !== "kimi-auth") return;
 		const subject = claims.sub ?? claims.user_id;
 		if (typeof subject !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{6,127}$/.test(subject)) return;
 		if (claims.sub !== void 0 && claims.user_id !== void 0 && claims.sub !== claims.user_id) return;
@@ -2595,11 +5016,11 @@ function ownPrincipal(access) {
 /** This is host-only credential material. Do not return it through Gateway or persist it. */
 async function readKimiOAuthModelSources(raw, sourceId, signal, options = {}) {
 	signal.throwIfAborted();
-	if (!record$16(raw) || !record$16(raw.providers) || !record$16(raw.models)) return [];
+	if (!record$17(raw) || !record$17(raw.providers) || !record$17(raw.models)) return [];
 	const provider = raw.providers[PROVIDER];
-	if (!record$16(provider) || provider.oauth === void 0) return [];
+	if (!record$17(provider) || provider.oauth === void 0) return [];
 	const baseUrl = typeof provider.baseUrl === "string" ? provider.baseUrl.replace(/\/+$/, "") : "";
-	if (provider.type !== "kimi" || !BASES.has(baseUrl) || !record$16(provider.oauth) || provider.oauth.storage !== "file" || !["oauth/kimi-code", "kimi-code"].includes(provider.oauth.key) || provider.oauth.oauthHost !== void 0 && provider.oauth.oauthHost !== "https://auth.kimi.com" || provider.apiKey || provider.apiKeyEnv || provider.env || provider.customHeaders || [
+	if (provider.type !== "kimi" || !BASES.has(baseUrl) || !record$17(provider.oauth) || provider.oauth.storage !== "file" || !["oauth/kimi-code", "kimi-code"].includes(provider.oauth.key) || provider.oauth.oauthHost !== void 0 && provider.oauth.oauthHost !== "https://auth.kimi.com" || provider.apiKey || provider.apiKeyEnv || provider.env || provider.customHeaders || [
 		"KIMI_CODE_BASE_URL",
 		"KIMI_CODE_OAUTH_HOST",
 		"KIMI_OAUTH_HOST",
@@ -2621,7 +5042,7 @@ async function readKimiOAuthModelSources(raw, sourceId, signal, options = {}) {
 	if (!accountId || token.token_type !== void 0 && String(token.token_type).toLowerCase() !== "bearer") throw unavailable$4();
 	const nativeModels = [];
 	for (const [alias, model] of Object.entries(raw.models)) {
-		if (!record$16(model) || model.provider !== PROVIDER || !id$5(model.model) || alias !== `kimi-code/${model.model}`) continue;
+		if (!record$17(model) || model.provider !== PROVIDER || !id$5(model.model) || alias !== `kimi-code/${model.model}`) continue;
 		if (model.oauth || model.providerId || model.apiKey || model.baseUrl || model.customHeaders) continue;
 		if (model.protocol !== void 0 && ![
 			"kimi",
@@ -2684,7 +5105,7 @@ async function responseJson(response, signal) {
 }
 /** Current native subscription quota is required; a public models list is never sufficient. */
 function kimiQuotaRemaining(raw) {
-	if (!record$16(raw) || !record$16(raw.usages)) return "unknown";
+	if (!record$17(raw) || !record$17(raw.usages)) return "unknown";
 	const entries = [
 		"limit_5h",
 		"limit_7d",
@@ -2693,7 +5114,7 @@ function kimiQuotaRemaining(raw) {
 	].filter((key) => raw.usages[key] !== void 0).map((key) => raw.usages[key]);
 	if (!entries.length) return "unknown";
 	const ratios = entries.map((entry) => {
-		if (!record$16(entry) || typeof entry.used_ratio !== "number" && typeof entry.used_ratio !== "string") return NaN;
+		if (!record$17(entry) || typeof entry.used_ratio !== "number" && typeof entry.used_ratio !== "string") return NaN;
 		if (typeof entry.used_ratio === "string" && !entry.used_ratio.trim()) return NaN;
 		return Number(entry.used_ratio);
 	});
@@ -2713,7 +5134,7 @@ async function probeKimiOAuthModels(source, options = {}) {
 	]);
 	const request = async (name) => {
 		try {
-			const response = await (options.fetch ?? fetch)(`${source.baseUrl}/${name}`, {
+			const response = await (options.fetch ?? hostFetch)(`${source.baseUrl}/${name}`, {
 				headers: {
 					Authorization: `Bearer ${source.credential.access}`,
 					Accept: "application/json"
@@ -2741,11 +5162,11 @@ async function probeKimiOAuthModels(source, options = {}) {
 		const quota = kimiQuotaRemaining(usages);
 		if (quota === "exhausted") throw new KimiOAuthModelError("Kimi 当前账号额度已用尽，请等待重置或检查订阅");
 		if (quota !== "available") throw new KimiOAuthModelError("Kimi 当前账号剩余额度暂无法确认，请在账号终端检查后刷新");
-		if (!record$16(models) || !Array.isArray(models.data)) throw new KimiOAuthModelError("Kimi 模型目录格式无法确认，请稍后刷新");
+		if (!record$17(models) || !Array.isArray(models.data)) throw new KimiOAuthModelError("Kimi 模型目录格式无法确认，请稍后刷新");
 		return {
 			state: "supported",
 			source: "account-models",
-			models: models.data.filter((model) => record$16(model) && id$5(model.id) && Number.isInteger(Number(model.context_length)) && Number(model.context_length) > 0 && model.available !== false && model.allowed !== false && model.disabled !== true && model.entitled !== false).map((model) => ({
+			models: models.data.filter((model) => record$17(model) && id$5(model.id) && Number.isInteger(Number(model.context_length)) && Number(model.context_length) > 0 && model.available !== false && model.allowed !== false && model.disabled !== true && model.entitled !== false).map((model) => ({
 				id: model.id,
 				name: typeof model.display_name === "string" ? model.display_name : void 0,
 				cost: "unknown"
@@ -2766,11 +5187,19 @@ function agyBackgroundEnvironment(cli, platform = process.platform) {
 //#region lib/types/host/process.js
 /** A process range is still unconfirmed; callers must stop admitting work. */
 var ProcessCleanupUnconfirmedError = class extends Error {
-	constructor() {
-		super("CLI catalog process cleanup did not reach quiescence");
+	constructor(options) {
+		super("CLI catalog process cleanup did not reach quiescence", options);
 		this.name = "ProcessCleanupUnconfirmedError";
 	}
 };
+/** The host's own reason for an unconfirmed cleanup, for display only: paths removed, one short line. */
+function cleanupCauseText(error) {
+	const cause = error.cause;
+	const line = (cause instanceof AggregateError ? cause.errors.map((item) => item instanceof Error ? item.message : String(item)).join("; ") : cause instanceof Error ? cause.message : cause === void 0 ? "" : String(cause)).replace(/[A-Za-z]:[\\/][^\s'"]*|\\\\[^\s'"]+|\/(?:[^\s/'"]+\/)+[^\s'"]*/g, "<path>").replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+	return line ? line.length > 160 ? `${line.slice(0, 159)}…` : line : void 0;
+}
+/** How long a finished metadata query may take to empty its own process range before it is terminated. */
+const METADATA_EXIT_GRACE_MS = 3e3;
 const DEFAULT_CONFIG = {
 	executable: "agy",
 	maxConcurrent: 2,
@@ -2778,6 +5207,8 @@ const DEFAULT_CONFIG = {
 	graceMs: 5e3,
 	maxLineBytes: 1048576,
 	maxRunBytes: 16777216,
+	maxNativeLineBytes: 33554432,
+	maxToolPreviewBytes: 262144,
 	maxTimelineItems: 1e3
 };
 function projectDirectory(input) {
@@ -2817,15 +5248,15 @@ function projectDirectory(input) {
 	accessSync(path, constants.R_OK | constants.X_OK);
 	return path;
 }
-function agyArguments(executable, project, preference, mode, prompt, timeoutMs, conversationId) {
+function agyArguments(executable, project, preference, mode, prompt, timeoutMs, conversationId, access) {
 	return [
 		executable,
 		"--add-dir",
 		project,
-		"--sandbox",
-		"--dangerously-skip-permissions",
+		...mode === "plan" || access !== "danger-full-access" ? ["--sandbox"] : ["--sandbox=false"],
+		...mode !== "plan" && access === "danger-full-access" ? ["--dangerously-skip-permissions"] : [],
 		"--mode",
-		mode,
+		mode === "plan" || access === "read-only" ? "plan" : access === "danger-full-access" ? "accept-edits" : "auto",
 		"--model",
 		preference.model,
 		...preference.effort === "default" ? [] : ["--effort", preference.effort],
@@ -3054,14 +5485,14 @@ async function assertMimoConfiguration(project, signal) {
 //#region lib/types/host/first-party-models.js
 const claudeHelpCapabilities = new NativeCapabilityCache();
 const kimiOAuthCapabilities = new NativeCapabilityCache();
-const record$15 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+const record$16 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 const literal$4 = (v) => typeof v === "string" && !!v.trim() && !/[\s\x00-\x1f{}$]/.test(v) && !v.startsWith("!");
 const id$4 = (v) => typeof v === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(v);
-const authHeaders = (v) => record$15(v) && Object.keys(v).some((k) => /authorization|api[-_]?key|token|cookie|organization|project/i.test(k));
+const authHeaders = (v) => record$16(v) && Object.keys(v).some((k) => /authorization|api[-_]?key|token|cookie|organization|project/i.test(k));
 function parseMetadata(value) {
 	try {
 		const parsed = JSON.parse(value);
-		if (record$15(parsed)) return parsed;
+		if (record$16(parsed)) return parsed;
 	} catch {}
 	throw new Error("CLI 配置格式无效，请检查配置");
 }
@@ -3087,7 +5518,7 @@ async function readFirstPartyJson(path) {
 		try {
 			const raw = bytes.subarray(0, stat.size).toString("utf8");
 			const value = path.endsWith(".jsonc") ? jsonc(raw) : JSON.parse(raw);
-			return record$15(value) ? value : {};
+			return record$16(value) ? value : {};
 		} finally {
 			bytes.fill(0);
 		}
@@ -3103,10 +5534,11 @@ async function readFirstPartyJson(path) {
 function claudeManagedSettingsPath(platform = process.platform, env = process.env) {
 	return platform === "darwin" ? "/Library/Application Support/ClaudeCode/managed-settings.json" : platform === "win32" ? win32.join(env.ProgramFiles || env.PROGRAMFILES || "C:\\Program Files", "ClaudeCode", "managed-settings.json") : "/etc/claude-code/managed-settings.json";
 }
-/** Disable inherited SDK credentials and cross-CLI plugin imports in the native MiMo provider resolver. */
+/** Disable inherited SDK credentials and cross-CLI plugin/session imports in native MiMo. */
 function firstPartyEnvironment(cli) {
 	if (cli !== "mimo") return {};
 	return {
+		MIMOCODE_DISABLE_CLAUDE_IMPORT: "1",
 		MIMOCODE_DISABLE_PROVIDER_ENV: "1",
 		MIMOCODE_DISABLE_DEFAULT_PLUGINS: "1",
 		MIMOCODE_PURE: "1",
@@ -3127,12 +5559,12 @@ async function assertFirstPartyConfiguration(cli, project, signal) {
 	if (cli === "mimo") await assertMimoConfiguration(project, signal);
 }
 function parseKimiModelSources(raw, sourceId) {
-	if (!record$15(raw) || !record$15(raw.providers) || !record$15(raw.models)) return [];
+	if (!record$16(raw) || !record$16(raw.providers) || !record$16(raw.models)) return [];
 	const sources = [];
 	for (const [alias, model] of Object.entries(raw.models)) {
-		if (!id$4(alias) || !record$15(model) || !id$4(model.model) || typeof model.provider !== "string") continue;
+		if (!id$4(alias) || !record$16(model) || !id$4(model.model) || typeof model.provider !== "string") continue;
 		const provider = raw.providers[model.provider];
-		if (!record$15(provider) || provider.oauth || model.oauth || model.providerId || model.apiKey || model.baseUrl) continue;
+		if (!record$16(provider) || provider.oauth || model.oauth || model.providerId || model.apiKey || model.baseUrl) continue;
 		const key = typeof provider.apiKey === "string" && provider.apiKey.length ? provider.apiKey : provider.env?.KIMI_API_KEY;
 		const protocol = model.protocol ?? provider.protocol ?? provider.type;
 		if (!literal$4(key) || !literal$4(provider.baseUrl) || ![
@@ -3182,7 +5614,7 @@ function parseMimoModelRecords(output) {
 		} catch {
 			continue;
 		}
-		if (!record$15(value) || `${value.providerID}/${value.id}` !== route) throw new Error("MiMo 模型身份不匹配");
+		if (!record$16(value) || `${value.providerID}/${value.id}` !== route) throw new Error("MiMo 模型身份不匹配");
 		records.push(value);
 		route = "";
 		pending = "";
@@ -3197,11 +5629,11 @@ function mimoModelSources(raw, config, auth, sourceId, ownInline = {}) {
 			type: "api",
 			key: inline.key
 		} : void 0;
-		if (!id$4(provider) || !id$4(model.id) || !record$15(credential) || credential.type !== "api" || !literal$4(credential.key)) continue;
+		if (!id$4(provider) || !id$4(model.id) || !record$16(credential) || credential.type !== "api" || !literal$4(credential.key)) continue;
 		if (config.disabled_providers?.includes(provider) || Array.isArray(config.enabled_providers) && !config.enabled_providers.includes(provider)) continue;
 		if (authHeaders(options.headers) || authHeaders(model.headers)) continue;
 		const api = model.api;
-		if (!record$15(api) || !id$4(api.id) || ![
+		if (!record$16(api) || !id$4(api.id) || ![
 			"@ai-sdk/openai",
 			"@ai-sdk/openai-compatible",
 			"@ai-sdk/anthropic"
@@ -3223,7 +5655,7 @@ function mimoModelSources(raw, config, auth, sourceId, ownInline = {}) {
 				choice: {
 					id: `${provider}/${model.id}`,
 					label: typeof model.name === "string" ? model.name : `${provider}/${model.id}`,
-					efforts: ["default", ...EFFORTS.filter((e) => e !== "default" && record$15(model.variants?.[e]) && model.variants[e].disabled !== true)]
+					efforts: ["default", ...EFFORTS.filter((e) => e !== "default" && record$16(model.variants?.[e]) && model.variants[e].disabled !== true)]
 				}
 			}]
 		});
@@ -3323,16 +5755,16 @@ async function readFirstPartyModelSources(cli, executable, project, capture, sig
 		for (const path of await mimoConfigurationFiles(project)) {
 			const raw = await readFirstPartyJson(path);
 			signal.throwIfAborted();
-			if (!record$15(raw.provider)) continue;
+			if (!record$16(raw.provider)) continue;
 			for (const [provider, value] of Object.entries(raw.provider)) {
-				const key = record$15(value) ? value.options?.apiKey : void 0;
+				const key = record$16(value) ? value.options?.apiKey : void 0;
 				if (literal$4(key) && key === config.provider?.[provider]?.options?.apiKey) inline[provider] = {
 					key,
 					sourceId: path
 				};
 			}
 		}
-		if (!Object.values(auth).some((value) => record$15(value) && value.type === "api" && literal$4(value.key)) && !Object.keys(inline).length) return [];
+		if (!Object.values(auth).some((value) => record$16(value) && value.type === "api" && literal$4(value.key)) && !Object.keys(inline).length) return [];
 		await assertFirstPartyConfiguration(cli, project, signal);
 		const native = parseMimoModelRecords(await capture([
 			executable,
@@ -3404,8 +5836,9 @@ async function readFirstPartyModelSources(cli, executable, project, capture, sig
 	signal.throwIfAborted();
 	return [route.source];
 }
-async function discoverFirstPartySources(sources, signal, options = {}) {
+async function discoverFirstPartySources(sources, signal, options = {}, outcome = {}) {
 	const models = /* @__PURE__ */ new Map(), scopes = /* @__PURE__ */ new Map();
+	let listed = false;
 	for (const source of sources) {
 		signal.throwIfAborted();
 		const route = JSON.stringify([
@@ -3459,6 +5892,7 @@ async function discoverFirstPartySources(sources, signal, options = {}) {
 			}
 		})) : source.nativeModels;
 		const candidates = source.claudeConfiguredModels ? [...source.nativeModels, ...nativeModels] : nativeModels;
+		if (scope.models.length) listed = true;
 		for (const { remoteId, choice } of candidates) {
 			const available = scope.models.find((model) => model.id === remoteId || source.claudeConfiguredModels && model.id === claudeRemoteModelId(remoteId));
 			if (available) models.set(choice.id, {
@@ -3467,11 +5901,48 @@ async function discoverFirstPartySources(sources, signal, options = {}) {
 			});
 		}
 	}
+	outcome.unmatched = listed && !models.size;
 	return [...models.values()];
+}
+const MIMO_REFRESH_INTERVAL_MS = 10 * 6e4;
+const mimoRefreshed = /* @__PURE__ */ new Map();
+/**
+* MiMo lists models from its own models.dev cache, which the plugin never lets it fetch
+* (`MIMOCODE_DISABLE_MODELS_FETCH`). A cache older than every model the account still
+* offers matches none of them; then refresh it once with MiMo's own `models --refresh`,
+* as native MiMo does on a normal start, and read again. `stale` reports a mismatch left.
+*/
+async function discoverMimoModels(executable, project, capture, signal, options = {}, now = Date.now()) {
+	const read = async () => {
+		const outcome = {};
+		return {
+			models: await discoverFirstPartySources(await readFirstPartyModelSources("mimo", executable, project, capture, signal), signal, options, outcome),
+			stale: !!outcome.unmatched
+		};
+	};
+	const first = await read();
+	if (first.models.length || !first.stale) return first;
+	const last = mimoRefreshed.get(executable);
+	if (last !== void 0 && now >= last && now - last < MIMO_REFRESH_INTERVAL_MS) return first;
+	mimoRefreshed.set(executable, now);
+	try {
+		await capture([
+			executable,
+			"models",
+			"--refresh"
+		], firstPartyEnvironment("mimo"));
+	} catch {
+		signal.throwIfAborted();
+		return first;
+	} finally {
+		mimoMetadataCache.clear();
+	}
+	signal.throwIfAborted();
+	return read();
 }
 //#endregion
 //#region lib/types/host/claude-own-route.js
-const record$14 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+const record$15 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 const literal$3 = (v) => typeof v === "string" && !!v.trim() && !/[\s\x00-\x1f{}$]/.test(v) && !v.startsWith("!");
 const authOption = /ANTHROPIC|CLAUDE_CODE_(?:OAUTH|USE_|API|SKIP_(?:BEDROCK|VERTEX|FOUNDRY|AWS)_AUTH|PROVIDER_MANAGED_BY_HOST|GATEWAY)|AWS_|GOOGLE_|CLOUD_ML|API_KEY|BEARER_TOKEN/i;
 const allowed = /* @__PURE__ */ new Set([
@@ -3644,11 +6115,11 @@ async function readClaudeSettings(project, signal) {
 		const settings = await readFirstPartyJson(path);
 		signal.throwIfAborted();
 		Object.assign(configured, settings);
-		if (record$14(settings.env)) Object.assign(env, settings.env);
+		if (record$15(settings.env)) Object.assign(env, settings.env);
 	}
 	const managed = await readFirstPartyJson(claudeManagedSettingsPath());
 	signal.throwIfAborted();
-	if (managed.apiKeyHelper || managed.forceLoginMethod || managed.forceLoginOrgUUID || managed.forceLoginGatewayUrl || record$14(managed.env) && Object.entries(managed.env).some(([key, value]) => value && (authOption.test(key) || homeOption.test(key)))) throw new ClaudeOwnRouteError();
+	if (managed.apiKeyHelper || managed.forceLoginMethod || managed.forceLoginOrgUUID || managed.forceLoginGatewayUrl || record$15(managed.env) && Object.entries(managed.env).some(([key, value]) => value && (authOption.test(key) || homeOption.test(key)))) throw new ClaudeOwnRouteError();
 	if (Object.entries(env).some(([key, value]) => value && homeOption.test(key))) throw new ClaudeOwnRouteError();
 	return {
 		root,
@@ -3752,7 +6223,7 @@ function claudeRouteIdentity(route, raw, exitCode) {
 	} catch {
 		throw new ClaudeOwnRouteError("Claude 登录状态响应无法确认，请刷新");
 	}
-	if (!record$14(status)) throw new ClaudeOwnRouteError("Claude 登录状态响应无法确认，请刷新");
+	if (!record$15(status)) throw new ClaudeOwnRouteError("Claude 登录状态响应无法确认，请刷新");
 	if (status.apiProvider !== void 0 && status.apiProvider !== "firstParty") throw new ClaudeOwnRouteError();
 	if (route.configDirectory && status.configDirectory !== void 0) {
 		const normalized = (path) => process.platform === "win32" ? resolve(path).toLowerCase() : resolve(path);
@@ -3880,7 +6351,7 @@ function qoderVariant(cli = "qoder") {
 }
 //#endregion
 //#region lib/types/host/claude-native-oauth.js
-const record$13 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+const record$14 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
 const id$3 = (value) => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[[A-Za-z0-9]+\])?$/.test(value);
 const text$11 = (value) => typeof value === "string" && !!value.trim() && value.length <= 512 && !/[\x00-\x1f\x7f]/.test(value);
 var ClaudeNativeOAuthError = class extends Error {
@@ -3892,9 +6363,9 @@ var ClaudeNativeOAuthError = class extends Error {
 };
 /** Native initialize is capability metadata: even an unauthenticated CLI returns models. */
 function ownAccount(value) {
-	const email = record$13(value) ? accountEmail(value.email) : void 0;
-	const claudeAi = record$13(value) && (value.tokenSource === "claude.ai" || value.tokenSource === void 0 && text$11(value.subscriptionType));
-	if (!record$13(value) || value.apiProvider !== "firstParty" || !claudeAi || value.apiKeySource !== void 0 && value.apiKeySource !== "none" || !email) throw new ClaudeNativeOAuthError("Claude 尚未通过原生账号登录，请打开账号终端登录");
+	const email = record$14(value) ? accountEmail(value.email) : void 0;
+	const claudeAi = record$14(value) && (value.tokenSource === "claude.ai" || value.tokenSource === void 0 && text$11(value.subscriptionType));
+	if (!record$14(value) || value.apiProvider !== "firstParty" || !claudeAi || value.apiKeySource !== void 0 && value.apiKeySource !== "none" || !email) throw new ClaudeNativeOAuthError("Claude 尚未通过原生账号登录，请打开账号终端登录");
 	if (value.organization !== void 0 && !text$11(value.organization)) throw new ClaudeNativeOAuthError();
 	return {
 		email,
@@ -3908,7 +6379,7 @@ function ownAccount(value) {
 * no cache and make no claim of a separate live model entitlement API.
 */
 function remainingQuota(value, now) {
-	if (!record$13(value) || ![
+	if (!record$14(value) || ![
 		"pro",
 		"max",
 		"team",
@@ -3925,7 +6396,7 @@ function remainingQuota(value, now) {
 var QuotaUnknown = class {};
 const unknown$1 = () => new QuotaUnknown();
 function checkQuota(value, now) {
-	if (value.rate_limits_available !== true || !record$13(value.rate_limits) || !Array.isArray(value.rate_limits.limits)) throw unknown$1();
+	if (value.rate_limits_available !== true || !record$14(value.rate_limits) || !Array.isArray(value.rate_limits.limits)) throw unknown$1();
 	const limits = value.rate_limits;
 	const windows = [
 		"five_hour",
@@ -3937,7 +6408,7 @@ function checkQuota(value, now) {
 	if (limits.five_hour == null || limits.seven_day == null) throw unknown$1();
 	const percentages = [];
 	const window = (entry) => {
-		if (!record$13(entry) || typeof entry.utilization !== "number" || !Number.isFinite(entry.utilization) || entry.utilization < 0 || entry.resets_at !== null && (typeof entry.resets_at !== "string" || !Number.isFinite(Date.parse(entry.resets_at)) || Date.parse(entry.resets_at) <= now)) throw unknown$1();
+		if (!record$14(entry) || typeof entry.utilization !== "number" || !Number.isFinite(entry.utilization) || entry.utilization < 0 || entry.resets_at !== null && (typeof entry.resets_at !== "string" || !Number.isFinite(Date.parse(entry.resets_at)) || Date.parse(entry.resets_at) <= now)) throw unknown$1();
 		percentages.push(entry.utilization);
 	};
 	windows.forEach(window);
@@ -3946,20 +6417,20 @@ function checkQuota(value, now) {
 		limits.model_scoped.forEach(window);
 	}
 	for (const entry of limits.limits) {
-		if (!record$13(entry) || typeof entry.percent !== "number" || !Number.isFinite(entry.percent) || entry.percent < 0 || typeof entry.is_active !== "boolean") throw unknown$1();
+		if (!record$14(entry) || typeof entry.percent !== "number" || !Number.isFinite(entry.percent) || entry.percent < 0 || typeof entry.is_active !== "boolean") throw unknown$1();
 		if (entry.is_active) percentages.push(entry.percent);
 	}
 	if (percentages.some((percent) => percent >= 100)) throw new ClaudeNativeOAuthError("Claude 当前账号存在已用尽的限额，请等待重置或检查订阅");
 }
 function parseClaudeNativeOAuthCatalog(initialize, usage, now = Date.now()) {
-	if (!record$13(initialize)) throw new ClaudeNativeOAuthError();
+	if (!record$14(initialize)) throw new ClaudeNativeOAuthError();
 	const account = ownAccount(initialize.account);
 	const quota = remainingQuota(usage, now);
 	if (!Array.isArray(initialize.models)) throw new ClaudeNativeOAuthError();
 	const models = /* @__PURE__ */ new Map();
 	const resolved = /* @__PURE__ */ new Map();
 	for (const model of initialize.models) {
-		if (!record$13(model) || !id$3(model.value) || !id$3(model.resolvedModel) || model.disabled === true || model.hidden === true || model.entitled === false || model.available === false || model.allowed === false) continue;
+		if (!record$14(model) || !id$3(model.value) || !id$3(model.resolvedModel) || model.disabled === true || model.hidden === true || model.entitled === false || model.available === false || model.allowed === false) continue;
 		const efforts = model.supportsEffort === true && Array.isArray(model.supportedEffortLevels) ? EFFORTS.filter((effort) => [
 			"low",
 			"medium",
@@ -3996,7 +6467,7 @@ async function discoverClaudeNativeOAuth(backend, config, executable, cwd, signa
 	} catch {
 		throw new ClaudeNativeOAuthError();
 	}
-	if (!record$13(overlay)) throw new ClaudeNativeOAuthError();
+	if (!record$14(overlay)) throw new ClaudeNativeOAuthError();
 	const control = AbortSignal.any([signal, AbortSignal.timeout(15e3)]);
 	const child = backend.spawn({
 		argv: [
@@ -4073,7 +6544,7 @@ async function discoverClaudeNativeOAuth(backend, config, executable, cwd, signa
 				} catch {
 					throw new ClaudeNativeOAuthError();
 				}
-				if (!record$13(message)) throw new ClaudeNativeOAuthError();
+				if (!record$14(message)) throw new ClaudeNativeOAuthError();
 				if ([
 					"assistant",
 					"user",
@@ -4083,8 +6554,8 @@ async function discoverClaudeNativeOAuth(backend, config, executable, cwd, signa
 				].includes(message.type)) throw new ClaudeNativeOAuthError("Claude 账号查询返回了非元数据事件，已停止查询");
 				if (message.type !== "control_response") continue;
 				const response = message.response;
-				if (!record$13(response) || response.request_id !== expected) throw new ClaudeNativeOAuthError();
-				if (response.subtype !== "success" || !record$13(response.response)) throw new ClaudeNativeOAuthError();
+				if (!record$14(response) || response.request_id !== expected) throw new ClaudeNativeOAuthError();
+				if (response.subtype !== "success" || !record$14(response.response)) throw new ClaudeNativeOAuthError();
 				if (expected === "native-initialize") {
 					initialize = response.response;
 					ownAccount(response.response.account);
@@ -4146,13 +6617,13 @@ async function discoverClaudeNativeOAuth(backend, config, executable, cwd, signa
 }
 //#endregion
 //#region lib/types/host/codex-models.js
-const record$12 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+const record$13 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 const validId = (v) => typeof v === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(v);
 function parseCodexNativeModels(values) {
 	const models = /* @__PURE__ */ new Map();
 	for (const value of values) {
-		if (!record$12(value) || !validId(value.model) || value.hidden === true || value.availabilityNux) continue;
-		const efforts = EFFORTS.filter((e) => Array.isArray(value.supportedReasoningEfforts) && value.supportedReasoningEfforts.some((item) => record$12(item) && item.reasoningEffort === e));
+		if (!record$13(value) || !validId(value.model) || value.hidden === true) continue;
+		const efforts = EFFORTS.filter((e) => Array.isArray(value.supportedReasoningEfforts) && value.supportedReasoningEfforts.some((item) => record$13(item) && item.reasoningEffort === e));
 		if (!efforts.length) continue;
 		models.set(value.model, {
 			id: value.model,
@@ -4215,8 +6686,8 @@ async function readCodexNativeModels(backend, config, executable, cwd, signal, o
 				} catch {
 					continue;
 				}
-				if (!record$12(response) || response.id !== expected) continue;
-				if (response.error || !record$12(response.result)) throw new Error("Codex 模型查询失败，请刷新");
+				if (!record$13(response) || response.id !== expected) continue;
+				if (response.error || !record$13(response.result)) throw new Error("Codex 模型查询失败，请刷新");
 				if (expected === 1) {
 					const userAgent = response.result.userAgent;
 					const version = typeof userAgent === "string" ? /^cli_worker_models\/(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)(?:\s|$)/.exec(userAgent)?.[1] : void 0;
@@ -4309,6 +6780,16 @@ async function readCodexNativeModels(backend, config, executable, cwd, signal, o
 	}
 }
 async function discoverCodexModels(backend, config, executable, cwd, signal) {
+	const route = await readCodexCustomRouteVersion(cwd, signal);
+	if (route !== void 0) {
+		const models = await readCodexNativeModels(backend, config, executable, cwd, signal);
+		signal.throwIfAborted();
+		if (await readCodexCustomRouteVersion(cwd, signal) !== route) throw new Error("Codex 路由配置已变化，请刷新");
+		return models.map((model) => ({
+			...model,
+			cost: "unknown"
+		}));
+	}
 	if (!(await readCodexOwnAccountSource(cwd, signal)).nativeRouteConfirmed) return [];
 	let codexClientVersion;
 	const native = await readCodexNativeModels(backend, config, executable, cwd, signal, { onServerVersion: (version) => {
@@ -4406,7 +6887,7 @@ async function discoverAgyAccountModels(capture, signal, home = homedir(), ident
 }
 //#endregion
 //#region lib/types/host/qoder-accounts.js
-const record$11 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+const record$12 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 const text$10 = (v) => typeof v === "string" && !!v.trim() && !/[\x00-\x1f]/.test(v);
 const literal$2 = (v) => text$10(v) && !/\s|^(?:!|\$|\{|<|your[_ -]|placeholder|changeme)/i.test(v);
 const hash$3 = (v) => createHash("sha256").update(v).digest("hex");
@@ -4505,7 +6986,7 @@ async function scopedMetadata(backend, config, executable, cwd, signal, cli) {
 	const scope = catalogSnapshots.getStore();
 	if (!scope?.active || scope.cli !== cli || scope.backend !== backend || scope.config !== config || scope.executable !== executable || scope.cwd !== cwd || scope.signal !== signal) return void 0;
 	const reading = scope.reading ??= queryQoderMetadata(backend, config, executable, cwd, signal, "models", cli).then((value) => {
-		if (!record$11(value) || !Array.isArray(value.models)) throw new QoderAccountError();
+		if (!record$12(value) || !Array.isArray(value.models)) throw new QoderAccountError();
 		return value;
 	});
 	try {
@@ -4620,12 +7101,12 @@ async function checkQoderProjectSettings(cwd, signal, cli) {
 		const raw = await read$2(join(cwd, name, file), signal);
 		if (raw === void 0) continue;
 		const value = jsonc(raw);
-		if (!record$11(value)) throw new QoderAccountError();
+		if (!record$12(value)) throw new QoderAccountError();
 		if (typeof value.general?.disableAutoUpdate === "boolean" || typeof value.general?.disableUpdateNag === "boolean" || typeof value.ui?.accessibility?.disableLoadingPhrases === "boolean" || value.ui?.accessibility?.enableLoadingPhrases === false && value.ui?.loadingPhrases === void 0 || typeof value.context?.fileFiltering?.disableFuzzySearch === "boolean" || value.tools?.approvalMode !== void 0 || [
 			"reasoningEffort",
 			"contextWindow",
 			"functionSwitchSelections"
-		].some((key) => value.model?.[key] !== void 0) || record$11(value.model?.preferences) && Object.values(value.model.preferences).some((item) => record$11(item) && item.generation !== void 0)) throw new QoderAccountError("Qoder 项目设置需要原生迁移，请先在原生 CLI 打开该项目后重试");
+		].some((key) => value.model?.[key] !== void 0) || record$12(value.model?.preferences) && Object.values(value.model.preferences).some((item) => record$12(item) && item.generation !== void 0)) throw new QoderAccountError("Qoder 项目设置需要原生迁移，请先在原生 CLI 打开该项目后重试");
 	}
 }
 /** Copy only native routing inputs. Auth remains in its original read-only root;
@@ -4795,7 +7276,7 @@ async function queryQoderMetadata(backend, config, executable, cwd, signal, kind
 					if (!line.trim()) continue;
 					if (Buffer.byteLength(line) > config.maxLineBytes) throw failure();
 					const value = JSON.parse(line);
-					if (!record$11(value)) throw failure();
+					if (!record$12(value)) throw failure();
 					if (value.type === "control_response" && pending.has(value.response?.request_id)) {
 						const item = pending.get(value.response.request_id);
 						pending.delete(value.response.request_id);
@@ -4840,7 +7321,7 @@ async function queryQoderMetadata(backend, config, executable, cwd, signal, kind
 			try {
 				if (kind === "models") return {
 					models: parseQoderModelState(initialized),
-					account: record$11(initialized?.account) ? {
+					account: record$12(initialized?.account) ? {
 						userId: initialized.account.userId,
 						email: initialized.account.email,
 						organization: initialized.account.organization
@@ -4848,7 +7329,7 @@ async function queryQoderMetadata(backend, config, executable, cwd, signal, kind
 				};
 				const result = await request("account_info");
 				if (anonymous) return null;
-				if (!record$11(result) || !record$11(result.account)) throw failure();
+				if (!record$12(result) || !record$12(result.account)) throw failure();
 				return result.account;
 			} finally {
 				if (!anonymous) await request("end_session");
@@ -4928,7 +7409,7 @@ async function accountMaterial(executable, signal, options = {}) {
 				summary: `${qoderVariant(cli).label} 登录不可用，请在原生 CLI 中重新登录`
 			}
 		};
-		if (!record$11(value) || !text$10(value.userId)) throw new QoderAccountError();
+		if (!record$12(value) || !text$10(value.userId)) throw new QoderAccountError();
 		const email = accountEmail(value.email);
 		return {
 			sourceIds: [directory, `native:${cli}-account-info`],
@@ -5017,9 +7498,9 @@ async function qoderRouting(directory, project, signal, cli) {
 			continue;
 		}
 		const config = jsonc(raw);
-		if (!record$11(config)) throw new QoderAccountError();
+		if (!record$12(config)) throw new QoderAccountError();
 		const auth = config.security?.auth;
-		if (auth !== void 0 && (!record$11(auth) || auth.useExternal === true || [auth.selectedType, auth.enforcedType].some((value) => value && !["qoder-browser", "qoder-pat"].includes(value)))) throw new QoderAccountError("Qoder 当前认证设置不受支持，请检查原生账号配置");
+		if (auth !== void 0 && (!record$12(auth) || auth.useExternal === true || [auth.selectedType, auth.enforcedType].some((value) => value && !["qoder-browser", "qoder-pat"].includes(value)))) throw new QoderAccountError("Qoder 当前认证设置不受支持，请检查原生账号配置");
 		const routing = {
 			providers: config.providers,
 			modelConfigs: config.modelConfigs,
@@ -5047,10 +7528,10 @@ const QODER_METADATA_ARGUMENTS = [
 /** Official SDK initialize.models. BHs always exposes isEnabled; disabled SDK
 * entries must not become selectable because ACP getAvailableModels filters them. */
 function parseQoderModelState(state) {
-	if (!record$11(state) || !Array.isArray(state.models) || state.models.length > 4096) throw new QoderAccountError("Qoder 未公开结构化模型目录");
+	if (!record$12(state) || !Array.isArray(state.models) || state.models.length > 4096) throw new QoderAccountError("Qoder 未公开结构化模型目录");
 	const models = /* @__PURE__ */ new Map();
 	for (const model of state.models) {
-		if (!record$11(model) || !text$10(model.value) || model.value.length > 512 || !text$10(model.displayName) || model.displayName.length > 512 || typeof model.isEnabled !== "boolean" || model.efforts !== void 0 && (!Array.isArray(model.efforts) || !model.efforts.every(text$10)) || model.supportsDisabled !== void 0 && typeof model.supportsDisabled !== "boolean") throw new QoderAccountError("Qoder 模型目录格式不受支持");
+		if (!record$12(model) || !text$10(model.value) || model.value.length > 512 || !text$10(model.displayName) || model.displayName.length > 512 || typeof model.isEnabled !== "boolean" || model.efforts !== void 0 && (!Array.isArray(model.efforts) || !model.efforts.every(text$10)) || model.supportsDisabled !== void 0 && typeof model.supportsDisabled !== "boolean") throw new QoderAccountError("Qoder 模型目录格式不受支持");
 		if (!model.isEnabled) continue;
 		const advertised = new Set(model.efforts ?? []);
 		if (model.supportsDisabled === true) advertised.add("none");
@@ -5066,8 +7547,80 @@ function parseQoderModelState(state) {
 /** Metadata only: never authenticate, prompt, select a model or create a persisted session. */
 async function discoverQoderModels(backend, config, executable, cwd, signal, cli = "qoder") {
 	const result = await scopedMetadata(backend, config, executable, cwd, signal, cli) ?? await queryQoderMetadata(backend, config, executable, cwd, signal, "models", cli);
-	if (!record$11(result) || !Array.isArray(result.models)) throw new QoderAccountError("Qoder 原生模型目录暂不可用，请在原生 CLI 检查登录和网络");
+	if (!record$12(result) || !Array.isArray(result.models)) throw new QoderAccountError("Qoder 原生模型目录暂不可用，请在原生 CLI 检查登录和网络");
 	return result.models;
+}
+//#endregion
+//#region lib/types/host/agy-macos-account.js
+const LIMIT$2 = 64 * 1024;
+/** agy 1.4.x stores its macOS login through go-keyring; the Windows target is `gemini:antigravity`. */
+const MAC_AGY_KEYCHAIN_ARGUMENTS = [
+	"/usr/bin/security",
+	"find-generic-password",
+	"-s",
+	"gemini",
+	"-a",
+	"antigravity",
+	"-w"
+];
+const ITEM_NOT_FOUND = 44;
+var MacAgyKeychainError = class extends Error {
+	constructor() {
+		super("无法读取 macOS 钥匙串中的 Antigravity 账号，请重试");
+		this.name = "MacAgyKeychainError";
+	}
+};
+/** go-keyring's own encodings for values that `security -w` cannot print verbatim. */
+function decodeMacAgyKeychain(output) {
+	const text = output.replace(/\r?\n$/, "");
+	if (!text) return void 0;
+	try {
+		if (text.length > LIMIT$2) throw new Error("oversized");
+		const decoded = text.startsWith("go-keyring-base64:") ? Buffer.from(text.slice(18), "base64").toString("utf8") : text.startsWith("go-keyring-encoded:") ? Buffer.from(text.slice(19), "hex").toString("utf8") : text;
+		const value = JSON.parse(decoded);
+		if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid");
+		return value;
+	} catch {
+		throw new MacAgyKeychainError();
+	}
+}
+/**
+* The keychain item is the only macOS login: `/logout` removes it and leaves a
+* stale token file behind, so a missing item is never answered from that file.
+*/
+async function readMacAgyCredential(backend, config, signal) {
+	signal.throwIfAborted();
+	let output;
+	try {
+		output = await captureCatalogMetadata(backend, config, [...MAC_AGY_KEYCHAIN_ARGUMENTS], homedir(), signal, void 0, [0, ITEM_NOT_FOUND]);
+	} catch (error) {
+		signal.throwIfAborted();
+		if (error instanceof ProcessCleanupUnconfirmedError) throw error;
+		throw new MacAgyKeychainError();
+	}
+	signal.throwIfAborted();
+	return decodeMacAgyKeychain(output);
+}
+function macAgyAccountIdentity(backend, config) {
+	return async (cli, signal) => {
+		if (cli !== "antigravity") return void 0;
+		try {
+			const credential = await readMacAgyCredential(backend, config, signal);
+			return credential ? agyIdentityFromCredential(credential) : {
+				state: "unconfigured",
+				verification: "local",
+				summary: "尚未登录 Antigravity"
+			};
+		} catch (error) {
+			signal.throwIfAborted();
+			if (error instanceof ProcessCleanupUnconfirmedError) throw error;
+			return {
+				state: "unavailable",
+				verification: "local",
+				summary: new MacAgyKeychainError().message
+			};
+		}
+	};
 }
 //#endregion
 //#region lib/types/host/agy-windows-account.js
@@ -5160,6 +7713,7 @@ async function readNativeWindowsAgyAccount(backend, config, signal) {
 	return projectWindowsAgyAccount(raw);
 }
 function nativeAgyAccountIdentity(backend, config, platform = process.platform) {
+	if (platform === "darwin") return macAgyAccountIdentity(backend, config);
 	if (platform !== "win32") return localAccountIdentity();
 	return async (cli, signal) => cli === "antigravity" ? (await readWindowsAgyAccount(backend, config, signal)).identity : void 0;
 }
@@ -5251,11 +7805,11 @@ async function readZCodeAccountApiKeys(authDirectory, providerIds, options = {})
 }
 //#endregion
 //#region lib/types/host/zcode-response.mjs
-const object$16 = (value) => value && typeof value === "object" && !Array.isArray(value);
-const count$15 = (value) => Number.isSafeInteger(value) && value >= 0;
+const object$15 = (value) => value && typeof value === "object" && !Array.isArray(value);
+const count$10 = (value) => Number.isSafeInteger(value) && value >= 0;
 /** ZCode normalizeUsage preserves SDK input totals: both cache buckets are subsets. */
 function zcodeResponseUsage(value) {
-	if (!object$16(value) || !count$15(value.inputTokens) || !count$15(value.outputTokens)) return;
+	if (!object$15(value) || !count$10(value.inputTokens) || !count$10(value.outputTokens)) return;
 	const usage = {
 		inputTokens: value.inputTokens,
 		outputTokens: value.outputTokens
@@ -5266,15 +7820,15 @@ function zcodeResponseUsage(value) {
 		"reasoningTokens"
 	]) {
 		if (value[key] === void 0) continue;
-		if (!count$15(value[key])) return;
+		if (!count$10(value[key])) return;
 		usage[key] = value[key];
 	}
 	if (usage.reasoningTokens !== void 0 && usage.reasoningTokens > usage.outputTokens) return;
 	const total = value.inputTokens + value.outputTokens;
-	if (!count$15(total) || value.totalTokens !== void 0 && value.totalTokens !== total) return;
+	if (!count$10(total) || value.totalTokens !== void 0 && value.totalTokens !== total) return;
 	if (usage.cacheReadTokens === void 0 || usage.cacheWriteTokens === void 0) return;
 	usage.inputTokens -= usage.cacheReadTokens + usage.cacheWriteTokens;
-	if (!count$15(usage.inputTokens)) return;
+	if (!count$10(usage.inputTokens)) return;
 	usage.totalTokens = total;
 	return usage;
 }
@@ -5283,6 +7837,7 @@ var ZcodeResponseTracker = class {
 	constructor(emit) {
 		this.output = emit;
 	}
+	held = [];
 	emit(event, assistantMessageId, blockId, index) {
 		if (typeof assistantMessageId !== "string" || !assistantMessageId || assistantMessageId.length > 480) {
 			this.output(event);
@@ -5301,14 +7856,25 @@ var ZcodeResponseTracker = class {
 		};
 		this.output(this.last);
 	}
+	/** ZCode may schedule a tool before its message's model_complete; a passive
+	* tool row must not precede that response's completion boundary. */
+	tool(event) {
+		if (this.last) this.held.push(event);
+		else this.output(event);
+	}
 	complete(payload) {
-		if (!object$16(payload) || payload.querySource !== "main_turn" || typeof payload.content !== "string" || !count$15(payload.toolCallCount) || typeof payload.stopReason !== "string") return false;
+		if (!object$15(payload) || payload.querySource !== "main_turn" || typeof payload.content !== "string" || !count$10(payload.toolCallCount) || typeof payload.stopReason !== "string") return false;
 		this.finish(zcodeResponseUsage(payload.usage));
 		return true;
 	}
 	finish(usage) {
 		if (this.last) this.output({
 			...this.last,
+			delta: void 0,
+			...this.last.toolCall ? { toolCall: {
+				...this.last.toolCall,
+				output: void 0
+			} } : {},
 			...this.last.kind === "assistant" ? { text: "" } : {},
 			response: {
 				...this.last.response,
@@ -5318,18 +7884,534 @@ var ZcodeResponseTracker = class {
 		});
 		this.id = void 0;
 		this.last = void 0;
+		for (const event of this.held.splice(0)) this.output(event);
 	}
 };
 //#endregion
+//#region lib/types/host/cli-native-capabilities.mjs
+/**
+* Pi/OMP `--tools`. OMP relays its native approvals in both restricted tiers.
+* Pi asks through the plugin's `tool_call` gate (pi-permission-gate.mjs); an
+* install without that hook (`piGate` false) keeps the stricter old split:
+* reads only for 询问, edits without bash for 自动批准编辑.
+*/
+function piOmpNativeTools(cli, mode, access, piGate = true) {
+	const writable = mode === "accept-edits" && !(cli === "pi" && !piGate && access === "read-only");
+	const bash = mode === "accept-edits" && (cli === "pi" && !piGate ? access === "danger-full-access" : [
+		"read-only",
+		"workspace-write",
+		"danger-full-access"
+	].includes(access));
+	return [
+		...cli === "pi" ? [
+			"read",
+			"grep",
+			"find",
+			"ls"
+		] : [
+			"read",
+			"grep",
+			"glob"
+		],
+		...writable ? ["write", "edit"] : [],
+		...bash ? ["bash"] : []
+	];
+}
+/** Grok's plan launch restricts tools to this read-only list; web reads are read-only too. */
+const GROK_PLAN_TOOLS = [
+	"read_file",
+	"grep",
+	"list_dir",
+	...["web_search", "web_fetch"]
+];
+/**
+* The user's own OpenCode/MiMo skill directories (opencode 1.19 / mimocode 0.1.15
+* discovery roots), handed over as `skills.paths`. Project config, external
+* (.claude/.agents) skill scans and provider config stay isolated.
+*/
+function nativeSkillPaths(cli, { env = process.env, project, home = homedir() } = {}) {
+	const name = cli === "mimo" ? "mimocode" : "opencode";
+	const roots = [
+		cli === "mimo" && env.MIMOCODE_HOME ? join(env.MIMOCODE_HOME, "config") : join(env.XDG_CONFIG_HOME || join(home, ".config"), name),
+		join(home, `.${name}`),
+		...project ? [join(project, `.${name}`)] : []
+	];
+	return [...new Set(roots.flatMap((root) => ["skill", "skills"].map((directory) => join(root, directory))))].filter((path) => {
+		try {
+			return statSync(path).isDirectory();
+		} catch {
+			return false;
+		}
+	});
+}
+/**
+* A worker runs in a private home, so a native memory the user turned on is
+* shared, never copied: the private memory path becomes a link to the CLI's
+* own memory directory. A private directory that already holds files is kept
+* aside instead of being deleted.
+*/
+async function shareNativeMemory(privatePath, nativePath) {
+	await mkdir(nativePath, {
+		recursive: true,
+		mode: 448
+	});
+	const target = await realpath(nativePath);
+	let info;
+	try {
+		info = await lstat(privatePath);
+	} catch (error) {
+		if (error.code !== "ENOENT") throw error;
+	}
+	if (info?.isSymbolicLink()) {
+		if (resolve(dirname(privatePath), await readlink(privatePath)) === target) return;
+		await rm(privatePath, { force: true });
+	} else if (info?.isDirectory()) if (await holdsFiles(privatePath)) await rename(privatePath, `${privatePath}.private-${Date.now()}`);
+	else await rm(privatePath, {
+		recursive: true,
+		force: true
+	});
+	else if (info) throw new Error("Worker 私有记忆路径不是目录");
+	await mkdir(dirname(privatePath), {
+		recursive: true,
+		mode: 448
+	});
+	const link = `${privatePath}.${randomUUID()}.tmp`;
+	await symlink(target, link, process.platform === "win32" ? "junction" : "dir");
+	try {
+		await rename(link, privatePath);
+	} finally {
+		await rm(link, { force: true });
+	}
+}
+/** Memory off: drop a link left by an earlier run; a private directory stays. */
+async function unshareNativeMemory(privatePath) {
+	try {
+		if ((await lstat(privatePath)).isSymbolicLink()) await rm(privatePath);
+	} catch (error) {
+		if (error.code !== "ENOENT") throw error;
+	}
+}
+async function holdsFiles(path) {
+	for (const entry of await readdir(path, { withFileTypes: true })) if (!entry.isDirectory() || await holdsFiles(join(path, entry.name))) return true;
+	return false;
+}
+const switchValue = (value) => /^(?:1|true|yes|on)$/i.test(value ?? "") ? true : /^(?:0|false|no|off)$/i.test(value ?? "") ? false : void 0;
+/** Read native boolean TOML switches without importing unrelated settings. */
+function grokTomlSwitch(text, keys) {
+	const values = /* @__PURE__ */ new Map();
+	let table = "";
+	for (const raw of text.split(/\r?\n/)) {
+		const line = raw.replace(/\s+#.*$/, "").trim();
+		if (line.startsWith("[[")) table = "\0";
+		else if (line.startsWith("[")) table = /^\[\s*([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)\s*\]$/.exec(line)?.[1] ?? "\0";
+		else {
+			const pair = /^([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)\s*=\s*(true|false)$/.exec(line);
+			const key = pair && (table ? `${table}.${pair[1]}` : pair[1]);
+			if (key && !values.has(key)) values.set(key, pair[2] === "true");
+		}
+	}
+	return keys.map((key) => values.get(key)).find((value) => value !== void 0);
+}
+const grokTomlMemory = (text) => grokTomlSwitch(text, ["memory_v2.enabled", "memory.enabled"]);
+/** Installed Grok 1.0.62 configuration reference: subagents.enabled defaults true. */
+async function grokNativeSubagents({ env = process.env, home = homedir() } = {}) {
+	const read = async (name) => {
+		try {
+			return grokTomlSwitch(await readFile(join(home, ".grok", name), "utf8"), ["subagents.enabled"]);
+		} catch (error) {
+			return error.code === "ENOENT" ? void 0 : false;
+		}
+	};
+	return await read("requirements.toml") ?? switchValue(env.GROK_SUBAGENTS?.trim()) ?? await read("config.toml") ?? true;
+}
+/** Exact native names, shared by first-turn and resume validation. */
+function parseZcodeDeniedTools(value) {
+	if (typeof value !== "string" || !value || value.length > 32768) throw new Error("Invalid ZCode disabled tool list");
+	const names = value.split(",");
+	if (names.some((name) => !/^[A-Za-z][A-Za-z0-9_.:-]*$/.test(name)) || new Set(names).size !== names.length) throw new Error("Invalid ZCode disabled tool list");
+	return names;
+}
+/** Desktop user choice takes precedence over the offered env mode; CLI default is disabled. */
+function zcodeWorkflowMode(setting, env = process.env) {
+	const valid = (value) => [
+		"disabled",
+		"onDemand",
+		"alwaysOn"
+	].includes(value) ? value : void 0;
+	return valid(setting?.dynamicWorkflowMode) ?? valid(env.ZCODE_DYNAMIC_WORKFLOW_MODE?.trim()) ?? "disabled";
+}
+/**
+* Whether the user's own Grok starts with memory (grok 1.0.62 priority order):
+* requirements.toml, then GROK_MEMORY, then config.toml. Memory is off by
+* default; a managed remote setting is not visible here and counts as unset.
+*/
+async function grokNativeMemory({ env = process.env, home = homedir() } = {}) {
+	const read = async (name) => {
+		try {
+			return grokTomlMemory(await readFile(join(home, ".grok", name), "utf8"));
+		} catch (error) {
+			if (error.code === "ENOENT") return void 0;
+			return false;
+		}
+	};
+	return await read("requirements.toml") ?? switchValue(env.GROK_MEMORY?.trim()) ?? await read("config.toml") ?? false;
+}
+const write = (mode) => mode === "plan" ? [] : ["file-write"];
+const tables = {
+	codex: (mode) => [
+		"file-read",
+		...write(mode),
+		"search",
+		"shell",
+		"image-read",
+		"skills"
+	],
+	claude: (mode) => [
+		"file-read",
+		...write(mode),
+		"search",
+		"shell",
+		"web",
+		"image-read",
+		"skills"
+	],
+	opencode: (mode) => [
+		"file-read",
+		...write(mode),
+		"search",
+		"shell",
+		"web",
+		"image-read",
+		"skills"
+	],
+	mimo: (mode) => [
+		"file-read",
+		...write(mode),
+		"search",
+		"shell",
+		"web",
+		"image-read",
+		"skills"
+	],
+	pi: (mode, access) => {
+		const tools = piOmpNativeTools("pi", mode, access);
+		return [
+			"file-read",
+			...tools.includes("write") ? ["file-write"] : [],
+			"search",
+			...tools.includes("bash") ? ["shell"] : [],
+			"image-read"
+		];
+	},
+	omp: (mode, access) => {
+		const tools = piOmpNativeTools("omp", mode, access);
+		return [
+			"file-read",
+			...tools.includes("write") ? ["file-write"] : [],
+			"search",
+			...tools.includes("bash") ? ["shell"] : []
+		];
+	},
+	grok: (mode) => mode === "plan" ? [
+		"file-read",
+		"search",
+		"skills",
+		...["web"]
+	] : [
+		"file-read",
+		"file-write",
+		"search",
+		"shell",
+		"skills",
+		...["web"]
+	],
+	kimi: (mode) => [
+		"file-read",
+		...write(mode),
+		"search",
+		"shell",
+		"web",
+		"skills"
+	],
+	qoder: (mode) => [
+		"file-read",
+		...write(mode),
+		"search",
+		"shell",
+		"web",
+		"skills"
+	],
+	qodercn: (mode) => [
+		"file-read",
+		...write(mode),
+		"search",
+		"shell",
+		"web",
+		"skills"
+	],
+	antigravity: (mode) => [
+		"file-read",
+		...write(mode),
+		"shell"
+	]
+};
+/** Whether the CLI's MCP client hands image content from a tool result to its model (Codex unverified). */
+const mcpImages = /* @__PURE__ */ new Set([
+	"claude",
+	"opencode",
+	"mimo",
+	"kimi"
+]);
+/**
+* The run's native capability table. An unknown CLI gets an empty table, which
+* offers every granted DSH tool as before (the documented rollback).
+*/
+function nativeCliCapabilities({ cli, mode, access, mcpServers = [] }) {
+	const classes = tables[cli]?.(mode, access) ?? [];
+	const withheld = tables[cli] && mode === "plan" ? ["file-write"] : [];
+	return {
+		cli,
+		classes: [...new Set(classes)],
+		withheld,
+		mcpServers: [...new Set(mcpServers)],
+		mcpImages: mcpImages.has(cli)
+	};
+}
+const dshClasses = {
+	read: "file-read",
+	write: "file-write",
+	edit: "file-write",
+	str_replace_editor: "file-write",
+	grep: "search",
+	glob: "search",
+	bash: "shell",
+	pwsh: "shell",
+	working_directory: "shell",
+	terminal_open: "shell",
+	terminal_send: "shell",
+	terminal_read: "shell",
+	terminal_signal: "shell",
+	terminal_list: "shell",
+	terminal_close: "shell",
+	job_list: "shell",
+	job_output: "shell",
+	job_kill: "shell",
+	web_search: "web",
+	web_fetch: "web",
+	read_image: "image-read",
+	skill: "dsh-skill"
+};
+/** A DSH tool's capability class, or undefined for a DSH-only tool. */
+function dshToolClass(name) {
+	return Object.hasOwn(dshClasses, name) ? dshClasses[name] : void 0;
+}
+/**
+* Why this DSH tool is not offered to the CLI, or undefined when it is offered
+* as a fallback. Dispatch/model guards stay in native-harness-tools.ts.
+*/
+function nativeCoverage(name, capabilities) {
+	if (!capabilities) return void 0;
+	const server = capabilities.mcpServers.find((server) => /^[A-Za-z0-9_-]{1,32}$/u.test(server) && name.startsWith(`mcp__${server}__`) && !name.slice(server.length + 7).includes("__"));
+	if (server) return `CLI 原生已配置同名 MCP「${server}」`;
+	const kind = dshToolClass(name);
+	if (kind === "dsh-skill") return "DSH 技能只经 dsh_read_skill 按需读取";
+	if (kind === "image-read" && !capabilities.classes.includes("image-read") && !capabilities.mcpImages) return "该 CLI 的 MCP 不支持图片结果";
+	if (kind && capabilities.withheld.includes(kind)) return "规划模式不提供写入工具";
+	if (kind && capabilities.classes.includes(kind)) return "CLI 原生已具备同类工具";
+}
+const HARNESS_FALLBACK_PREFIX = "备选（DSH）：仅在 CLI 自身工具无法完成时使用。";
+/** Short native-first note listing exactly the offered bridge tools. */
+function nativeFirstGuidance(tools) {
+	if (!tools?.length) return void 0;
+	return [
+		"CLI Worker 说明：优先使用你自己的原生工具与 skill 完成任务。",
+		`DSH 工具桥（dsh_worker_tools）仅在原生工具缺失或失败时作为备选，当前提供：${tools.join("、")}。`,
+		"备选工具的每次执行仍需 DeepSeek Harness 宿主授权。"
+	].join("\n");
+}
+async function json$4(path) {
+	try {
+		return JSON.parse(await readFile(path, "utf8"));
+	} catch {
+		return;
+	}
+}
+/**
+* Codex's config layers, lowest precedence first: CODEX_HOME, then each folder from the
+* nearest project root down to the cwd. Codex 0.162 finds the root by `project_root_markers`
+* (default `.git`); with no root, or `[]`, only the cwd's own layer applies.
+*/
+function codexConfigPaths$1(project, env) {
+	const user = join(env.CODEX_HOME || join(env.HOME || homedir(), ".codex"), "config.toml");
+	let markers = [".git"];
+	try {
+		markers = codexRootMarkers(readFileSync(user, "utf8")) ?? markers;
+	} catch {}
+	const start = resolve(project);
+	let root = start;
+	if (markers.length) for (let directory = start;; directory = dirname(directory)) {
+		if (markers.some((marker) => codexRootMarker(directory, marker))) {
+			root = directory;
+			break;
+		}
+		if (dirname(directory) === directory) break;
+	}
+	const layers = [];
+	for (let directory = start;; directory = dirname(directory)) {
+		layers.unshift(join(directory, ".codex", "config.toml"));
+		if (directory === root) break;
+	}
+	return [.../* @__PURE__ */ new Set([user, ...layers])];
+}
+/** Top-level `project_root_markers` as a one-line string array; anything else keeps the default. */
+function codexRootMarkers(text) {
+	const value = tomlEntries(text).find(({ path }) => path.length === 1 && path[0] === "project_root_markers")?.value;
+	if (!value?.startsWith("[") || !value.endsWith("]")) return void 0;
+	return [...value.matchAll(/"((?:[^"\\]|\\.)*)"|'([^']*)'/gu)].map((match) => match[1] ?? match[2]);
+}
+function codexRootMarker(directory, marker) {
+	const path = join(directory, marker);
+	try {
+		return marker === ".git" && statSync(path).isDirectory() ? existsSync(join(path, "HEAD")) : existsSync(path);
+	} catch {
+		return false;
+	}
+}
+function keyPath(text) {
+	const parts = [];
+	let current = "", quote = "";
+	for (const char of text.trim()) if (quote) if (char === quote) quote = "";
+	else current += char;
+	else if (char === "\"" || char === "'") quote = char;
+	else if (char === ".") {
+		parts.push(current.trim());
+		current = "";
+	} else current += char;
+	return [...parts, current.trim()];
+}
+function code(line) {
+	let quote = "";
+	for (let index = 0; index < line.length; index++) {
+		const char = line[index];
+		if (quote) {
+			if (char === "\\" && quote === "\"") index++;
+			else if (char === quote) quote = "";
+		} else if (char === "\"" || char === "'") quote = char;
+		else if (char === "#") return line.slice(0, index);
+	}
+	return line;
+}
+/**
+* Key/value lines of a TOML file with their full key path. Multi-line string
+* bodies are skipped, so table-looking text inside a value never counts.
+*/
+function tomlEntries(text) {
+	const entries = [];
+	let table = [], multiline = "";
+	for (const raw of text.split(/\r?\n/u)) {
+		if (multiline) {
+			if (raw.includes(multiline)) multiline = "";
+			continue;
+		}
+		const line = code(raw).trim();
+		const header = /^\[(?!\[)(.+)\]$/u.exec(line);
+		if (header) {
+			table = keyPath(header[1]);
+			entries.push({
+				path: table,
+				value: void 0
+			});
+			continue;
+		}
+		const equals = line.indexOf("=");
+		if (equals <= 0) continue;
+		const value = line.slice(equals + 1).trim();
+		entries.push({
+			path: [...table, ...keyPath(line.slice(0, equals))],
+			value
+		});
+		for (const delimiter of ["\"\"\"", "'''"]) if (value.split(delimiter).length === 2) {
+			multiline = delimiter;
+			break;
+		}
+	}
+	return entries;
+}
+/** Enabled `mcp_servers.<name>` across Codex's layers; a later layer's `enabled` wins. */
+async function codexServers(project, env) {
+	const enabled = /* @__PURE__ */ new Map();
+	for (const path of codexConfigPaths$1(project, env)) {
+		let text;
+		try {
+			text = await readFile(path, "utf8");
+		} catch {
+			continue;
+		}
+		for (const { path: key, value } of tomlEntries(text)) {
+			if (key[0] !== "mcp_servers" || !key[1]) continue;
+			if (key.length === 2 && value !== void 0 && !value.startsWith("{")) continue;
+			if (!enabled.has(key[1])) enabled.set(key[1], true);
+			if (key.length === 3 && key[2] === "enabled") enabled.set(key[1], !/^false\b/u.test(value));
+			if (key.length === 2 && value?.startsWith("{") && /\benabled\s*=\s*false\b/u.test(value)) enabled.set(key[1], false);
+		}
+	}
+	return [...enabled].filter(([, on]) => on).map(([name]) => name);
+}
+const record$11 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+const keys$1 = (value) => record$11(value) ? Object.keys(value).filter((name) => !(record$11(value[name]) && (value[name].disabled === true || value[name].enabled === false))) : [];
+const serversIn = async (path) => keys$1((await json$4(path))?.mcpServers);
+function gitRoot(project) {
+	for (let directory = project;; directory = dirname(directory)) {
+		if (existsSync(join(directory, ".git"))) return directory;
+		if (dirname(directory) === directory) return project;
+	}
+}
+/**
+* Names of MCP servers the CLI loads from the user's own native config for this
+* project. Only names are read; values (commands, secrets) are never returned.
+*/
+async function nativeCliMcpServers(cli, project, env = process.env) {
+	const home = env.HOME || homedir();
+	if (cli === "codex") return codexServers(project, env);
+	if (cli === "claude") {
+		const user = await json$4(join(home, ".claude.json")), local = user?.projects?.[project];
+		const list = (value) => Array.isArray(value) ? value.filter((name) => typeof name === "string") : [];
+		const approved = (await serversIn(join(project, ".mcp.json"))).filter((name) => !list(local?.disabledMcpjsonServers).includes(name) && (local?.enableAllProjectMcpServers === true || list(local?.enabledMcpjsonServers).includes(name)));
+		const disabled = list(local?.disabledMcpServers);
+		return [
+			...keys$1(user?.mcpServers),
+			...keys$1(local?.mcpServers),
+			...approved
+		].filter((name) => !disabled.includes(name));
+	}
+	if (cli === "kimi") {
+		const root = env.KIMI_CODE_HOME || join(home, ".kimi-code");
+		return [
+			...await serversIn(join(root, "mcp.json")),
+			...await serversIn(join(gitRoot(project), ".mcp.json")),
+			...await serversIn(join(project, ".kimi-code", "mcp.json"))
+		];
+	}
+	if (cli === "grok") return [
+		...keys$1((await json$4(join(home, ".claude.json")))?.mcpServers),
+		...await serversIn(join(home, ".cursor", "mcp.json")),
+		...await serversIn(join(project, ".mcp.json"))
+	];
+	if (cli === "antigravity") return serversIn(join(home, ".gemini", "config", "mcp_config.json"));
+	return [];
+}
+//#endregion
 //#region lib/types/host/zcode-adapter.js
-const ZCODE_DENIED_TOOLS = [
+const ZCODE_DENIED_TOOLS = ["mcp__node_repl__js"];
+const ZCODE_SUBAGENT_TOOLS = [
 	"Agent",
 	"Task",
-	"Skill",
 	"TaskOutput",
 	"TaskStop",
 	"SendMessage",
-	"ReadSessionContext",
+	"ReadSessionContext"
+];
+const ZCODE_WORKFLOW_TOOLS = [
 	"CreateWorkflow",
 	"AmendWorkflow",
 	"SaveWorkflow",
@@ -5339,8 +8421,7 @@ const ZCODE_DENIED_TOOLS = [
 	"ResumeWorkflowRun",
 	"ResolveWorkflowQuestion",
 	"ListSavedWorkflows",
-	"ListModels",
-	"mcp__node_repl__js"
+	"ListModels"
 ];
 const record$10 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const nonempty$3 = (value) => typeof value === "string" && !!value.trim();
@@ -5390,6 +8471,55 @@ function zcodeEnvironment(executable, state, auth, builtin) {
 		ZCODE_PERSONAL_PROVIDER_CONFIG_FILE: join(state, "personal.json"),
 		ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: builtinPath(executable, builtin),
 		TMPDIR: join(state, "tmp")
+	};
+}
+/** Handed to the bridge only; it removes the variable before starting the CLI. */
+const ZCODE_MEMORY_ENVIRONMENT = "CLIWORKER_ZCODE_NATIVE_MEMORY";
+const zcodeNativeBase = (options) => options.nativeHome ?? process.env.ZCODE_DATA_BASE_DIR?.trim() ?? homedir();
+/** Where the native CLI keeps its storage (ZCODE_STORAGE_DIR, else ~/.zcode). */
+function zcodeNativeStorage(options) {
+	return options.nativeHome !== void 0 ? join(options.nativeHome, ".zcode") : process.env.ZCODE_STORAGE_DIR?.trim() || join(homedir(), ".zcode");
+}
+/** The desktop setting `memoryEnabled`; unset or unreadable counts as off, its default. */
+function zcodeNativeMemory(options) {
+	try {
+		const setting = readZCodeConfig(join(zcodeNativeBase(options), ".zcode/v2/setting.json"), true, true);
+		return record$10(setting) && setting.memoryEnabled === true;
+	} catch {
+		return false;
+	}
+}
+/** Native user config then project configs from the nearest Git root, as ZCode's Hm/gra resolve them.
+* Read only feature switches and exact deny names; never import provider/auth configuration. */
+function zcodeNativeTools(input) {
+	const directories = [resolve(input.project)];
+	while (!existsSync(join(directories[0], ".git"))) {
+		const parent = dirname(directories[0]);
+		if (parent === directories[0]) {
+			directories.splice(0, directories.length, resolve(input.project));
+			break;
+		}
+		directories.unshift(parent);
+	}
+	let permission = {}, features = {};
+	for (const path of [join(input.nativeHome ?? homedir(), ".zcode/cli/config.json"), ...directories.flatMap((dir) => [join(dir, "zcode.json"), join(dir, ".zcode/config.json")])]) {
+		const config = readZCodeConfig(path, true, true);
+		if (!record$10(config)) continue;
+		if (record$10(config.permission)) permission = config.permission;
+		if (record$10(config.features)) features = config.features;
+	}
+	const workflow = zcodeWorkflowMode(readZCodeConfig(join(zcodeNativeBase(input), ".zcode/v2/setting.json"), true, true));
+	const denied = [...ZCODE_DENIED_TOOLS];
+	if (permission.disallowedTools !== void 0) {
+		if (!Array.isArray(permission.disallowedTools) || permission.disallowedTools.some((name) => typeof name !== "string")) throw new Error("ZCode 原生禁用工具设置无效");
+		denied.push(...permission.disallowedTools);
+	}
+	if (features.subagent === false) denied.push(...ZCODE_SUBAGENT_TOOLS);
+	if (features.skill === false) denied.push("Skill");
+	if (workflow === "disabled") denied.push(...ZCODE_WORKFLOW_TOOLS);
+	return {
+		denied: parseZcodeDeniedTools([...new Set(denied)].join(",")),
+		workflow
 	};
 }
 function writePersonalConfig(path, value) {
@@ -5457,6 +8587,16 @@ async function prepareZCode(input) {
 			}
 		}) });
 	}
+	const memory = zcodeNativeMemory(input);
+	const nativeTools = zcodeNativeTools(input);
+	Object.assign(env, {
+		ZCODE_DYNAMIC_WORKFLOW_MODE: nativeTools.workflow,
+		...input.nativeTransport || input.conversationId ? { CLIWORKER_ZCODE_NATIVE_WORKFLOW_MODE: nativeTools.workflow } : {}
+	});
+	const memoryPath = join(env.ZCODE_STORAGE_DIR, "cli", "memories");
+	if (memory) await shareNativeMemory(memoryPath, join(zcodeNativeStorage(input), "cli", "memories"));
+	else await unshareNativeMemory(memoryPath);
+	if (input.nativeTransport) Object.assign(env, { [ZCODE_MEMORY_ENVIRONMENT]: memory ? "1" : "0" });
 	writePersonalConfig(env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE, {
 		...personal,
 		config: {
@@ -5469,11 +8609,11 @@ async function prepareZCode(input) {
 		"--cwd",
 		input.project,
 		"--mode",
-		input.mode === "plan" ? "plan" : "edit",
+		input.mode === "plan" ? "plan" : input.access === "read-only" ? "build" : input.access === "danger-full-access" ? "yolo" : "edit",
 		"--output-format",
 		"stream-json",
 		"--disallowedTools",
-		ZCODE_DENIED_TOOLS.join(","),
+		nativeTools.denied.join(","),
 		...input.conversationId ? ["--resume", input.conversationId] : [],
 		"--prompt",
 		`任务：\n${input.prompt}`
@@ -5628,7 +8768,7 @@ function readZCodeConfig(path, optional, personal = false) {
 }
 function personalPaths(authDirectory, options = {}) {
 	const explicit = options.personalConfig ?? (options.nativeHome === void 0 ? process.env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE?.trim() : void 0);
-	const nativeBase = options.nativeHome ?? process.env.ZCODE_DATA_BASE_DIR?.trim() ?? homedir();
+	const nativeBase = zcodeNativeBase(options);
 	const paths = /* @__PURE__ */ new Map([[resolve(explicit || join(nativeBase, ".zcode/v2/provider_config.json")), !explicit]]);
 	const pluginPath = resolve(join(authDirectory ?? zcodeAuthDirectory(), ".zcode/v2/provider_config.json"));
 	if (!paths.has(pluginPath)) paths.set(pluginPath, true);
@@ -6041,7 +9181,7 @@ var ZCodeProtocol = class {
 					if (p.result?.success !== true) this.failed = true;
 				} else this.open.add(p.toolCallId);
 				if (nonempty$3(p.toolName)) this.toolNames.set(p.toolCallId, p.toolName);
-				this.emit({
+				this.responses.tool({
 					kind: "tool",
 					step: this.step(p.toolCallId),
 					text: this.toolNames.get(p.toolCallId) ?? "工具",
@@ -6089,6 +9229,30 @@ var ZCodeProtocol = class {
 	}
 };
 //#endregion
+//#region lib/types/host/catalog-notice.js
+const notices = /* @__PURE__ */ new WeakMap();
+/** Attach a settings notice to a discovered model list. */
+function withCatalogNotice(models, notice) {
+	notices.set(models, notice);
+	return models;
+}
+function catalogNoticeOf(models) {
+	return notices.get(models);
+}
+/** The provider rejected every credential that could serve this CLI. */
+const catalogAuthenticationFailed = (label) => `${label} 账号认证失败，请在账号窗口重新登录或退出失效凭据后刷新`;
+/** Models remain from other credentials; some were rejected by the provider. */
+const catalogSkippedCredentials = (count) => `当前账号可用模型；已跳过 ${count} 条认证失败的凭据，可在账号窗口退出`;
+/**
+* Apply the shared rule to a list built while `rejected` credentials were skipped.
+* An empty list keeps the reason as its notice; the caller reports it after its
+* own cleanup instead of the generic empty-catalog message.
+*/
+function explainAuthenticationScope(models, rejected, label) {
+	if (rejected <= 0) return models;
+	return withCatalogNotice(models, models.length ? catalogSkippedCredentials(rejected) : catalogAuthenticationFailed(label));
+}
+//#endregion
 //#region lib/types/host/pi-omp-control.mjs
 const LIMIT$1 = 45e4;
 const MAX_REQUESTS = 200;
@@ -6097,7 +9261,7 @@ const hash$2 = (value) => createHash("sha256").update(value).digest("hex");
 const valid = (id, message) => typeof id === "string" && id.length > 0 && id.length <= 200 && typeof message === "string" && message.trim().length > 0 && message.length <= 1e5;
 const unavailable$2 = () => /* @__PURE__ */ new Error("原生引导通路已关闭或尚未准备，请保留消息后重试");
 const aborted = () => /* @__PURE__ */ new Error("引导消息确认已取消，请核查当前对话后再重试");
-const rejected = (message) => Object.assign(new Error(message), { code: "STEER_REJECTED" });
+const rejected$1 = (message) => Object.assign(new Error(message), { code: "STEER_REJECTED" });
 const nativeControlPathKey = (path, platform = process.platform) => platform === "win32" ? win32.toNamespacedPath(path).toLowerCase() : path;
 const pathKey$1 = nativeControlPathKey;
 async function pinDirectory(directory) {
@@ -6180,7 +9344,7 @@ async function createControl(directory, options = {}, commandType = "steer") {
 				if (receipt) {
 					if (receipt.nonce !== nonce || receipt.id !== requestId || receipt.attempt !== attempt || receipt.digest !== digest || typeof receipt.success !== "boolean") throw new Error("Invalid native guidance receipt");
 					if (!receipt.success) {
-						if (receipt.error === "closed" || receipt.error === "rejected") throw rejected(receipt.error === "closed" ? unavailable$2().message : "CLI 未接受这条引导消息，请保留消息后重试");
+						if (receipt.error === "closed" || receipt.error === "rejected") throw rejected$1(receipt.error === "closed" ? unavailable$2().message : "CLI 未接受这条引导消息，请保留消息后重试");
 						throw new Error("引导消息接收结果未确认，请核查当前对话后再重试");
 					}
 					return;
@@ -6220,6 +9384,8 @@ async function createNativeStopControl(directory, options = {}) {
 		close: control.close
 	};
 }
+/** Host -> runner authorization decisions; one mailbox per prepared launch. */
+const createNativeApprovalControl = (directory, options = {}) => createControl(directory, options, "approval");
 //#endregion
 //#region lib/types/host/native-harness-mcp.mjs
 const HARNESS_CONNECTION_ENV = "CLIWORKER_HARNESS_TOOLS";
@@ -6239,39 +9405,47 @@ function readNativeHarnessConnection(env = process.env) {
 function createNativeHarnessClient(connection, { maximum = 1024 * 1024 } = {}) {
 	const clientId = randomUUID();
 	async function request(id, method, params = {}, signal) {
-		const response = await fetch(connection.url, {
-			method: "POST",
-			redirect: "error",
-			headers: {
-				"Content-Type": "application/json",
-				Authorization: `Bearer ${connection.token}`
-			},
-			body: JSON.stringify({
-				binding: connection.binding,
-				clientId,
-				id,
-				method,
-				params
-			}),
-			signal
+		signal?.throwIfAborted();
+		const body = JSON.stringify({
+			binding: connection.binding,
+			clientId,
+			id,
+			method,
+			params
 		});
-		const reader = response.body?.getReader();
-		if (!reader) throw new Error("工具桥没有响应；未自动重试");
-		let length = 0;
-		const parts = [];
-		try {
-			for (;;) {
-				const part = await reader.read();
-				if (part.done) break;
-				length += part.value.byteLength;
-				if (length > maximum) throw new Error("工具桥响应超过限制；未自动重试");
-				parts.push(part.value);
-			}
-		} finally {
-			await reader.cancel().catch(() => {});
-		}
-		const result = JSON.parse(Buffer.concat(parts).toString("utf8"));
-		if (!response.ok || result.error) throw Object.assign(new Error(typeof result.error === "string" ? result.error : "工具桥拒绝请求；未自动重试"), { nativeHarnessPublicError: true });
+		const response = await new Promise((resolve, reject) => {
+			const call = request$1(connection.url, {
+				method: "POST",
+				signal,
+				headers: {
+					"Content-Type": "application/json",
+					"Content-Length": Buffer.byteLength(body),
+					Authorization: `Bearer ${connection.token}`
+				}
+			}, (reply) => {
+				let length = 0;
+				const parts = [];
+				reply.on("data", (part) => {
+					length += part.byteLength;
+					if (length > maximum) {
+						reply.destroy();
+						reject(/* @__PURE__ */ new Error("工具桥响应超过限制；未自动重试"));
+					} else parts.push(part);
+				});
+				reply.on("end", () => resolve({
+					status: reply.statusCode ?? 0,
+					text: Buffer.concat(parts).toString("utf8")
+				}));
+				reply.on("close", () => {
+					if (!reply.complete) reject(/* @__PURE__ */ new Error("工具桥没有响应；未自动重试"));
+				});
+				reply.on("error", reject);
+			});
+			call.on("error", reject);
+			call.end(body);
+		});
+		const result = JSON.parse(response.text);
+		if (response.status !== 200 || result.error) throw Object.assign(new Error(typeof result.error === "string" ? result.error : "工具桥拒绝请求；未自动重试"), { nativeHarnessPublicError: true });
 		return result.result;
 	}
 	return {
@@ -6320,7 +9494,7 @@ function runNativeHarnessMcp({ input = process.stdin, output = process.stdout, e
 					},
 					serverInfo: {
 						name: "dsh-worker-tools",
-						version: "0.8.2"
+						version: "0.8.7"
 					}
 				});
 				return;
@@ -6412,6 +9586,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 //#endregion
 //#region lib/types/host/native-harness-injection.mjs
 const serverName = "dsh_worker_tools";
+const HARNESS_MCP_SERVER = serverName;
 const nativeHarnessExecutionReady = (cli) => [
 	"codex",
 	"claude",
@@ -6424,7 +9599,20 @@ const nativeHarnessExecutionReady = (cli) => [
 	"qodercn",
 	"antigravity"
 ].includes(cli);
+/** Only provider-reported, fully namespaced bridge tools may cross ACP approval.
+* Titles and rawInput are presentation/model-controlled data, never authority.
+* The Host still performs its own real approval for every tool execution.
+*/
+/** The run's ready bridge connection for this CLI, or undefined. */
+function nativeHarnessReadyConnection(config, env = process.env) {
+	const connection = config.harnessTools ?? readNativeHarnessConnection({
+		...env,
+		...config.env
+	});
+	return connection?.executionReady && connection.binding.cli === config.cli ? connection : void 0;
+}
 const reasons = {
+	zcode: "ZCode 工具桥执行尚未核验，未注入 DSH 工具目录",
 	hermes: "Hermes 当前安全隔离运行尚无已验证的临时 DSH 工具注入入口",
 	omp: "OMP 当前安装版在 --no-extensions 隔离模式下忽略显式扩展，尚无安全工具注入入口"
 };
@@ -6462,7 +9650,7 @@ function nativeHarnessToolCapability(cli, connection) {
 		...connection.executionReady === true ? {} : { reason: "临时工具传输可配置，当前原生授权尚未核验" }
 	};
 }
-function buildNativeHarnessInjection({ cli, argv, env = {}, connection, nodeExecutable = process.execPath, mcpEntryPath = join(dirname(fileURLToPath(import.meta.url)), "native-harness-mcp.mjs") }) {
+function buildNativeHarnessInjection({ cli, argv, env = {}, connection, toolTimeoutMs, nodeExecutable = process.execPath, mcpEntryPath = join(dirname(fileURLToPath(import.meta.url)), "native-harness-mcp.mjs") }) {
 	const capability = nativeHarnessToolCapability(cli, connection);
 	if (!connection || !capability.transport) return {
 		...capability,
@@ -6476,7 +9664,7 @@ function buildNativeHarnessInjection({ cli, argv, env = {}, connection, nodeExec
 		[HARNESS_CONNECTION_ENV]: JSON.stringify(connection),
 		ELECTRON_RUN_AS_NODE: "1"
 	};
-	if (cli === "pi" || cli === "antigravity") return {
+	if (cli === "pi") return {
 		...capability,
 		argv: [...argv],
 		env: privateEnv
@@ -6496,6 +9684,9 @@ function buildNativeHarnessInjection({ cli, argv, env = {}, connection, nodeExec
 			value: "1"
 		}]
 	}];
+	const note = capability.ready ? nativeFirstGuidance(connection.tools) : void 0;
+	const guidance = (flag) => note ? [flag, note] : [];
+	const timeout = toolTimeoutMs > 0 ? ["-c", `mcp_servers.${serverName}.tool_timeout_sec=${Math.ceil(toolTimeoutMs / 1e3)}`] : [];
 	if (cli === "codex") return {
 		...capability,
 		argv: [
@@ -6506,6 +9697,7 @@ function buildNativeHarnessInjection({ cli, argv, env = {}, connection, nodeExec
 			`mcp_servers.${serverName}.args=${JSON.stringify([mcpEntryPath])}`,
 			"-c",
 			`mcp_servers.${serverName}.env_vars=${JSON.stringify([HARNESS_CONNECTION_ENV, "ELECTRON_RUN_AS_NODE"])}`,
+			...timeout,
 			...capability.ready ? ["-c", `mcp_servers.${serverName}.default_tools_approval_mode="approve"`] : []
 		],
 		env: privateEnv
@@ -6526,6 +9718,7 @@ function buildNativeHarnessInjection({ cli, argv, env = {}, connection, nodeExec
 					}
 				} } }),
 				...capability.ready ? ["--allowedTools", `mcp__${serverName}__*`] : [],
+				...guidance("--append-system-prompt"),
 				...argv.slice(index)
 			],
 			env: privateEnv
@@ -6624,6 +9817,7 @@ async function contextFor(input) {
 		const requestPath = join(requestDirectory, "request.json");
 		let control;
 		let stopControl;
+		let approvalControl;
 		const temporary = join(requestDirectory, `.request-${randomUUID()}.tmp`);
 		const injection = buildNativeHarnessInjection({
 			cli: input.cli,
@@ -6635,6 +9829,7 @@ async function contextFor(input) {
 			if (!("discover" in input) && !extra.metadataPhase) {
 				control = await createPiOmpControl(join(requestDirectory, "control"));
 				stopControl = await createNativeStopControl(join(requestDirectory, "stop"));
+				approvalControl = await createNativeApprovalControl(join(requestDirectory, "approval"));
 			}
 			await writeFile(temporary, JSON.stringify({
 				...input,
@@ -6644,6 +9839,10 @@ async function contextFor(input) {
 				...stopControl ? {
 					stopNonce: stopControl.nonce,
 					stopDirectory: join(requestDirectory, "stop")
+				} : {},
+				...approvalControl ? {
+					approvalNonce: approvalControl.nonce,
+					approvalDirectory: join(requestDirectory, "approval")
 				} : {},
 				stateDirectory: isolated,
 				nativeRoot: native.directory,
@@ -6661,6 +9860,7 @@ async function contextFor(input) {
 		} catch (error) {
 			await control?.close();
 			await stopControl?.close();
+			await approvalControl?.close();
 			await rm(requestDirectory, {
 				recursive: true,
 				force: true
@@ -6669,6 +9869,7 @@ async function contextFor(input) {
 		} finally {
 			await rm(temporary, { force: true });
 		}
+		const activeApproval = approvalControl;
 		return {
 			argv: [
 				process.execPath,
@@ -6679,6 +9880,7 @@ async function contextFor(input) {
 			leaseDirectory: native.leaseDirectory,
 			...control ? { steer: control.steer } : {},
 			...stopControl ? { stop: stopControl.stop } : {},
+			...activeApproval ? { answerApproval: (id, decision) => activeApproval.steer(JSON.stringify(decision), id) } : {},
 			activate: async () => {
 				if (native.leaseDirectory) {
 					await acquireOwnAccountLease(native.leaseDirectory, leaseNonce);
@@ -6689,6 +9891,7 @@ async function contextFor(input) {
 			cleanup: async () => {
 				await control?.close();
 				await stopControl?.close();
+				await approvalControl?.close();
 				if (native.leaseDirectory) await finishPiOmpRefresh(native.leaseDirectory, leaseNonce, input.executable, native.receipt);
 				if (control) await rm(requestDirectory, {
 					recursive: true,
@@ -6712,11 +9915,12 @@ async function confirmedCatalog(context, capture) {
 				cleanupUnconfirmed = true;
 				throw error;
 			}
+			if (ownAccountBusy(error)) throw error;
 			throw new Error("无法读取 Pi/OMP 原生模型目录，请检查本机配置");
 		} finally {
 			if (!cleanupUnconfirmed) await launch.cleanup();
 		}
-		if (phase === "account-scope") return parseCatalog(raw);
+		if (phase === "account-scope") return parseAccountScope(raw);
 		if (!raw || typeof raw !== "object" || raw.phase !== phase || !Number.isSafeInteger(raw.count) || raw.count < 0) throw new Error("Invalid Pi/OMP candidate phase result");
 	}
 	throw new Error("Missing Pi/OMP account scope");
@@ -6729,18 +9933,32 @@ async function preparePiOmp(input, capture) {
 	if (!["plan", "accept-edits"].includes(input.mode)) throw new Error("Unsupported task mode");
 	if (!input.prompt.trim()) throw new Error("Prompt must not be empty");
 	const context = await contextFor(input);
-	const catalog = capture ? await confirmedCatalog(context, capture) : void 0;
+	const catalog = capture ? (await confirmedCatalog(context, capture)).models : void 0;
 	return context.request(catalog ? { confirmedCatalog: catalog } : {});
 }
 async function discoverPiOmp(cli, executable, capture, stateDirectory, options = {}) {
 	if (cli !== "pi" && cli !== "omp") throw new Error("Unsupported Pi/OMP CLI");
-	return confirmedCatalog(await contextFor({
+	const { models, authenticationDenied } = await confirmedCatalog(await contextFor({
 		cli,
 		executable,
 		stateDirectory,
 		discover: true,
 		...options
 	}), capture);
+	return explainAuthenticationScope(models, authenticationDenied, CLI_LABELS[cli]);
+}
+/** Current bridges send counts with the models; older fixtures send the bare array. */
+function parseAccountScope(raw) {
+	if (Array.isArray(raw)) return {
+		models: parseCatalog(raw),
+		authenticationDenied: 0
+	};
+	const scope = raw;
+	if (!scope || typeof scope !== "object" || scope.phase !== "account-scope" || !Number.isSafeInteger(scope.authenticationDenied) || scope.authenticationDenied < 0) throw new Error("Invalid Pi/OMP account scope result");
+	return {
+		models: parseCatalog(scope.models),
+		authenticationDenied: scope.authenticationDenied
+	};
 }
 function parseCatalog(raw) {
 	if (!Array.isArray(raw)) throw new Error("Invalid Pi/OMP model catalog");
@@ -6758,11 +9976,11 @@ function parseCatalog(raw) {
 }
 //#endregion
 //#region lib/types/host/http-rpc-response.mjs
-const object$15 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
-const count$14 = (value) => Number.isSafeInteger(value) && value >= 0;
+const object$14 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+const count$9 = (value) => Number.isSafeInteger(value) && value >= 0;
 /** MiMo's installed Session.getUsage and OpenCode 1.19.0 split reasoning out of output. */
 function sessionHttpResponseUsage(tokens) {
-	if (!object$15(tokens) || !object$15(tokens.cache)) return;
+	if (!object$14(tokens) || !object$14(tokens.cache)) return;
 	const { input, output, reasoning, cache } = tokens;
 	if (![
 		input,
@@ -6770,10 +9988,10 @@ function sessionHttpResponseUsage(tokens) {
 		reasoning,
 		cache.read,
 		cache.write
-	].every(count$14)) return;
+	].every(count$9)) return;
 	const outputTokens = output + reasoning;
 	const totalTokens = input + outputTokens + cache.read + cache.write;
-	if (!count$14(outputTokens) || !count$14(totalTokens) || tokens.total !== void 0 && tokens.total !== totalTokens) return;
+	if (!count$9(outputTokens) || !count$9(totalTokens) || tokens.total !== void 0 && tokens.total !== totalTokens) return;
 	return {
 		inputTokens: input,
 		outputTokens,
@@ -6837,6 +10055,11 @@ var NativeBlockResponses = class {
 		const event = response.lastText ?? response.last;
 		this.output({
 			...event,
+			delta: void 0,
+			...event.toolCall ? { toolCall: {
+				...event.toolCall,
+				output: void 0
+			} } : {},
 			...event.kind === "assistant" ? { text: "" } : {},
 			response: {
 				...event.response,
@@ -6851,7 +10074,7 @@ var NativeBlockResponses = class {
 };
 //#endregion
 //#region lib/types/host/opencode-adapter.js
-const object$14 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+const object$13 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
 const modelID = (id) => /^[A-Za-z0-9_.:-]+\/[^\s\x00-\x1f]+$/.test(id);
 const sessionID = (id) => /^ses_[A-Za-z0-9]+$/.test(id);
 function openCodeAuthDirectory(stateDirectory) {
@@ -6865,7 +10088,8 @@ async function openCodeEnvironment(stateDirectory, config, authDirectory = join(
 		"data",
 		"cache",
 		"state",
-		"tmp"
+		"tmp",
+		"home"
 	].map((name) => join(stateDirectory, name));
 	for (const path of [
 		stateDirectory,
@@ -6893,13 +10117,14 @@ async function openCodeEnvironment(stateDirectory, config, authDirectory = join(
 	} finally {
 		await rm(temporary, { force: true });
 	}
-	const nativeModels = modelsPath ?? join(homedir(), ".cache", "opencode", "models.json");
+	const nativeModels = openCodeNativePaths({ modelsPath }).models;
 	return {
 		XDG_CONFIG_HOME: paths[0],
 		XDG_DATA_HOME: authDirectory,
 		XDG_CACHE_HOME: paths[2],
 		XDG_STATE_HOME: paths[3],
 		TMPDIR: paths[4],
+		OPENCODE_TEST_HOME: paths[5],
 		OPENCODE_DB: join(stateDirectory, "data", "opencode.db"),
 		OPENCODE_CONFIG: configFile,
 		OPENCODE_CONFIG_DIR: paths[0],
@@ -6957,9 +10182,10 @@ async function prepareOpenCode(input) {
 			edit: mode === "plan" ? "deny" : "allow",
 			bash: mode === "plan" ? "deny" : "ask",
 			task: "deny",
-			skill: "deny",
+			skill: "allow",
 			question: "deny"
-		}
+		},
+		skills: { paths: nativeSkillPaths("opencode", { project }) }
 	}, snapshot, false, profile?.modelsPath);
 	return {
 		argv: [
@@ -7003,13 +10229,13 @@ function parseOpenCodeRecords(output) {
 		} catch {
 			continue;
 		}
-		if (!object$14(model) || typeof model.id !== "string" || typeof model.providerID !== "string" || `${model.providerID}/${model.id}` !== id) throw new Error("OpenCode model identity does not match its catalogue entry");
+		if (!object$13(model) || typeof model.id !== "string" || typeof model.providerID !== "string" || `${model.providerID}/${model.id}` !== id) throw new Error("OpenCode model identity does not match its catalogue entry");
 		if (ids.has(id)) {
 			id = "";
 			pending = "";
 			continue;
 		}
-		if (model.variants !== void 0 && !object$14(model.variants)) throw new Error("Invalid OpenCode model variants");
+		if (model.variants !== void 0 && !object$13(model.variants)) throw new Error("Invalid OpenCode model variants");
 		ids.add(id);
 		models.push({
 			native: model,
@@ -7026,16 +10252,16 @@ function parseOpenCodeRecords(output) {
 	return models;
 }
 function configuredCost(value) {
-	if (!object$14(value)) return "unknown";
+	if (!object$13(value)) return "unknown";
 	const cost = value.cost ?? value.pricing;
-	if (object$14(cost)) {
+	if (object$13(cost)) {
 		const number = (rate) => typeof rate === "number" ? rate : typeof rate === "string" && /^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(rate) ? Number(rate) : NaN;
 		const input = number(cost.input), output = number(cost.output);
 		const additional = Object.entries(cost).filter(([key]) => ![
 			"input",
 			"output",
 			"free"
-		].includes(key)).flatMap(([, rate]) => object$14(rate) ? Object.values(rate).map(number) : [number(rate)]);
+		].includes(key)).flatMap(([, rate]) => object$13(rate) ? Object.values(rate).map(number) : [number(rate)]);
 		if (input > 0 || output > 0 || additional.some((rate) => rate > 0)) return "paid";
 		if (!Number.isFinite(input) || !Number.isFinite(output) || input < 0 || output < 0 || additional.some((rate) => !Number.isFinite(rate) || rate < 0)) return "unknown";
 		return "free";
@@ -7074,7 +10300,7 @@ async function discoverOpenCode(executable, capture, stateDirectory, authDirecto
 			oauth ? "oauth-account" : baseUrl,
 			oauth ? "" : apiType
 		]);
-		const authHeader = (headers) => object$14(headers) && Object.keys(headers).some((name) => /authorization|api[-_]?key|token|cookie|openai-organization|openai-project/i.test(name));
+		const authHeader = (headers) => object$13(headers) && Object.keys(headers).some((name) => /authorization|api[-_]?key|token|cookie|openai-organization|openai-project/i.test(name));
 		return {
 			provider,
 			baseUrl,
@@ -7097,7 +10323,7 @@ async function discoverOpenCode(executable, capture, stateDirectory, authDirecto
 	const scopes = /* @__PURE__ */ new Map();
 	await Promise.all([...groups.values()].map(async ({ route, entries }) => {
 		const { provider, baseUrl, apiType, key } = route, auth = profile.auth[provider], config = profile.providers[provider] ?? {};
-		const explicit = entries.filter(({ native }) => object$14(config.models?.[native.id]) || config.whitelist?.includes(native.id)).map(({ native }) => native.api?.id ?? native.id);
+		const explicit = entries.filter(({ native }) => object$13(config.models?.[native.id]) || config.whitelist?.includes(native.id)).map(({ native }) => native.api?.id ?? native.id);
 		const scope = await probeAccountModels({
 			provider,
 			credential: auth.type === "oauth" ? {
@@ -7151,7 +10377,8 @@ async function discoverOpenCode(executable, capture, stateDirectory, authDirecto
 			cost
 		});
 	}
-	return models.sort((a, b) => Number(b.cost === "free") - Number(a.cost === "free") || a.id.localeCompare(b.id));
+	const rejected = [...scopes.values()].filter((scope) => scope.state === "denied" && scope.denialReason === "authentication").length;
+	return explainAuthenticationScope(models.sort((a, b) => Number(b.cost === "free") - Number(a.cost === "free") || a.id.localeCompare(b.id)), rejected, "OpenCode");
 }
 /** Native OpenCode JSONL; success needs clean EOF after stop, identity and no failed tool. */
 var OpenCodeProtocol = class {
@@ -7233,9 +10460,9 @@ var OpenCodeProtocol = class {
 		} catch {
 			throw new Error("Invalid OpenCode JSONL event");
 		}
-		if (!object$14(event) || typeof event.type !== "string") throw new Error("Invalid OpenCode event envelope");
+		if (!object$13(event) || typeof event.type !== "string") throw new Error("Invalid OpenCode event envelope");
 		this.id(event.sessionID);
-		const part = object$14(event.part) ? event.part : void 0;
+		const part = object$13(event.part) ? event.part : void 0;
 		if (part) this.id(part.sessionID);
 		if (this.stopped && event.type !== "error") throw new Error("Unexpected OpenCode event after final stop");
 		if (event.type === "step_start") {
@@ -7267,7 +10494,7 @@ var OpenCodeProtocol = class {
 				state: "COMPLETED"
 			});
 		} else if (event.type === "tool_use") {
-			if (!part || typeof part.tool !== "string" || !object$14(part.state)) throw new Error("Invalid OpenCode tool event");
+			if (!part || typeof part.tool !== "string" || !object$13(part.state)) throw new Error("Invalid OpenCode tool event");
 			const id = part.callID ?? part.id, state = part.state.status;
 			if (typeof id !== "string" || ![
 				"pending",
@@ -7384,7 +10611,7 @@ function hermesUnsuppressedEnvironment(auth, env, provider) {
 }
 //#endregion
 //#region lib/types/host/hermes-nous.js
-const object$13 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+const object$12 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const text$9 = (value) => typeof value === "string" && !!value.trim() && value.length <= 32768 && !/[\x00-\x20\x7f]/.test(value);
 const NOUS_PORTAL = "https://portal.nousresearch.com";
 const NOUS_INFERENCE = "https://inference-api.nousresearch.com/v1";
@@ -7404,7 +10631,7 @@ function claims$1(token) {
 	const bytes = Buffer.from(token.split(".")[1], "base64url");
 	try {
 		const value = JSON.parse(bytes.toString("utf8"));
-		return object$13(value) ? value : {};
+		return object$12(value) ? value : {};
 	} catch {
 		return {};
 	} finally {
@@ -7426,7 +10653,7 @@ function unavailable$1(row) {
 * No refresh-only, guest, fallback store or different pooled principal is promoted. */
 function projectHermesNousSource(auth, minTtlSeconds = 0, options = {}) {
 	const state = auth?.providers?.nous;
-	if (!object$13(state) || auth.active_provider !== "nous" || state.auth_method === "anonymous" || state.account_tier === "anonymous" || state.last_auth_error?.relogin_required === true && !state.access_token && !state.refresh_token || unavailable$1(state)) invalid();
+	if (!object$12(state) || !options.allowInactive && auth.active_provider !== "nous" || state.auth_method === "anonymous" || state.account_tier === "anonymous" || state.last_auth_error?.relogin_required === true && !state.access_token && !state.refresh_token || unavailable$1(state)) invalid();
 	const access = state.access_token, agentKey = state.agent_key;
 	const token = claims$1(agentKey);
 	if (!text$9(access) || !text$9(agentKey) || access !== agentKey || token.account_tier === "anonymous" || !text$9(token.sub) || !text$9(token.org_id) || !text$9(token.iss) || typeof token.exp !== "number" || !Number.isFinite(token.exp) || ![
@@ -7437,7 +10664,7 @@ function projectHermesNousSource(auth, minTtlSeconds = 0, options = {}) {
 	if (!options.allowExpired && token.exp * 1e3 <= Date.now() + minTtlSeconds * 1e3) throw new HermesNousError("Nous 登录即将过期或已过期，请在 Hermes 登录设置中重新登录");
 	if (!canonical$2(state.portal_base_url, "https://portal.nousresearch.com") || !canonical$2(state.inference_base_url, "https://inference-api.nousresearch.com/v1")) throw new HermesNousError("Nous 当前路由暂不支持账号模型查询");
 	const pool = auth.credential_pool?.nous ?? [];
-	if (!Array.isArray(pool) || pool.length > 8 || pool.some((row) => !object$13(row) || row.auth_type !== "oauth" || !["device_code", "manual:device_code"].includes(row.source) || row.access_token !== access || row.agent_key !== agentKey || unavailable$1(row) || row.portal_base_url && !canonical$2(row.portal_base_url, "https://portal.nousresearch.com") || row.inference_base_url && !canonical$2(row.inference_base_url, "https://inference-api.nousresearch.com/v1") || row.base_url && !canonical$2(row.base_url, "https://inference-api.nousresearch.com/v1"))) invalid();
+	if (!Array.isArray(pool) || pool.length > 8 || pool.some((row) => !object$12(row) || row.auth_type !== "oauth" || !["device_code", "manual:device_code"].includes(row.source) || row.access_token !== access || row.agent_key !== agentKey || unavailable$1(row) || row.portal_base_url && !canonical$2(row.portal_base_url, "https://portal.nousresearch.com") || row.inference_base_url && !canonical$2(row.inference_base_url, "https://inference-api.nousresearch.com/v1") || row.base_url && !canonical$2(row.base_url, "https://inference-api.nousresearch.com/v1"))) invalid();
 	return {
 		access,
 		agentKey,
@@ -7455,7 +10682,7 @@ function projectHermesNousSource(auth, minTtlSeconds = 0, options = {}) {
 			inference: NOUS_INFERENCE
 		},
 		...typeof token.paid_access === "boolean" ? { paidAccess: token.paid_access } : {},
-		modelCooldowns: pool.map((row) => object$13(row.model_cooldowns) ? row.model_cooldowns : {})
+		modelCooldowns: pool.map((row) => object$12(row.model_cooldowns) ? row.model_cooldowns : {})
 	};
 }
 function hermesNousMinimumTtl(env) {
@@ -7470,7 +10697,8 @@ function hermesNousMinimumTtl(env) {
 function selectHermesNousSource(material, options = {}) {
 	const { config, auth, env } = material;
 	const cfg = config.model;
-	if (!object$13(cfg) || cfg.provider !== "nous" || config.providers?.nous?.enabled === false) invalid();
+	if (!object$12(cfg) || cfg.provider !== "nous" || config.providers?.nous?.enabled === false) invalid();
+	if (!text$9(auth.providers?.nous?.access_token) || !text$9(auth.providers?.nous?.agent_key)) throw new HermesNousError("Nous 账号尚未登录，请在 Hermes 登录设置中登录");
 	if (!Array.isArray(auth.credential_pool?.nous) || !auth.credential_pool.nous.length) throw new HermesNousError("Nous 登录已保存，请在 Hermes 登录设置中完成原生账号初始化");
 	if (cfg.extra_headers && Object.keys(cfg.extra_headers).length || cfg.api_key || [env.NOUS_API_KEY, env.CUSTOM_API_KEY].some(Boolean) || Object.keys(env).some((key) => /^NOUS_API_KEY_\d+$/.test(key))) throw new HermesNousError("Nous 含额外认证配置，请在 Hermes 登录设置中确认当前账号");
 	if ([
@@ -7535,7 +10763,7 @@ function chatCapable(row) {
 	].some(tagsGeneration) && !(Array.isArray(outputs) && outputs.some((x) => ["image", "video"].includes(x)) && !outputs.some((x) => ["text", "chat"].includes(x))) && !(Array.isArray(row.supported_parameters) && !row.supported_parameters.includes("tools"));
 }
 function cost(row) {
-	if (!object$13(row.pricing)) return "unknown";
+	if (!object$12(row.pricing)) return "unknown";
 	const numeric = (value) => typeof value === "number" ? value : typeof value === "string" && /^(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(value) ? Number(value) : NaN;
 	const prompt = numeric(row.pricing.prompt), completion = numeric(row.pricing.completion);
 	if (![prompt, completion].every((n) => Number.isFinite(n) && n >= 0)) return "unknown";
@@ -7572,7 +10800,7 @@ async function get(url, token, options) {
 	const chunks = [];
 	try {
 		signal.throwIfAborted();
-		const response = await (options.fetch ?? fetch)(url, {
+		const response = await (options.fetch ?? hostFetch)(url, {
 			method: "GET",
 			redirect: "error",
 			signal,
@@ -7583,6 +10811,7 @@ async function get(url, token, options) {
 		});
 		if (!response.ok || response.redirected) {
 			await response.body?.cancel();
+			if (response.status === 403 && (/^text\/html(?:\s*;|\s*$)/i.test(response.headers.get("content-type") ?? "") || response.headers.get("cf-mitigated") === "challenge")) throw new HermesNousError("Nous 元数据请求被网络服务拦截，请检查代理或网络后重试");
 			throw new HermesNousError([401, 403].includes(response.status) ? "Nous 账号权限查询被拒绝，请检查登录状态" : "Nous 模型元数据查询失败，请稍后重试");
 		}
 		reader = response.body?.getReader();
@@ -7627,13 +10856,13 @@ async function fetchHermesNousModels(home, source, options = {}, generation = be
 	const account = await get(`${NOUS_PORTAL}/api/oauth/account`, source.access, options);
 	const access = account?.paid_service_access;
 	const paid = typeof access?.allowed === "boolean" ? access.allowed : typeof access?.paid_access === "boolean" ? access.paid_access : void 0;
-	if (!object$13(account) || !object$13(access) || paid === void 0 || (account.organisation?.id ?? access.organisation_id) !== source.principal.organization || source.email && account.user?.email && account.user.email !== source.email || account.user?.privy_did && account.user.privy_did !== source.principal.subject || account.account_tier === "anonymous" || account.authenticated === false || account.error) throw new HermesNousError("Nous 账号权限格式无法确认，请刷新登录后重试");
+	if (!object$12(account) || !object$12(access) || paid === void 0 || (account.organisation?.id ?? access.organisation_id) !== source.principal.organization || source.email && account.user?.email && account.user.email !== source.email || account.user?.privy_did && account.user.privy_did !== source.principal.subject || account.account_tier === "anonymous" || account.authenticated === false || account.error) throw new HermesNousError("Nous 账号权限格式无法确认，请刷新登录后重试");
 	const data = await get(`${NOUS_INFERENCE}/models`, source.agentKey, options);
-	if (!object$13(data) || !Array.isArray(data.data) || data.data.length > 1e4 || data.error || data.authenticated === false) throw new HermesNousError("Nous 模型列表格式无法确认");
+	if (!object$12(data) || !Array.isArray(data.data) || data.data.length > 1e4 || data.error || data.authenticated === false) throw new HermesNousError("Nous 模型列表格式无法确认");
 	const cap = /* @__PURE__ */ new Map(), ids = /* @__PURE__ */ new Set();
 	const models = [];
 	for (const row of data.data) {
-		if (!object$13(row) || typeof row.id !== "string" || !/^[A-Za-z0-9_./:+-]{1,256}$/.test(row.id) || ids.has(row.id) || row.id.includes(source.agentKey) || row.allowed === false || row.available === false || row.enabled === false || row.disabled === true || row.entitled === false || row.upgrade_required === true || !chatCapable(row) || source.modelCooldowns.some((cooldowns) => typeof cooldowns[row.id] === "number" && cooldowns[row.id] > Date.now() / 1e3)) continue;
+		if (!object$12(row) || typeof row.id !== "string" || !/^[A-Za-z0-9_./:+-]{1,256}$/.test(row.id) || ids.has(row.id) || row.id.includes(source.agentKey) || row.allowed === false || row.available === false || row.enabled === false || row.disabled === true || row.entitled === false || row.upgrade_required === true || !chatCapable(row) || source.modelCooldowns.some((cooldowns) => typeof cooldowns[row.id] === "number" && cooldowns[row.id] > Date.now() / 1e3)) continue;
 		const price = cost(row);
 		if (!paid && price !== "free") continue;
 		ids.add(row.id);
@@ -7659,13 +10888,27 @@ async function fetchHermesNousModels(home, source, options = {}, generation = be
 }
 //#endregion
 //#region lib/types/host/hermes-models.js
-const object$12 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+const object$11 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const literal$1 = (value) => typeof value === "string" && !!value.trim() && !/[\x00-\x1f]/.test(value) && !/^(?:op:\/\/|!|\$|<|your[_ -]|placeholder|changeme)/i.test(value.trim());
 const unknown = () => ({
 	state: "unknown",
 	source: "unknown",
 	models: []
 });
+/** The plugin Hermes home holds a source this plugin cannot use. Fixed text only:
+* the account terminal shows it verbatim (Client startup allow-list). */
+var HermesAccountSourceError = class extends Error {
+	constructor(message) {
+		super(message);
+		this.name = "HermesAccountSourceError";
+	}
+};
+/** Whether auth.json or config.yaml names this provider anywhere (model, auxiliary,
+* MoA and fallback slots alike). Deliberately broad: any matching value counts. */
+function selectsProvider(material, provider) {
+	const named = (value) => typeof value === "string" ? value.trim().toLowerCase() === provider : Array.isArray(value) ? value.some(named) : object$11(value) && Object.values(value).some(named);
+	return named(material.auth.active_provider) || named(material.config);
+}
 /** Native PooledCredential fields; a successful catalog cannot erase a native
 * dead account, active exhaustion window or model-specific entitlement bench. */
 function hermesPoolEntryUnavailable(entry, model) {
@@ -7674,7 +10917,7 @@ function hermesPoolEntryUnavailable(entry, model) {
 		const until = Number(entry.last_error_reset_at);
 		if (!Number.isFinite(until) || until <= 0 || until > Date.now() / 1e3) return true;
 	}
-	const cooldowns = object$12(entry.model_cooldowns) ? entry.model_cooldowns : {};
+	const cooldowns = object$11(entry.model_cooldowns) ? entry.model_cooldowns : {};
 	return (model ? [cooldowns[model]] : Object.values(cooldowns)).some((until) => typeof until === "number" && until > Date.now() / 1e3);
 }
 /** Private source reads only. Do not execute secret commands, expand arbitrary env,
@@ -7721,7 +10964,7 @@ async function readHermesAccountMaterial(home, signal) {
 	const config = parse$1(await read$1(join(home, "config.yaml"), signal) ?? "");
 	const auth = JSON.parse(await read$1(join(home, "auth.json"), signal) ?? "{}");
 	const env = dotenv(await read$1(join(home, ".env"), signal) ?? "");
-	if (!object$12(config) || !object$12(auth)) throw new Error("Hermes 账号配置无效");
+	if (!object$11(config) || !object$11(auth)) throw new Error("Hermes 账号配置无效");
 	return {
 		config,
 		auth,
@@ -7747,6 +10990,7 @@ function ownPoolSource(provider, entry, material) {
 		"minimax-oauth": ["manual:minimax_oauth", "oauth"],
 		nous: ["manual:device_code", "device_code"]
 	}[provider]?.includes(source)) return true;
+	if (provider === "copilot" && source === "gh_cli" && entry.auth_type === "api_key") return !selectsProvider(material, provider);
 	return provider === "openrouter" && entry.auth_type === "api_key" && source === "manual:openrouter_pkce";
 }
 /** Native own stores only; never accept a broad manual:* prefix. */
@@ -7754,24 +10998,24 @@ async function assertHermesOwnAccounts(home, signal) {
 	const material = await readHermesAccountMaterial(home, signal);
 	try {
 		await lstat(join(home, ".cliworker-managed"));
-		throw new Error("Hermes 插件账号不能使用额外的托管配置");
+		throw new HermesAccountSourceError("Hermes 插件账号不能使用额外的托管配置");
 	} catch (error) {
 		if (error.code !== "ENOENT") throw error;
 	}
 	try {
 		await lstat(join(home, ".op.env"));
-		throw new Error("Hermes 请使用自身 .env，暂不支持外部密码库配置");
+		throw new HermesAccountSourceError("Hermes 请使用自身 .env，暂不支持外部密码库配置");
 	} catch (error) {
 		if (error.code !== "ENOENT") throw error;
 	}
-	if (Object.values(material.env).some((value) => /^(?:op:\/\/|!|\$\{|__BITWARDEN_MANAGED__)/.test(value))) throw new Error("Hermes 请使用自身 API 配置，暂不支持外部密码库引用");
-	if (material.config.auth?.adopt_external_logins !== false) throw new Error("请先关闭 Hermes 的 auth.adopt_external_logins");
-	if (material.config.model?.openai_runtime === "codex_app_server" || material.config.model?.api_mode === "codex_app_server") throw new Error("Hermes 当前使用外部 Codex 登录，请改用自身账号");
+	if (Object.values(material.env).some((value) => /^(?:op:\/\/|!|\$\{|__BITWARDEN_MANAGED__)/.test(value))) throw new HermesAccountSourceError("Hermes 请使用自身 API 配置，暂不支持外部密码库引用");
+	if (material.config.auth?.adopt_external_logins !== false) throw new HermesAccountSourceError("请先关闭 Hermes 的 auth.adopt_external_logins");
+	if (material.config.model?.openai_runtime === "codex_app_server" || material.config.model?.api_mode === "codex_app_server") throw new HermesAccountSourceError("Hermes 当前使用外部 Codex 登录，请改用自身账号");
 	for (const [provider, entries] of Object.entries(material.auth.credential_pool ?? {})) {
-		if (!Array.isArray(entries)) throw new Error("Hermes 账号来源无法确认");
+		if (!Array.isArray(entries)) throw new HermesAccountSourceError("Hermes 账号来源无法确认");
 		for (const entry of entries) {
-			if (!object$12(entry)) throw new Error("Hermes 账号来源无法确认");
-			if (!ownPoolSource(provider, entry, material)) throw new Error("Hermes 含外部账号来源，请使用自身登录");
+			if (!object$11(entry)) throw new HermesAccountSourceError("Hermes 账号来源无法确认");
+			if (!ownPoolSource(provider, entry, material)) throw new HermesAccountSourceError("Hermes 含外部账号来源，请使用自身登录");
 		}
 	}
 	return material;
@@ -7792,10 +11036,10 @@ async function hermesAccountModels(home, provider, options = {}) {
 		};
 		const material = await currentMaterial();
 		const { config, auth, env } = material;
-		if (!object$12(config) || !object$12(config.model) || config.model.provider !== provider) return unknown();
+		if (!object$11(config) || !object$11(config.model) || config.model.provider !== provider) return unknown();
 		if (config.providers?.[provider]?.enabled === false) return unknown();
 		const cfg = config.model;
-		if (!object$12(auth)) return unknown();
+		if (!object$11(auth)) return unknown();
 		if (cfg.extra_headers && Object.keys(cfg.extra_headers).length) return unknown();
 		const inputs = [];
 		if (provider === "nous") {
@@ -7818,7 +11062,7 @@ async function hermesAccountModels(home, provider, options = {}) {
 			const state = auth.providers?.[provider], tokens = state?.tokens;
 			if (state?.auth_mode !== "chatgpt" || !literal$1(tokens?.access_token)) return unknown();
 			const pool = auth.credential_pool?.[provider] ?? [];
-			if (!Array.isArray(pool) || pool.some((entry) => !object$12(entry) || entry.source !== "device_code" || entry.auth_type !== "oauth" || hermesPoolEntryUnavailable(entry, cfg.default) || entry.access_token !== tokens.access_token || entry.base_url && entry.base_url.replace(/\/+$/, "") !== "https://chatgpt.com/backend-api")) return unknown();
+			if (!Array.isArray(pool) || pool.some((entry) => !object$11(entry) || entry.source !== "device_code" || entry.auth_type !== "oauth" || hermesPoolEntryUnavailable(entry, cfg.default) || entry.access_token !== tokens.access_token || entry.base_url && entry.base_url.replace(/\/+$/, "") !== "https://chatgpt.com/backend-api")) return unknown();
 			let expiry = typeof tokens.expires_at === "number" ? tokens.expires_at : Date.parse(tokens.expires_at);
 			if (!Number.isFinite(expiry)) try {
 				expiry = JSON.parse(Buffer.from(tokens.access_token.split(".")[1] ?? "", "base64url").toString()).exp;
@@ -7848,7 +11092,7 @@ async function hermesAccountModels(home, provider, options = {}) {
 			if (Array.isArray(pool) && pool.length) {
 				if (pool.length > 8) return unknown();
 				for (const entry of pool) {
-					if (!object$12(entry) || entry.auth_type !== "api_key" || hermesPoolEntryUnavailable(entry, cfg.default) || entry.base_url && entry.base_url.replace(/\/+$/, "") !== canonical) return unknown();
+					if (!object$11(entry) || entry.auth_type !== "api_key" || hermesPoolEntryUnavailable(entry, cfg.default) || entry.base_url && entry.base_url.replace(/\/+$/, "") !== canonical) return unknown();
 					if (typeof entry.source === "string" && entry.source.startsWith("env:")) {
 						const name = entry.source.slice(4);
 						if (!/^[A-Z][A-Z0-9_]*$/.test(name) || !literal$1(env[name])) return unknown();
@@ -7987,8 +11231,31 @@ function prepareHermesAccountHome(config) {
 	return validateHermesHomeDirectory(own.home);
 }
 /** Native account selectors must not inherit a Host-managed overlay or secret helper. */
+/** The bare IPv6 literal for a bracketed or CIDR IPv6 NO_PROXY entry, else undefined. */
+function bareIpv6(entry) {
+	const match = /^\[([0-9A-Fa-f:.]+)\](?:[/:].*)?$/.exec(entry) ?? /^([0-9A-Fa-f:.]+)\/\d+$/.exec(entry);
+	return match && isIP(match[1]) === 6 ? match[1] : void 0;
+}
+/** DSH publishes `[::1]`-style NO_PROXY entries to its children. Hermes' httpx 0.28.1
+* cannot compile a bracketed IPv6 bypass (InvalidURL "Invalid port: ':1]'"), which broke
+* Nous login checks and renewal. Hand Hermes the bare literal, as its own sanitizer does. */
+function hermesNoProxyEnvironment(env = process.env) {
+	const result = {};
+	for (const key of process.platform === "win32" ? ["NO_PROXY"] : ["NO_PROXY", "no_proxy"]) {
+		const entries = (env[key] ?? "").split(/[\s,]+/).filter(Boolean);
+		if (!entries.length || entries.includes("*")) continue;
+		const rewritten = [];
+		for (const entry of entries) {
+			const value = bareIpv6(entry) ?? entry;
+			if (!rewritten.includes(value)) rewritten.push(value);
+		}
+		if (rewritten.join(",") !== entries.join(",")) result[key] = rewritten.join(",");
+	}
+	return result;
+}
 function hermesAccountEnvironment(home) {
 	return {
+		...hermesNoProxyEnvironment(),
 		HERMES_HOME: home,
 		HERMES_MANAGED_DIR: join(home, ".cliworker-managed"),
 		HERMES_PROFILE: "",
@@ -8185,7 +11452,7 @@ async function verifyHermesExecutable(executable, signal) {
 }
 //#endregion
 //#region lib/types/host/hermes-renewal.js
-const messages = {
+const messages$1 = {
 	relogin: "Hermes 登录已失效，请重新登录",
 	unavailable: "Hermes 登录暂时无法续期，请稍后刷新",
 	changed: "Hermes 账号来源已变化，请刷新后重试",
@@ -8195,22 +11462,22 @@ const messages = {
 var HermesRenewalError = class extends HermesNousError {
 	state;
 	constructor(state) {
-		super(messages[state]);
+		super(messages$1[state]);
 		this.state = state;
 	}
 };
-const homes = /* @__PURE__ */ new Map();
-function homeKey(home) {
+const homes$1 = /* @__PURE__ */ new Map();
+function homeKey$1(home) {
 	const canonical = validateHermesHomeDirectory(home);
 	return {
 		home: canonical,
 		key: process.platform === "win32" ? canonical.toLowerCase() : canonical
 	};
 }
-function retire(key, state) {
-	if (!state.flight && !state.reserved && !state.poisoned && homes.get(key) === state) homes.delete(key);
+function retire$1(key, state) {
+	if (!state.flight && !state.reserved && !state.poisoned && homes$1.get(key) === state) homes$1.delete(key);
 }
-function available(state) {
+function available$1(state) {
 	if (state.poisoned) throw new ProcessCleanupUnconfirmedError();
 	if (state.reserved) throw new HermesRenewalError("busy");
 }
@@ -8244,8 +11511,9 @@ async function snapshot$1(home, signal) {
 		env: hermesUnsuppressedEnvironment(raw.auth, raw.env, "nous")
 	};
 	if (!material.auth.providers?.nous) return;
-	const source = selectHermesNousSource(material, { allowExpired: true });
 	const ttl = hermesNousMinimumTtl(material.env);
+	if (projectHermesNousSource(material.auth, 0, { allowExpired: true }).expires > Date.now() + ttl * 1e3 && !material.auth.credential_pool?.nous?.length) return;
+	const source = selectHermesNousSource(material, { allowExpired: true });
 	const state = material.auth.providers.nous;
 	return {
 		material,
@@ -8260,7 +11528,7 @@ async function snapshot$1(home, signal) {
 		])
 	};
 }
-async function capture$1(input, home, digest, ttl, signal) {
+async function capture$2(input, home, digest, ttl, signal) {
 	if (!input.backend) throw new HermesRenewalError("unsupported");
 	const executable = input.executable ?? await input.resolveExecutable?.(signal);
 	if (!executable) throw new HermesRenewalError("unsupported");
@@ -8330,18 +11598,18 @@ async function capture$1(input, home, digest, ttl, signal) {
 		await Promise.allSettled([...readers, child.done]);
 	}
 }
-async function renew(input, home, signal) {
+async function renew$1(input, home, signal) {
 	signal.throwIfAborted();
 	const before = await snapshot$1(home, signal);
 	if (!before || before.source.expires > Date.now() + before.ttl * 1e3) return;
 	if (typeof before.state.refresh_token !== "string" || !before.state.refresh_token.trim() || before.state.refresh_token.length > 32768 || /[\x00-\x20\x7f]/.test(before.state.refresh_token)) throw new HermesRenewalError("relogin");
 	if (before.material.auth.credential_pool.nous.some((row) => hermesPoolEntryUnavailable(row, before.material.config.model?.default))) throw new HermesRenewalError("unavailable");
-	await capture$1(input, home, before.digest, before.ttl, signal);
+	await capture$2(input, home, before.digest, before.ttl, signal);
 	const after = await snapshot$1(home, new AbortController().signal);
 	if (!after || after.identity !== before.identity) throw new HermesRenewalError("changed");
 	if (after.source.expires <= Date.now() + after.ttl * 1e3) throw new HermesRenewalError("unavailable");
 }
-function abortable$1(operation, signal) {
+function abortable$2(operation, signal) {
 	signal.throwIfAborted();
 	return new Promise((resolve, reject) => {
 		const abort = () => reject(signal.reason);
@@ -8352,14 +11620,14 @@ function abortable$1(operation, signal) {
 /** Share only an in-flight renewal, never a completed authorization decision. */
 async function ensureHermesNousFresh(input) {
 	input.signal.throwIfAborted();
-	const { home, key } = homeKey(input.home);
-	const state = homes.get(key) ?? {};
-	homes.set(key, state);
-	available(state);
+	const { home, key } = homeKey$1(input.home);
+	const state = homes$1.get(key) ?? {};
+	homes$1.set(key, state);
+	available$1(state);
 	let flight = state.flight;
 	if (flight?.readers.size && [...flight.readers].every((reader) => reader.signal.aborted)) flight.controller.abort();
 	if (flight?.controller.signal.aborted) {
-		await abortable$1(flight.operation.catch(() => {}), input.signal);
+		await abortable$2(flight.operation.catch(() => {}), input.signal);
 		return ensureHermesNousFresh(input);
 	}
 	if (!flight) {
@@ -8372,24 +11640,24 @@ async function ensureHermesNousFresh(input) {
 		};
 		state.flight = flight;
 		const current = flight;
-		current.operation = Promise.resolve().then(() => renew(input, home, controller.signal)).catch((error) => {
+		current.operation = Promise.resolve().then(() => renew$1(input, home, controller.signal)).catch((error) => {
 			if (error instanceof ProcessCleanupUnconfirmedError) state.poisoned = true;
-			if (error instanceof HermesNousError || error instanceof ProcessCleanupUnconfirmedError) throw error;
+			if (error instanceof HermesNousError || error instanceof HermesAccountSourceError || error instanceof ProcessCleanupUnconfirmedError) throw error;
 			controller.signal.throwIfAborted();
 			throw new HermesRenewalError("unavailable");
 		}).finally(() => {
 			current.settled = true;
 			if (state.flight === current) state.flight = void 0;
-			retire(key, state);
+			retire$1(key, state);
 		});
 		current.operation.catch(() => {});
 	}
 	const reader = { signal: input.signal };
 	flight.readers.add(reader);
 	try {
-		await abortable$1(flight.operation, input.signal);
+		await abortable$2(flight.operation, input.signal);
 		input.signal.throwIfAborted();
-		available(state);
+		available$1(state);
 	} finally {
 		flight.readers.delete(reader);
 		if (!flight.readers.size && !flight.settled) {
@@ -8403,15 +11671,15 @@ async function ensureHermesNousFresh(input) {
 /** Hold until the account terminal's entire managed range has exited. */
 async function reserveHermesAccount(home, signal) {
 	signal.throwIfAborted();
-	const { key } = homeKey(home);
-	const state = homes.get(key) ?? {};
-	homes.set(key, state);
-	available(state);
+	const { key } = homeKey$1(home);
+	const state = homes$1.get(key) ?? {};
+	homes$1.set(key, state);
+	available$1(state);
 	const owner = Symbol();
 	state.reserved = owner;
 	const release = () => {
 		if (state.reserved === owner) state.reserved = void 0;
-		retire(key, state);
+		retire$1(key, state);
 	};
 	try {
 		if (state.flight) {
@@ -8567,9 +11835,10 @@ async function discoverHermes(executable, capture, stateDirectory, hermesHome, o
 		options.signal?.throwIfAborted();
 		return JSON.parse(result);
 	};
-	const model = material.config.model?.provider === "nous" ? material.config.model.default : await get("model.default");
-	const provider = material.config.model?.provider === "nous" ? "nous" : await get("model.provider");
-	if (!nonempty$2(model) || !nonempty$2(provider) || provider === "auto") throw new Error("请在 Hermes 登录设置中明确选择服务商和模型，然后刷新");
+	const nous = material.config.model?.provider === "nous";
+	const model = nous ? void 0 : await get("model.default");
+	const provider = nous ? "nous" : await get("model.provider");
+	if (!nous && !nonempty$2(model) || !nonempty$2(provider) || provider === "auto") throw new Error("请在 Hermes 登录设置中明确选择服务商和模型，然后刷新");
 	const scope = await hermesAccountModels(home, provider, options);
 	options.signal?.throwIfAborted();
 	if (scope.state !== "supported") return [];
@@ -8810,9 +12079,28 @@ var HermesProtocol = class {
 //#region lib/types/host/grok-models.js
 const GROK_MODELS_URL = "https://cli-chat-proxy.grok.com/v1/models";
 const GROK_SETTINGS_URL = "https://cli-chat-proxy.grok.com/v1/settings";
-const object$11 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+const object$10 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 const text$8 = (v) => typeof v === "string" && !!v && v.length <= 32768 && !/[\x00-\x20\x7f]/.test(v);
-var GrokModelsError = class extends Error {};
+const READ_MESSAGES = {
+	missing: "尚未登录 Grok，请在账号终端登录",
+	format: "Grok 凭据格式不受支持，请在账号终端重新登录",
+	unsafe: "Grok 凭据文件未通过安全检查",
+	read: "Grok 凭据读取失败，请刷新",
+	expired: "Grok 登录已过期，请在账号终端重新登录"
+};
+var GrokModelsError = class extends Error {
+	reason;
+	constructor(message, reason) {
+		super(message);
+		this.reason = reason;
+	}
+};
+var GrokAccountReadError = class extends GrokModelsError {
+	constructor(reason) {
+		super(READ_MESSAGES[reason], reason);
+	}
+};
+const GROK_MIN_ACCESS_MS = 3e4;
 /** This adapter supports the fixed first-party route, not ambient provider overrides. */
 function assertGrokNativeEnvironment(home = homedir()) {
 	if (process.env.GROK_HOME?.trim() && resolve(process.env.GROK_HOME) !== resolve(home, ".grok")) throw new GrokModelsError("当前 Grok 认证配置不受支持");
@@ -8831,11 +12119,11 @@ function assertGrokNativeEnvironment(home = homedir()) {
 }
 /** Official native OIDC slot and its own identity, not arbitrary configured keys. */
 function selectGrokOwnAccount(raw, now = Date.now()) {
-	if (!object$11(raw)) return void 0;
-	const entries = Object.entries(raw).filter(([slot, value]) => slot.startsWith("https://auth.x.ai::") && object$11(value) && value.auth_mode === "oidc");
+	if (!object$10(raw)) return void 0;
+	const entries = Object.entries(raw).filter(([slot, value]) => slot.startsWith("https://auth.x.ai::") && object$10(value) && value.auth_mode === "oidc");
 	if (entries.length !== 1) return void 0;
 	const [slot, value] = entries[0];
-	if (!object$11(value) || value.oidc_issuer !== "https://auth.x.ai" || !text$8(value.oidc_client_id) || slot !== `https://auth.x.ai::${value.oidc_client_id}` || !text$8(value.user_id)) return void 0;
+	if (!object$10(value) || value.oidc_issuer !== "https://auth.x.ai" || !text$8(value.oidc_client_id) || slot !== `https://auth.x.ai::${value.oidc_client_id}` || !text$8(value.user_id)) return void 0;
 	if (!text$8(value.key)) return void 0;
 	const access = value.key;
 	const created = typeof value.create_time === "string" ? Date.parse(value.create_time) : NaN;
@@ -8855,16 +12143,32 @@ async function readGrokOwnAccount(options = {}) {
 	assertGrokNativeEnvironment(options.home);
 	const buffer = Buffer.alloc(65537);
 	let file;
+	const fail = (reason) => {
+		throw new GrokAccountReadError(reason);
+	};
+	const missing = (error) => error?.code === "ENOENT";
 	try {
 		const root = join(await realpath(options.home ?? homedir()), ".grok");
-		const directory = await lstat(root);
-		if (!directory.isDirectory() || directory.isSymbolicLink() || await realpath(root) !== root) throw new Error();
+		let directory;
+		try {
+			directory = await lstat(root);
+		} catch (error) {
+			if (missing(error)) fail("missing");
+			throw error;
+		}
+		if (!directory.isDirectory() || directory.isSymbolicLink() || await realpath(root) !== root) fail("unsafe");
 		const path = join(root, "auth.json");
-		const location = await lstat(path);
-		if (location.isSymbolicLink() || !location.isFile()) throw new Error();
+		let location;
+		try {
+			location = await lstat(path);
+		} catch (error) {
+			if (missing(error)) fail("missing");
+			throw error;
+		}
+		if (location.isSymbolicLink() || !location.isFile()) fail("unsafe");
 		file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
 		const stat = await file.stat();
-		if (!stat.isFile() || stat.dev !== location.dev || stat.ino !== location.ino || stat.nlink !== 1 || stat.size > 65536) throw new Error();
+		if (!stat.isFile() || stat.dev !== location.dev || stat.ino !== location.ino || stat.nlink !== 1 || stat.size > 65536) fail("unsafe");
 		let size = 0;
 		while (size < buffer.length) {
 			options.signal?.throwIfAborted();
@@ -8872,23 +12176,32 @@ async function readGrokOwnAccount(options = {}) {
 			if (!bytesRead) break;
 			size += bytesRead;
 		}
-		if (!size || size > 65536) throw new Error();
+		if (size > 65536) fail("unsafe");
+		if (!size) fail("format");
 		const current = await lstat(path);
 		const after = await file.stat();
-		if (current.isSymbolicLink() || current.dev !== stat.dev || current.ino !== stat.ino || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs) throw new Error();
+		if (current.isSymbolicLink() || current.dev !== stat.dev || current.ino !== stat.ino || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs) fail("unsafe");
 		const bytes = buffer.subarray(0, size);
-		const account = selectGrokOwnAccount(JSON.parse(bytes.toString("utf8")));
-		if (!account || !account.active && !account.refresh) throw new Error();
+		let parsed;
+		try {
+			parsed = JSON.parse(bytes.toString("utf8"));
+		} catch {
+			fail("format");
+		}
+		const account = selectGrokOwnAccount(parsed);
+		if (!account) fail("format");
+		if (!account.active && !account.refresh) fail("expired");
 		options.signal?.throwIfAborted();
 		const currentDirectory = await lstat(root);
-		if (currentDirectory.isSymbolicLink() || currentDirectory.dev !== directory.dev || currentDirectory.ino !== directory.ino) throw new Error();
+		if (currentDirectory.isSymbolicLink() || currentDirectory.dev !== directory.dev || currentDirectory.ino !== directory.ino) fail("unsafe");
 		return {
 			...account,
 			fingerprint: createHash("sha256").update(bytes).digest("hex")
 		};
-	} catch {
+	} catch (error) {
 		options.signal?.throwIfAborted();
-		throw new GrokModelsError("请先登录 Grok");
+		if (error instanceof GrokAccountReadError) throw error;
+		throw new GrokAccountReadError("read");
 	} finally {
 		buffer.fill(0);
 		await file?.close();
@@ -8896,11 +12209,11 @@ async function readGrokOwnAccount(options = {}) {
 }
 /** Only metadata IDs pass out; a successful empty list differs from a failed query. */
 function grokAccountModels(payload, forbidden = []) {
-	if (!object$11(payload) || !Array.isArray(payload.data)) throw new GrokModelsError("模型目录格式无效");
+	if (!object$10(payload) || !Array.isArray(payload.data)) throw new GrokModelsError("模型目录格式无效");
 	const result = /* @__PURE__ */ new Map();
 	for (const value of payload.data) {
-		if (!object$11(value)) throw new GrokModelsError("模型目录格式无效");
-		const meta = object$11(value._meta) ? value._meta : {};
+		if (!object$10(value)) throw new GrokModelsError("模型目录格式无效");
+		const meta = object$10(value._meta) ? value._meta : {};
 		if (value.hidden === true || meta.hidden === true || value.allowed === false || value.available === false || value.entitled === false || value.enabled === false || value.disabled === true || value.upgrade_required === true) continue;
 		const id = value.model ?? value.modelId ?? value.id ?? meta.model ?? meta.modelId;
 		if (typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/.test(id) || forbidden.some((secret) => secret && id.includes(secret))) throw new GrokModelsError("模型目录格式无效");
@@ -8912,7 +12225,7 @@ function grokAccountModels(payload, forbidden = []) {
 		else if (rawEfforts !== void 0) {
 			if (!Array.isArray(rawEfforts)) throw new GrokModelsError("模型目录格式无效");
 			efforts = [...new Set(rawEfforts.flatMap((item) => {
-				const id = object$11(item) ? item.id : item;
+				const id = object$10(item) ? item.id : item;
 				return typeof id === "string" && EFFORTS.includes(id) ? [id] : [];
 			}))];
 		}
@@ -8926,10 +12239,10 @@ function grokAccountModels(payload, forbidden = []) {
 */
 function grokDynamicNativeModels(payload, forbidden = []) {
 	const scoped = grokAccountModels(payload, forbidden);
-	if (!object$11(payload) || !Array.isArray(payload.data)) return [];
+	if (!object$10(payload) || !Array.isArray(payload.data)) return [];
 	return payload.data.flatMap((value) => {
-		if (!object$11(value)) return [];
-		const meta = object$11(value._meta) ? value._meta : {};
+		if (!object$10(value)) return [];
+		const meta = object$10(value._meta) ? value._meta : {};
 		const id = value.model ?? value.modelId ?? value.id ?? meta.model ?? meta.modelId;
 		if (typeof id !== "string" || !scoped.has(id)) return [];
 		for (const key of [
@@ -8989,17 +12302,29 @@ async function readPayload(response, signal) {
 		reader.releaseLock();
 	}
 }
-/** Fixed official Build endpoint; no redirect, OAuth refresh, fallback, or generation. */
+/** Fixed official Build endpoint; no redirect, plugin-side OAuth refresh, fallback, or generation. */
 async function discoverGrokAccountModels(native, options = {}) {
 	options.signal?.throwIfAborted();
-	const source = await readGrokOwnAccount(options);
-	if (!source.active || source.expires <= Date.now() + 3e4) throw new GrokModelsError("登录需要续期，请打开 Grok");
+	let source = await readGrokOwnAccount(options);
+	if (source.refresh && options.renew && (!source.active || source.expires <= Date.now() + 3e5)) {
+		try {
+			await options.renew(options.signal ?? new AbortController().signal);
+		} catch (error) {
+			options.signal?.throwIfAborted();
+			if (!(source.active && source.expires > Date.now() + GROK_MIN_ACCESS_MS) || !(error instanceof GrokModelsError) || ["changed", "relogin"].includes(String(error.state))) throw error;
+		}
+		options.signal?.throwIfAborted();
+		const renewed = await readGrokOwnAccount(options);
+		if (renewed.userId !== source.userId || renewed.clientId !== source.clientId) throw new GrokModelsError("账号已改变，请刷新");
+		source = renewed;
+	}
+	if (!source.active || source.expires <= Date.now() + GROK_MIN_ACCESS_MS) throw new GrokModelsError("Grok 登录需要续期，请在账号终端重新登录");
 	const controller = new AbortController();
 	const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
 	const timer = setTimeout(() => controller.abort(), Math.max(50, Math.min(options.timeoutMs ?? 8e3, 1e4)));
 	try {
 		const request = async (target) => {
-			const response = await (options.fetch ?? fetch)(target, {
+			const response = await (options.fetch ?? hostFetch)(target, {
 				method: "GET",
 				redirect: "error",
 				signal,
@@ -9031,7 +12356,7 @@ async function discoverGrokAccountModels(native, options = {}) {
 		};
 		const settings = await request(GROK_SETTINGS_URL);
 		await unchanged();
-		if (!object$11(settings) || typeof settings.allow_access !== "boolean") throw new GrokModelsError("模型使用权限尚未确认");
+		if (!object$10(settings) || typeof settings.allow_access !== "boolean") throw new GrokModelsError("模型使用权限尚未确认");
 		if (!settings.allow_access) throw new GrokModelsError("当前账号未获 Grok Build 使用权限");
 		const payload = await request(GROK_MODELS_URL);
 		const models = grokAccountModels(payload, [source.access, source.userId]);
@@ -9060,16 +12385,224 @@ async function discoverGrokAccountModels(native, options = {}) {
 	}
 }
 //#endregion
+//#region lib/types/host/grok-renewal.js
+const messages = {
+	relogin: "Grok 登录已失效，请在账号终端重新登录",
+	unavailable: "Grok 登录续期暂时失败，请检查网络后刷新",
+	changed: "Grok 账号已变化，请刷新",
+	unsupported: "当前 Grok 版本暂不支持自动续期，请更新 Grok 或在账号终端重新登录",
+	busy: "Grok 账号终端正在运行，请关闭后刷新"
+};
+var GrokRenewalError = class extends GrokModelsError {
+	state;
+	constructor(state) {
+		super(messages[state]);
+		this.state = state;
+	}
+};
+const homes = /* @__PURE__ */ new Map();
+/** Host memory only: credential-file fingerprints Grok itself refused to renew. */
+const rejected = /* @__PURE__ */ new Set();
+function homeKey(home = homedir()) {
+	const canonical = resolve(home);
+	return process.platform === "win32" ? canonical.toLowerCase() : canonical;
+}
+function retire(key, state) {
+	if (!state.flight && !state.reserved && !state.poisoned && homes.get(key) === state) homes.delete(key);
+}
+function available(state) {
+	if (state.poisoned) throw new ProcessCleanupUnconfirmedError();
+	if (state.reserved) throw new GrokRenewalError("busy");
+}
+/** Whether Grok refused to renew exactly this credential file (it changes after any re-login). */
+function grokRenewalRejected(fingerprint) {
+	return rejected.has(fingerprint);
+}
+/** The native auth path for renewal: always the user's real file, never a worker's link to it. */
+function grokNativeAuthPath(home = homedir()) {
+	return join(home, ".grok", "auth.json");
+}
+/** Only a fixed message and its outcome value leave the bounded log scan. */
+async function grokRenewalOutcome(logPath) {
+	let file;
+	try {
+		file = await open(logPath, "r");
+		const size = Math.min((await file.stat()).size, 4 * 1024 * 1024);
+		const buffer = Buffer.alloc(size);
+		await file.read(buffer, 0, size, 0);
+		let outcome;
+		for (const line of buffer.toString("utf8").split("\n")) {
+			if (!line.includes("\"auth: silent refresh\"")) continue;
+			try {
+				const event = JSON.parse(line);
+				const value = event?.ctx?.outcome;
+				if (event?.msg === "auth: silent refresh" && typeof value === "string" && value.length <= 128) outcome = value;
+			} catch {}
+		}
+		return outcome;
+	} catch {
+		return;
+	} finally {
+		await file?.close();
+	}
+}
+async function run(input) {
+	const deadline = AbortSignal.timeout(input.timeoutMs ?? 3e4);
+	const child = input.backend.spawn({
+		argv: [
+			process.execPath,
+			fileURLToPath(new URL("./private-launch.mjs", import.meta.url)),
+			input.executable,
+			"models"
+		],
+		cwd: input.cwd,
+		env: {
+			...input.env,
+			GROK_AUTH_PATH: grokNativeAuthPath(input.home),
+			ELECTRON_RUN_AS_NODE: "1"
+		},
+		stdio: {
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "pipe"
+		},
+		graceMs: input.graceMs ?? 5e3,
+		signal: deadline
+	});
+	child.done.catch(() => void 0);
+	let bytes = 0;
+	const drain = async (stream) => {
+		if (stream) for await (const chunk of stream) {
+			bytes += Buffer.byteLength(chunk);
+			if (bytes > 262144) throw new GrokRenewalError("unavailable");
+		}
+	};
+	const readers = [drain(child.stdout), drain(child.stderr)];
+	try {
+		await Promise.all(readers);
+		return {
+			exitCode: (await child.done).exitCode,
+			timedOut: deadline.aborted
+		};
+	} finally {
+		let exited = false;
+		try {
+			child.terminate();
+			exited = await child.waitForExit();
+		} catch {}
+		if (!exited) throw new ProcessCleanupUnconfirmedError();
+		await Promise.allSettled([...readers, child.done]);
+	}
+}
+async function renew(input, signal) {
+	signal.throwIfAborted();
+	const before = await readGrokOwnAccount({ home: input.home });
+	if (before.active && before.expires > Date.now() + 3e5) return;
+	if (!before.refresh) throw new GrokRenewalError("relogin");
+	const outcome = await run(input);
+	let after;
+	try {
+		after = await readGrokOwnAccount({ home: input.home });
+	} catch (error) {
+		if (error instanceof GrokAccountReadError) throw new GrokRenewalError("changed");
+		throw error;
+	}
+	if (after.userId !== before.userId || after.clientId !== before.clientId) throw new GrokRenewalError("changed");
+	if (after.active && after.expires > Date.now() + 3e4) {
+		rejected.delete(after.fingerprint);
+		return;
+	}
+	const native = await grokRenewalOutcome(input.logPath);
+	if (native?.startsWith("Failed(ManualLogin")) {
+		rejected.add(after.fingerprint);
+		throw new GrokRenewalError("relogin");
+	}
+	if (native === void 0 && outcome.exitCode === 2 && !outcome.timedOut) throw new GrokRenewalError("unsupported");
+	throw new GrokRenewalError("unavailable");
+}
+function abortable$1(operation, signal) {
+	signal.throwIfAborted();
+	return new Promise((resolve, reject) => {
+		const abort = () => reject(signal.reason);
+		signal.addEventListener("abort", abort, { once: true });
+		operation.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort)).catch(() => {});
+	});
+}
+/** Share only an in-flight renewal, never a completed authorization decision. */
+async function ensureGrokAccessFresh(input) {
+	input.signal.throwIfAborted();
+	const key = homeKey(input.home);
+	const state = homes.get(key) ?? {};
+	homes.set(key, state);
+	available(state);
+	let flight = state.flight;
+	if (!flight) {
+		const controller = new AbortController();
+		flight = {
+			controller,
+			operation: Promise.resolve(),
+			readers: /* @__PURE__ */ new Set(),
+			settled: false
+		};
+		state.flight = flight;
+		const current = flight;
+		current.operation = Promise.resolve().then(() => renew(input, controller.signal)).catch((error) => {
+			if (error instanceof ProcessCleanupUnconfirmedError) state.poisoned = true;
+			if (error instanceof GrokModelsError || error instanceof ProcessCleanupUnconfirmedError) throw error;
+			controller.signal.throwIfAborted();
+			throw new GrokRenewalError("unavailable");
+		}).finally(() => {
+			current.settled = true;
+			if (state.flight === current) state.flight = void 0;
+			retire(key, state);
+		});
+		current.operation.catch(() => {});
+	}
+	const reader = { signal: input.signal };
+	flight.readers.add(reader);
+	try {
+		await abortable$1(flight.operation, input.signal);
+		input.signal.throwIfAborted();
+	} finally {
+		flight.readers.delete(reader);
+	}
+}
+/** Hold off renewal while a Grok account terminal runs; wait for a renewal already writing. */
+async function reserveGrokAccount(signal, home) {
+	signal.throwIfAborted();
+	const key = homeKey(home);
+	const state = homes.get(key) ?? {};
+	homes.set(key, state);
+	available(state);
+	const owner = Symbol();
+	state.reserved = owner;
+	const release = () => {
+		if (state.reserved === owner) state.reserved = void 0;
+		retire(key, state);
+	};
+	try {
+		if (state.flight) await state.flight.operation.catch((error) => {
+			if (error instanceof ProcessCleanupUnconfirmedError) throw error;
+		});
+		signal.throwIfAborted();
+		if (state.poisoned) throw new ProcessCleanupUnconfirmedError();
+		return release;
+	} catch (error) {
+		release();
+		throw error;
+	}
+}
+//#endregion
 //#region lib/types/host/grok-response.mjs
-const count$13 = (value) => Number.isSafeInteger(value) && value >= 0;
-const object$10 = (value) => value && typeof value === "object" && !Array.isArray(value);
+const count$8 = (value) => Number.isSafeInteger(value) && value >= 0;
+const object$9 = (value) => value && typeof value === "object" && !Array.isArray(value);
 /** Official x.ai/statusLine is a session-scoped native estimate, not a bill. */
 function grokContextStatus(message, expected) {
 	const params = message?.params, value = params?.update;
-	if (message?.method !== "_x.ai/session_notification" || !object$10(expected) || !expected.sessionId || !expected.modelId || !expected.project || params?.sessionId !== expected.sessionId || params?._meta?.isReplay === true || value?.sessionUpdate !== "session_status" || value.session_id !== expected.sessionId || !count$13(value.schema_version) || value.schema_version < 1 || value.cwd !== expected.project || value.workspace?.current_dir !== expected.project || value.model?.id !== expected.modelId || !object$10(value.context_window)) return;
+	if (message?.method !== "_x.ai/session_notification" || !object$9(expected) || !expected.sessionId || !expected.modelId || !expected.project || params?.sessionId !== expected.sessionId || params?._meta?.isReplay === true || value?.sessionUpdate !== "session_status" || value.session_id !== expected.sessionId || !count$8(value.schema_version) || value.schema_version < 1 || value.cwd !== expected.project || value.workspace?.current_dir !== expected.project || value.model?.id !== expected.modelId || !object$9(value.context_window)) return;
 	const context = value.context_window;
-	if (context.context_tokens != null && !count$13(context.context_tokens)) return;
-	if (context.context_window_size != null && (!count$13(context.context_window_size) || context.context_window_size === 0)) return;
+	if (context.context_tokens != null && !count$8(context.context_tokens)) return;
+	if (context.context_window_size != null && (!count$8(context.context_window_size) || context.context_window_size === 0)) return;
 	return {
 		type: "cliworker.grok_context",
 		source: "grok.session_status",
@@ -9082,7 +12615,7 @@ function grokContextStatus(message, expected) {
 }
 /** PromptUsageModel is camelCase and its input includes cache reads and writes. */
 function grokPromptUsage(value) {
-	if (!object$10(value) || value.usageIsIncomplete !== void 0 && typeof value.usageIsIncomplete !== "boolean") return;
+	if (!object$9(value) || value.usageIsIncomplete !== void 0 && typeof value.usageIsIncomplete !== "boolean") return;
 	const usage = {};
 	for (const key of [
 		"inputTokens",
@@ -9092,10 +12625,10 @@ function grokPromptUsage(value) {
 		"cacheCreationTokens",
 		"reasoningTokens"
 	]) {
-		if (!count$13(value[key])) return;
+		if (!count$8(value[key])) return;
 		usage[key] = value[key];
 	}
-	if (!count$13(usage.inputTokens + usage.outputTokens) || usage.totalTokens !== usage.inputTokens + usage.outputTokens || usage.cachedReadTokens + usage.cacheCreationTokens > usage.inputTokens || usage.reasoningTokens > usage.outputTokens) return;
+	if (!count$8(usage.inputTokens + usage.outputTokens) || usage.totalTokens !== usage.inputTokens + usage.outputTokens || usage.cachedReadTokens + usage.cacheCreationTokens > usage.inputTokens || usage.reasoningTokens > usage.outputTokens) return;
 	return {
 		usage,
 		usageIsIncomplete: value.usageIsIncomplete === true
@@ -9103,7 +12636,7 @@ function grokPromptUsage(value) {
 }
 /** Installed Grok headless docs: uncached input, separate cache, reasoning within output. */
 function grokResponseUsage(value) {
-	if (!object$10(value) || !count$13(value.input_tokens) || !count$13(value.output_tokens)) return;
+	if (!object$9(value) || !count$8(value.input_tokens) || !count$8(value.output_tokens)) return;
 	const usage = {
 		inputTokens: value.input_tokens,
 		outputTokens: value.output_tokens
@@ -9114,13 +12647,13 @@ function grokResponseUsage(value) {
 		["reasoning_tokens", "reasoningTokens"]
 	]) {
 		if (value[from] === void 0) continue;
-		if (!count$13(value[from])) return;
+		if (!count$8(value[from])) return;
 		usage[to] = value[from];
 	}
 	if (usage.reasoningTokens !== void 0 && usage.reasoningTokens > usage.outputTokens) return;
 	if (usage.cacheReadTokens !== void 0 && usage.cacheWriteTokens !== void 0) {
 		const total = usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
-		if (!count$13(total) || value.total_tokens !== void 0 && value.total_tokens !== total) return;
+		if (!count$8(total) || value.total_tokens !== void 0 && value.total_tokens !== total) return;
 		usage.totalTokens = total;
 	}
 	return usage;
@@ -9171,6 +12704,11 @@ var GrokResponseTracker = class {
 		if (!this.enabled) return;
 		if (this.last && complete) this.output({
 			...this.last,
+			delta: void 0,
+			...this.last.toolCall ? { toolCall: {
+				...this.last.toolCall,
+				output: void 0
+			} } : {},
 			...this.last.kind === "assistant" ? { text: "" } : {},
 			response: {
 				...this.last.response,
@@ -9188,13 +12726,35 @@ var GrokResponseTracker = class {
 //#endregion
 //#region lib/types/host/grok-adapter.js
 const record$7 = (x) => typeof x === "object" && x !== null && !Array.isArray(x);
-const config = `[cli]\nauto_update = false\nuse_leader = false\n[features]\nsupport_permission = true\ntelemetry = false\nfeedback = false\ncodebase_indexing = false\n[telemetry]\ntrace_upload = false\nmixpanel_enabled = false\n[subagents]\nenabled = false\n[session]\nload_envrc = false\n[shell_environment_policy]\ninherit = "core"\nignore_default_excludes = false\n`;
+const baseConfig = `[cli]\nauto_update = false\nuse_leader = false\n[features]\nsupport_permission = true\nweb_fetch = true\ntelemetry = false\nfeedback = false\ncodebase_indexing = false\n[telemetry]\ntrace_upload = false\nmixpanel_enabled = false\n[session]\nload_envrc = false\n[shell_environment_policy]\ninherit = "core"\nignore_default_excludes = false\n`;
+function grokConfig(readOnly, level, subagents = false) {
+	const base = baseConfig + (subagents ? "" : "[subagents]\nenabled = false\n");
+	if (!readOnly) return level === "ask" ? `${base}[ui]\npermission_mode = "ask"\n[permission]\nask = ["Bash", "Edit", "Write"]\n` : level === "auto" ? `${base}[ui]\npermission_mode = "auto"\n` : base;
+	const allowed = [...["WebSearch", "WebFetch"], ...readOnly.bridge ? [`MCPTool(${HARNESS_MCP_SERVER}__*)`] : []];
+	return `${base}[permission]\ndeny = ["Edit", "Write", "Bash(mkdir)", "Bash(touch)"]\n${allowed.length ? `allow = ${JSON.stringify(allowed).replaceAll(",", ", ")}\n` : ""}`;
+}
 function bridgePath$1() {
 	const here = dirname(fileURLToPath(import.meta.url));
 	for (const path of [join(here, "grok-catalog.mjs"), resolve(here, "../../grok-catalog.mjs")]) if (existsSync(path)) return path;
 	throw new Error("Grok catalog bridge 未安装，请重新构建插件");
 }
-async function state(stateDirectory, project) {
+/**
+* Windows refuses to replace a file while another start replaces or reads it
+* (EPERM/EACCES/EBUSY); the next attempt succeeds once that handle closes.
+*/
+async function publish(from, to) {
+	for (let attempt = 0;; attempt++) try {
+		return await rename(from, to);
+	} catch (e) {
+		if (process.platform !== "win32" || attempt >= 20 || !record$7(e) || ![
+			"EPERM",
+			"EACCES",
+			"EBUSY"
+		].includes(String(e.code))) throw e;
+		await new Promise((resolve) => setTimeout(resolve, 10 + attempt * 10));
+	}
+}
+async function state(stateDirectory, project, readOnly, level, memory = false, subagents = false) {
 	await mkdir(stateDirectory, {
 		recursive: true,
 		mode: 448
@@ -9222,18 +12782,40 @@ async function state(stateDirectory, project) {
 	} catch (e) {
 		if (!record$7(e) || e.code !== "ENOENT") throw e;
 	}
-	await writeFile(configPath, config, { mode: 384 });
-	await chmod(configPath, 384);
+	const temporary = (path) => `${path}.${randomUUID()}.tmp`;
+	const configTemporary = temporary(configPath);
+	try {
+		await writeFile(configTemporary, grokConfig(readOnly, level, subagents), {
+			mode: 384,
+			flag: "wx"
+		});
+		await publish(configTemporary, configPath);
+	} finally {
+		await rm(configTemporary, { force: true });
+	}
 	if (project) {
 		const original = join(homedir(), ".grok", "auth.json"), target = join(home, "auth.json");
 		try {
 			const existing = await lstat(target);
 			if (!existing.isFile() && !existing.isSymbolicLink()) throw new Error("Unsafe Grok auth snapshot");
+		} catch (e) {
+			if (!record$7(e) || e.code !== "ENOENT") throw e;
+		}
+		if (process.platform !== "win32" && existsSync(original)) {
+			const link = temporary(target);
+			try {
+				await symlink(original, link);
+				await publish(link, target);
+			} finally {
+				await rm(link, { force: true });
+			}
+		} else try {
 			await unlink(target);
 		} catch (e) {
 			if (!record$7(e) || e.code !== "ENOENT") throw e;
 		}
-		if (process.platform !== "win32" && existsSync(original)) await symlink(original, target);
+		if (memory) await shareNativeMemory(join(home, "memory-v2"), join(homedir(), ".grok", "memory-v2"));
+		else await unshareNativeMemory(join(home, "memory-v2"));
 	}
 	return {
 		root,
@@ -9243,10 +12825,10 @@ async function state(stateDirectory, project) {
 			XAI_API_KEY: "",
 			GROK_CODE_XAI_API_KEY: "",
 			TMPDIR: tmp,
-			GROK_MEMORY: "0",
-			GROK_SUBAGENTS: "0",
+			GROK_MEMORY: memory ? "1" : "0",
+			GROK_SUBAGENTS: subagents ? "1" : "0",
 			GROK_WORKFLOWS: "0",
-			GROK_WEB_FETCH: "0",
+			GROK_WEB_FETCH: "1",
 			GROK_TELEMETRY_ENABLED: "0",
 			GROK_TELEMETRY_TRACE_UPLOAD: "0",
 			GROK_TELEMETRY_MIXPANEL_ENABLED: "0"
@@ -9260,7 +12842,12 @@ async function prepareGrok(input) {
 	if (!EFFORTS.includes(input.preference.effort)) throw new Error("Invalid Grok effort");
 	if (!["plan", "accept-edits"].includes(input.mode)) throw new Error("Invalid Grok mode");
 	if (!input.prompt.trim()) throw new Error("Prompt must not be empty");
-	const prepared = await state(input.stateDirectory, input.project);
+	const memory = await grokNativeMemory();
+	const subagents = await grokNativeSubagents();
+	const prepared = await state(input.stateDirectory, input.project, input.mode === "plan" ? { bridge: !!nativeHarnessReadyConnection({
+		cli: "grok",
+		harnessTools: input.harnessTools
+	}, {}) } : void 0, input.mode === "plan" || input.access === "danger-full-access" ? void 0 : input.access === "workspace-write" ? "auto" : "ask", memory, subagents);
 	return {
 		argv: [
 			input.executable,
@@ -9272,11 +12859,11 @@ async function prepareGrok(input) {
 			"--output-format",
 			"streaming-json",
 			"--permission-mode",
-			input.mode === "plan" ? "default" : "acceptEdits",
-			"--no-memory",
-			"--no-subagents",
-			"--disable-web-search",
-			...input.mode === "plan" ? ["--tools", "read_file,grep,list_dir"] : [],
+			input.mode !== "plan" && input.access === "danger-full-access" ? "bypassPermissions" : "default",
+			...memory ? [] : ["--no-memory"],
+			...subagents ? [] : ["--no-subagents"],
+			...[],
+			...input.mode === "plan" ? ["--tools", GROK_PLAN_TOOLS.join(",")] : [],
 			...input.conversationId ? ["--resume", input.conversationId] : [],
 			"--single",
 			`任务：\n${input.prompt}`
@@ -9309,9 +12896,23 @@ async function discoverGrok(executable, capture, stateDirectory, options = {}) {
 	options.signal?.throwIfAborted();
 	const version = await capture([executable, "--version"], prepared.env, "native-candidates");
 	options.signal?.throwIfAborted();
+	const renewal = options.renewal;
 	return discoverGrokAccountModels(models, {
 		...options,
-		nativeDynamicSchema: version.trim() === "grok 1.0.0 (3cd0d0cbcebe)"
+		nativeDynamicSchema: version.trim() === "grok 1.0.0 (3cd0d0cbcebe)",
+		...renewal ? { renew: async (signal) => {
+			const own = await state(join(stateDirectory, "renewal"));
+			await ensureGrokAccessFresh({
+				backend: renewal.backend,
+				executable,
+				env: own.env,
+				cwd: own.root,
+				logPath: join(own.root, "home", "logs", "unified.jsonl"),
+				signal,
+				...renewal.graceMs === void 0 ? {} : { graceMs: renewal.graceMs },
+				...options.home ? { home: options.home } : {}
+			});
+		} } : {}
 	});
 }
 /** Native streaming-json parser from installed 1.0.0 docs; no fabricated execution evidence. */
@@ -9565,16 +13166,16 @@ async function findWindowsPathCommand(commands, capture, signal, options = {}) {
 	let raw;
 	try {
 		raw = await capture([
-		win32.join(system, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
-		"-NoLogo",
-		"-NoProfile",
-		"-NonInteractive",
-		"-EncodedCommand",
-		Buffer.from(WINDOWS_PATH_QUERY, "utf16le").toString("base64")
-	], options.home ?? homedir());
+			win32.join(system, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+			"-NoLogo",
+			"-NoProfile",
+			"-NonInteractive",
+			"-EncodedCommand",
+			Buffer.from(WINDOWS_PATH_QUERY, "utf16le").toString("base64")
+		], options.home ?? homedir());
 	} catch (error) {
 		if (!(error instanceof ProcessCleanupUnconfirmedError)) throw error;
-		// The fixed system PATH query never opens the requested CLI or its account.
+		// This fixed system PATH query has not launched the requested CLI or opened its account.
 		throw Object.assign(new Error("Windows CLI 安装路径探测暂时失败，请刷新重试", { cause: error }), {
 			code: "CLI_PATH_DISCOVERY_FAILED"
 		});
@@ -9829,7 +13430,7 @@ async function findWindowsCodexAppx(capture, signal, env = process.env) {
 }
 //#endregion
 //#region lib/types/host/windows-codex-launch.js
-const supportedWrapper = "61b0194f3bb6534439c8d26a3ed57d0805f84b884588b761795323eeb92fcf70";
+const supportedWrappers = /* @__PURE__ */ new Set(["61b0194f3bb6534439c8d26a3ed57d0805f84b884588b761795323eeb92fcf70", "e14fc83739c13c1074b12bd1acce4010c893c7f6fbfc1593b4a31d74cabb57af"]);
 const packageName = "@openai/codex";
 const managerFlags = [
 	"CODEX_MANAGED_BY_NPM",
@@ -9940,7 +13541,7 @@ function windowsCodexBackgroundLaunch(argv, env, options = {}) {
 	} catch {
 		return;
 	}
-	if (createHash("sha256").update(source).digest("hex") !== supportedWrapper) return void 0;
+	if (!supportedWrappers.has(createHash("sha256").update(source).digest("hex"))) return void 0;
 	try {
 		const arch = options.arch ?? process.arch;
 		if (arch !== "x64" && arch !== "arm64") throw unavailable();
@@ -9984,123 +13585,6 @@ function windowsCodexBackgroundLaunch(argv, env, options = {}) {
 	}
 }
 //#endregion
-//#region lib/types/host/native-agy-harness.mjs
-const AGY_HARNESS_SESSION_FILE = "CLIWORKER_AGY_HARNESS_SESSION_FILE";
-function agyHarnessServerName(connection) {
-	return `dsh_worker_${createHash("sha256").update(JSON.stringify(connection.binding)).digest("hex").slice(0, 12)}`;
-}
-function readSession(path) {
-	if (!isAbsolute(path ?? "")) throw new Error("AGY 工具桥缺少原生会话身份");
-	const before = lstatSync(path);
-	if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size > 16384) throw new Error("AGY 工具桥会话记录无效");
-	const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-	try {
-		const stat = fstatSync(fd);
-		if (stat.dev !== before.dev || stat.ino !== before.ino) throw new Error("AGY 工具桥会话记录已变化");
-		return JSON.parse(readFileSync(fd, "utf8"));
-	} finally {
-		closeSync(fd);
-	}
-}
-/** Add an owned workspace containing only sparse MCP/Hook configuration. */
-function prepareAgyHarnessWorkspace({ directory, argv, connection, nodeExecutable = process.execPath, mcpEntryPath = join(dirname(fileURLToPath(import.meta.url)), "native-harness-mcp.mjs"), platform = process.platform }) {
-	if (!connection?.executionReady || connection.binding.cli !== "antigravity") throw new Error("AGY 工具桥没有本轮执行授权");
-	readNativeHarnessConnection({ [HARNESS_CONNECTION_ENV]: JSON.stringify(connection) });
-	if (argv.at(-2) !== "--print") throw new Error("无法确认 AGY 原生输入入口");
-	const workspace = join(directory, "agy-tools"), agents = join(workspace, ".agents");
-	mkdirSync(workspace, { mode: 448 });
-	mkdirSync(agents, { mode: 448 });
-	const server = agyHarnessServerName(connection);
-	writeFileSync(join(agents, "mcp_config.json"), JSON.stringify({ mcpServers: { [server]: {
-		command: nodeExecutable,
-		args: [mcpEntryPath],
-		env: { ELECTRON_RUN_AS_NODE: "1" }
-	} } }), {
-		flag: "wx",
-		mode: 384
-	});
-	const hookEntry = join(dirname(fileURLToPath(import.meta.url)), "native-agy-harness.mjs");
-	const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
-	const command = platform === "win32" ? "%CLIWORKER_AGY_HOOK_NODE% %CLIWORKER_AGY_HOOK_ENTRY%" : `${quote(nodeExecutable)} ${quote(hookEntry)}`;
-	writeFileSync(join(agents, "hooks.json"), JSON.stringify({ "dsh-worker-tools": { PreToolUse: [{
-		matcher: ".*",
-		hooks: [{
-			type: "command",
-			command,
-			timeout: 10
-		}]
-	}] } }), {
-		flag: "wx",
-		mode: 384
-	});
-	return {
-		argv: [
-			...argv.slice(0, -2),
-			"--add-dir",
-			workspace,
-			...argv.slice(-2)
-		],
-		env: {
-			[AGY_HARNESS_SESSION_FILE]: join(directory, "agy-harness-session.json"),
-			CLIWORKER_AGY_HOOK_NODE: `"${nodeExecutable.replaceAll("\\", "/")}"`,
-			CLIWORKER_AGY_HOOK_ENTRY: `"${hookEntry.replaceAll("\\", "/")}"`
-		}
-	};
-}
-/** Only the current, fully qualified carrier tools may reach Host approval.
-* auto_approve preserves AGY's explicit user deny/ask rules. It is not a grant
-* to execute Host tools: the carrier still enters tools.execute per call.
-*/
-async function agyHarnessHookDecision(payload, { env = process.env, signal } = {}) {
-	const allow = { decision: "allow" }, deny = {
-		decision: "deny",
-		reason: "本轮 Harness 工具桥身份或授权无法确认，未自动重试"
-	};
-	try {
-		const connection = readNativeHarnessConnection(env);
-		if (!connection?.executionReady || connection.binding.cli !== "antigravity") return deny;
-		const name = payload?.toolCall?.name, server = agyHarnessServerName(connection);
-		if (typeof name !== "string") return deny;
-		const prefixes = [
-			`mcp_${server}_`,
-			`mcp__${server}__`,
-			`${server}.`
-		];
-		if (!prefixes.some((prefix) => name.startsWith(prefix))) return allow;
-		const session = readSession(env[AGY_HARNESS_SESSION_FILE]);
-		if (JSON.stringify(session.binding) !== JSON.stringify(connection.binding) || typeof payload.conversationId !== "string" || payload.conversationId !== session.conversationId || !Number.isSafeInteger(payload.stepIdx) || payload.stepIdx < 0) return deny;
-		const catalog = await createNativeHarnessClient(connection).request("agy-hook-catalogue", "tools/list", {}, signal);
-		if (!Array.isArray(catalog?.tools) || !catalog.tools.some((tool) => typeof tool.name === "string" && prefixes.some((prefix) => name === prefix + tool.name))) return deny;
-		return {
-			decision: "auto_approve",
-			reason: "仅进入本轮 Harness 工具桥，实际执行仍须宿主审批"
-		};
-	} catch {
-		return deny;
-	}
-}
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-	const maximum = 131072;
-	let input = "", tooLarge = false;
-	try {
-		process.stdin.setEncoding("utf8");
-		for await (const bytes of process.stdin) {
-			input += bytes.toString("utf8");
-			if (Buffer.byteLength(input) > maximum) {
-				tooLarge = true;
-				break;
-			}
-		}
-		if (tooLarge) throw new Error("Hook input exceeds limit");
-		process.stdout.write(JSON.stringify(await agyHarnessHookDecision(JSON.parse(input), { signal: AbortSignal.timeout(8e3) })));
-	} catch {
-		process.stdout.write(JSON.stringify({
-			decision: "deny",
-			reason: "Harness 工具桥准入失败，未自动重试"
-		}));
-	}
-}
-//#endregion
 //#region lib/types/host/native-worker.js
 const NATIVE_TRANSPORTS = {
 	antigravity: "agy-stream-v1",
@@ -10140,8 +13624,10 @@ async function prepareNativeWorker(launch, input, config) {
 	const request = join(directory, "request.json");
 	let control;
 	let guidance;
+	let approval;
 	try {
 		control = await createNativeStopControl(join(directory, "stop"));
+		approval = await createNativeApprovalControl(join(directory, "approval"));
 		if (["codex", "hermes"].includes(input.cli)) guidance = await createNativeGuidanceControl(join(directory, "control"));
 		const activeControl = control;
 		const native = process.platform === "win32" && input.cli === "codex" ? windowsCodexBackgroundLaunch(nativeLaunchArgv(launch.argv), launch.env) : void 0;
@@ -10151,18 +13637,10 @@ async function prepareNativeWorker(launch, input, config) {
 			cli: input.cli,
 			argv: launch.argv,
 			env: baseEnv ? Object.fromEntries(Object.entries(baseEnv).filter((entry) => typeof entry[1] === "string")) : void 0,
-			connection: harnessTools
+			connection: harnessTools,
+			toolTimeoutMs: config.timeLimit?.totalMs ?? config.timeoutMs
 		});
 		let nativeArgv = injected.argv;
-		if (input.cli === "antigravity" && harnessTools) {
-			const prepared = prepareAgyHarnessWorkspace({
-				directory,
-				argv: nativeArgv,
-				connection: harnessTools
-			});
-			nativeArgv = prepared.argv;
-			Object.assign(injected.env, prepared.env);
-		}
 		if (input.cli === "codex" && harnessTools) {
 			const promptIndex = nativeArgv.indexOf(`任务：\n${input.prompt}`);
 			if (promptIndex >= 0) nativeArgv = [
@@ -10180,14 +13658,23 @@ async function prepareNativeWorker(launch, input, config) {
 				controlDirectory: join(directory, "control"),
 				controlNonce: guidance.nonce
 			} : {},
+			approvalDirectory: join(directory, "approval"),
+			approvalNonce: approval.nonce,
 			...native ? { nativeExecutable: native.argv[0] } : {},
-			timeoutMs: config.timeoutMs,
+			timeoutMs: config.timeLimit?.totalMs ?? config.timeoutMs,
+			...config.timeLimit ? {
+				deadlineAt: config.timeLimit.deadlineAt,
+				idleTimeoutMs: config.timeLimit.idleMs
+			} : {},
 			maxLineBytes: config.maxLineBytes,
-			maxRunBytes: config.maxRunBytes
+			maxRunBytes: config.maxRunBytes,
+			maxNativeLineBytes: config.maxNativeLineBytes,
+			maxToolPreviewBytes: config.maxToolPreviewBytes
 		}), {
 			mode: 384,
 			flag: "wx"
 		});
+		const activeApproval = approval;
 		return {
 			...launch,
 			argv: [
@@ -10195,6 +13682,9 @@ async function prepareNativeWorker(launch, input, config) {
 				bridgePath(),
 				request
 			],
+			answerApproval: (id, decision) => activeApproval.steer(JSON.stringify(decision), id),
+			/** Pauses or resumes the runner's idle window for hold `key` (`idle-…`); each command has its own mailbox id. */
+			holdIdle: (key, state) => activeApproval.steer(state, `${key}:${state}`),
 			env: {
 				...injected.env,
 				ELECTRON_RUN_AS_NODE: "1"
@@ -10203,6 +13693,7 @@ async function prepareNativeWorker(launch, input, config) {
 			...guidance ? { steer: guidance.steer } : {},
 			cleanup: async () => {
 				try {
+					await activeApproval.close();
 					await guidance?.close();
 					await activeControl.close();
 					await launch.cleanup?.();
@@ -10216,6 +13707,7 @@ async function prepareNativeWorker(launch, input, config) {
 		};
 	} catch (error) {
 		try {
+			await approval?.close();
 			await guidance?.close();
 			await control?.close();
 		} finally {
@@ -10395,11 +13887,17 @@ async function extendedLaunch(cli, executable, project, preference, mode, prompt
 	}, phase, scope));
 	const prepared = cli === "zcode" ? await prepareZCode({
 		...input,
+		...config.access ? { access: config.access } : {},
 		authDirectory: zcodeAuthDirectory(config.zcodeAuthDirectory, config.stateDirectory),
 		builtinConfig: config.zcodeBuiltinConfig
 	}) : cli === "pi" || cli === "omp" ? await preparePiOmp({
 		...input,
 		cli,
+		maxLineBytes: config.maxLineBytes,
+		maxRunBytes: config.maxRunBytes,
+		maxNativeLineBytes: config.maxNativeLineBytes,
+		maxToolPreviewBytes: config.maxToolPreviewBytes,
+		...config.access ? { access: config.access } : {},
 		...config.harnessTools ? { harnessTools: config.harnessTools } : {},
 		accountRoot: config.stateDirectory ?? join(process.env.DSH_HOME ?? join(homedir(), ".dsh"), "cliworker-now")
 	}, metadata) : cli === "opencode" ? await prepareOpenCode({
@@ -10409,7 +13907,11 @@ async function extendedLaunch(cli, executable, project, preference, mode, prompt
 		...input,
 		hermesHome: effectiveHermesHome(config),
 		renewal
-	}) : cli === "grok" ? await prepareGrok(input) : void 0;
+	}) : cli === "grok" ? await prepareGrok({
+		...input,
+		...config.access ? { access: config.access } : {},
+		...config.harnessTools ? { harnessTools: config.harnessTools } : {}
+	}) : void 0;
 	if (!prepared) throw new Error("未知 CLI");
 	let launch = prepared;
 	let temporary;
@@ -10429,6 +13931,7 @@ async function extendedLaunch(cli, executable, project, preference, mode, prompt
 			prompt,
 			conversationId,
 			stateDirectory: state,
+			...config.access ? { access: config.access } : {},
 			...config.attachments?.length ? { attachments: config.attachments } : {},
 			...config.harnessTools ? { harnessTools: config.harnessTools } : {}
 		}, config);
@@ -10449,6 +13952,7 @@ async function extendedLaunch(cli, executable, project, preference, mode, prompt
 			..."activate" in launch && launch.activate ? { activate: launch.activate } : {},
 			..."steer" in launch && launch.steer ? { steer: launch.steer } : {},
 			..."stop" in launch && launch.stop ? { stop: launch.stop } : {},
+			..."answerApproval" in launch && launch.answerApproval ? { answerApproval: launch.answerApproval } : {},
 			cleanup: async () => {
 				try {
 					await cleanupLaunch();
@@ -10505,7 +14009,10 @@ async function extendedCatalog(cli, executable, capture, stateDirectory, config,
 	}), {
 		signal,
 		renewal
-	}) : cli === "grok" ? await discoverGrok(executable, run, state, { signal }) : void 0;
+	}) : cli === "grok" ? await discoverGrok(executable, run, state, {
+		signal,
+		...renewal ? { renewal } : {}
+	}) : void 0;
 	if (!models) throw new Error("未知 CLI");
 	signal?.throwIfAborted();
 	sealPrivateTree(state);
@@ -10591,60 +14098,6 @@ function projectPublicToolCall(cli, event) {
 	} : event;
 }
 //#endregion
-//#region lib/types/host/native-response.mjs
-const count$12 = (value) => Number.isSafeInteger(value) && value >= 0;
-const object$9 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
-/** AGY JSONUsage input excludes cache reads; its reported total excludes them too. */
-function agyResponseUsage(value) {
-	if (!object$9(value)) return;
-	const { input_tokens: input, output_tokens: output, cache_read_tokens: cacheRead, total_tokens: total } = value;
-	if (![
-		input,
-		output,
-		cacheRead,
-		total
-	].every(count$12) || total !== input + output || !count$12(total + cacheRead)) return;
-	return {
-		inputTokens: input,
-		outputTokens: output,
-		cacheReadTokens: cacheRead,
-		cacheWriteTokens: 0,
-		totalTokens: total + cacheRead
-	};
-}
-/** Internal transport validation: identity is explicit and usage is never inferred. */
-function parseNativeResponse(value) {
-	if (!object$9(value) || !["id", "blockId"].every((key) => typeof value[key] === "string" && value[key].length > 0 && value[key].length <= 512) || !count$12(value.index) || value.index > 4096 || value.complete !== void 0 && value.complete !== true) throw new Error("Invalid CLI response identity");
-	let usage;
-	if (value.usage !== void 0) {
-		const raw = value.usage;
-		if (!object$9(raw) || !count$12(raw.inputTokens) || !count$12(raw.outputTokens)) throw new Error("Invalid CLI response usage");
-		usage = {
-			inputTokens: raw.inputTokens,
-			outputTokens: raw.outputTokens
-		};
-		for (const key of [
-			"totalTokens",
-			"cacheReadTokens",
-			"cacheWriteTokens",
-			"reasoningTokens"
-		]) {
-			if (raw[key] === void 0) continue;
-			if (!count$12(raw[key])) throw new Error("Invalid CLI response usage");
-			usage[key] = raw[key];
-		}
-		const known = raw.inputTokens + raw.outputTokens + (raw.cacheReadTokens ?? 0) + (raw.cacheWriteTokens ?? 0);
-		if (!count$12(known) || raw.reasoningTokens !== void 0 && raw.reasoningTokens > raw.outputTokens || raw.totalTokens !== void 0 && (raw.totalTokens < known || raw.cacheReadTokens !== void 0 && raw.cacheWriteTokens !== void 0 && raw.totalTokens !== known)) throw new Error("Contradictory CLI response usage");
-	}
-	return {
-		id: value.id,
-		blockId: value.blockId,
-		index: value.index,
-		...value.complete ? { complete: true } : {},
-		...usage ? { usage } : {}
-	};
-}
-//#endregion
 //#region lib/types/host/native-request-state.js
 /** Only the isolated Hermes observer publishes these metadata frames. */
 function parseRequestState(value, sessionId) {
@@ -10677,22 +14130,195 @@ function projectRequestState(worker, events) {
 	};
 }
 //#endregion
+//#region lib/types/host/native-approval-policy.js
+const KINDS = /* @__PURE__ */ new Set([
+	"command",
+	"file",
+	"network",
+	"permission",
+	"tool",
+	"other"
+]);
+/** Host-side check of a runner frame (mirrors the runner's own bound). */
+function parseNativeApprovalRequest(value) {
+	const request = value;
+	if (!request || typeof request !== "object" || !KINDS.has(request.kind) || typeof request.summary !== "string" || !request.summary.trim() || request.summary.length > 500 || request.detail !== void 0 && (typeof request.detail !== "string" || request.detail.length > 4e3) || typeof request.allowSession !== "boolean") throw new Error("Invalid approval frame");
+	return {
+		kind: request.kind,
+		summary: request.summary,
+		...request.detail ? { detail: request.detail } : {},
+		allowSession: request.allowSession
+	};
+}
+/**
+* The access tier a run starts with. Plan wins; otherwise the level the user
+* chose for this Worker, or the parent's tier when there is none.
+*/
+function runAccess(mode, level, state) {
+	return mode === "plan" || state.planMode ? "read-only" : levelAccess(effectiveLevel(level, state.sandbox));
+}
+/**
+* The DSH approval policy a Worker runs under. Full access keeps the parent's
+* policy when the parent is full too; a Worker the user set to full under a
+* lower parent never asks, as 完全权限 promises. Lower tiers ask.
+*/
+function workerApproval(access, state) {
+	if (access !== "danger-full-access") return "ask";
+	return state.sandbox === "danger-full-access" ? state.approval : "never";
+}
+/**
+* Decide one request from the state current when it arrives. `ask` means the
+* user must answer; every other outcome is final and shows no prompt. A Worker
+* at its first item always asks: the user chose to be asked.
+*/
+function decideApproval(mode, level, state) {
+	if (mode === "plan" || state.planMode) return {
+		decision: "deny",
+		source: "plan"
+	};
+	const effective = effectiveLevel(level, state.sandbox);
+	const approval = effective === "full" ? workerApproval("danger-full-access", state) : state.approval;
+	if (approval === "never" && effective === "full") return {
+		decision: "allow-once",
+		source: "full-access"
+	};
+	if (approval === "never" && effective !== "ask") return {
+		decision: "deny",
+		source: "preset"
+	};
+	return "ask";
+}
+const SOURCE_LABELS = {
+	user: "DSH 用户",
+	"full-access": "完全权限自动放行",
+	plan: "规划模式",
+	preset: "权限预设",
+	unavailable: "无人应答",
+	stopped: "任务停止",
+	invalid: "请求无效"
+};
+const DECISION_LABELS = {
+	"allow-once": "允许一次",
+	"allow-session": "本会话始终允许",
+	deny: "拒绝"
+};
+const APPROVAL_OPTIONS = {
+	once: "允许一次",
+	session: "本会话始终允许",
+	deny: "拒绝"
+};
+/** Timeline text for one decision. */
+function approvalDecisionText(decision) {
+	return `授权决定：${DECISION_LABELS[decision.decision]}（${SOURCE_LABELS[decision.source]}）`;
+}
+/** Worker approval panel copy; the panel shows it as plain text. */
+function approvalPrompt(request, context) {
+	return [
+		`${context.worker}（${context.cli}）请求授权：${request.summary}`,
+		...request.detail ? [request.detail] : [],
+		`工作目录：${context.project}`
+	].join("\n");
+}
+/**
+* Untrusted text as one literal Markdown paragraph: every ASCII punctuation is
+* escaped, so nothing becomes a link, format or HTML, and each line keeps a hard break.
+*/
+function literalMarkdown(text) {
+	return text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => line.replace(/[!-/:-@[-`{-~]/g, "\\$&")).join("\\\n");
+}
+/**
+* Parent-page question: offers a session grant only when the CLI natively has one.
+* The card's title collapses line breaks; only `detail` is laid out as paragraphs.
+*/
+function approvalQuestion(request, context) {
+	return {
+		id: "cliworker_approval",
+		header: "CLI 授权",
+		question: `${context.worker}（${context.cli}）请求授权`,
+		detail: [
+			request.summary,
+			request.detail ?? "",
+			`工作目录：${context.project}`
+		].map(literalMarkdown).filter(Boolean).join("\n\n"),
+		options: [
+			{ label: APPROVAL_OPTIONS.once },
+			...request.allowSession ? [{ label: APPROVAL_OPTIONS.session }] : [],
+			{ label: APPROVAL_OPTIONS.deny }
+		]
+	};
+}
+/** Map a question answer; anything but an offered allow label is a denial. */
+function decisionFromAnswer(request, answer) {
+	const selected = answer?.custom === void 0 && answer?.selected.length === 1 ? answer.selected[0] : void 0;
+	if (selected === APPROVAL_OPTIONS.once) return {
+		decision: "allow-once",
+		source: "user"
+	};
+	if (selected === APPROVAL_OPTIONS.session && request.allowSession) return {
+		decision: "allow-session",
+		source: "user"
+	};
+	return {
+		decision: "deny",
+		source: "user"
+	};
+}
+/** Map a DSH approval outcome from the Worker's native panel. */
+function decisionFromOutcome(outcome) {
+	if (outcome === "allowed-once") return {
+		decision: "allow-once",
+		source: "user"
+	};
+	if (outcome === "rejected") return {
+		decision: "deny",
+		source: "user"
+	};
+	return {
+		decision: "deny",
+		source: outcome === "cancelled" ? "stopped" : "unavailable"
+	};
+}
+/** Map a decision back to the DSH outcome a tool bridge request is waiting for. */
+function outcomeFromDecision(decision) {
+	if (decision.decision !== "deny") return "allowed-once";
+	if (decision.source === "stopped") return "cancelled";
+	return decision.source === "unavailable" ? "unavailable" : "rejected";
+}
+const clip = (value, limit) => value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+/**
+* Summary of one DSH tool approval raised through the tool bridge. DSH sends
+* the reason but not the command, so the command comes from the call itself.
+* DSH has no session-wide grant.
+*/
+function harnessApprovalRequest(name, args, reason) {
+	const command = args && typeof args === "object" ? args.command : void 0;
+	const detail = reason.displayReason?.zh ?? reason.reason;
+	return {
+		kind: "tool",
+		summary: clip(typeof command === "string" && command.trim() ? `执行命令（DSH 备选工具 ${name}）：${command}` : `使用 DSH 备选工具 ${name}`, 500),
+		...detail?.trim() ? { detail: clip(detail, 4e3) } : {},
+		allowSession: false
+	};
+}
+//#endregion
 //#region lib/types/host/bridge-protocol.js
 /** Internal framing for owned native transports; never accepts arbitrary event kinds. */
 var BridgeProtocol = class {
 	emit;
 	identify;
 	maxLineBytes;
+	approval;
 	decoder = new StringDecoder("utf8");
 	pending = "";
 	requestSequence = 0;
 	nativeRunId;
 	conversationId;
 	result;
-	constructor(emit, identify, maxLineBytes) {
+	constructor(emit, identify, maxLineBytes, approval) {
 		this.emit = emit;
 		this.identify = identify;
 		this.maxLineBytes = maxLineBytes;
+		this.approval = approval;
 	}
 	feed(chunk) {
 		this.pending += typeof chunk === "string" ? chunk : this.decoder.write(chunk);
@@ -10751,10 +14377,18 @@ var BridgeProtocol = class {
 				...Number.isInteger(e.step) ? { step: e.step } : {},
 				...typeof e.state === "string" ? { state: e.state } : {},
 				...typeof e.detail === "string" ? { detail: e.detail } : {},
+				...(e.kind === "tool" || e.kind === "reasoning") && typeof e.delta === "string" && e.delta ? { delta: e.delta } : {},
+				...e.truncated === true ? { truncated: true } : {},
+				...Number.isSafeInteger(e.outputBytes) && e.outputBytes > 0 ? { outputBytes: e.outputBytes } : {},
 				...typeof e.observedModel === "string" ? { observedModel: e.observedModel } : {},
+				...e.kind === "diagnostic" && e.notice === true ? { notice: true } : {},
 				...e.response === void 0 ? {} : { response: parseNativeResponse(e.response) },
 				...e.kind === "tool" && pickPublicToolCall(e.toolCall) ? { toolCall: pickPublicToolCall(e.toolCall) } : {}
 			});
+		} else if (v.type === "approval") {
+			if (typeof v.id !== "string" || !/^approval-\d{1,6}$/.test(v.id)) throw new Error("Invalid approval frame");
+			const request = parseNativeApprovalRequest(v.request);
+			this.approval?.(v.id, request);
 		} else if (v.type === "result") {
 			if (!this.conversationId && v.status === "ERROR" && typeof v.error === "string") throw new Error(v.error.slice(0, 4096));
 			if (!this.conversationId || ![
@@ -10766,7 +14400,8 @@ var BridgeProtocol = class {
 				conversationId: this.conversationId,
 				status: v.status,
 				response: v.response,
-				error: typeof v.error === "string" ? v.error : void 0
+				error: typeof v.error === "string" ? v.error : void 0,
+				...v.status === "SUCCESS" && typeof v.notice === "string" && v.notice ? { notice: v.notice.slice(0, 2e3) } : {}
 			};
 			this.emit({
 				kind: "result",
@@ -10777,8 +14412,7 @@ var BridgeProtocol = class {
 		} else throw new Error("Unknown CLI bridge frame");
 	}
 };
-//#endregion
-//#region lib/types/host/pi-omp-environment.mjs
+promisify(execFile);
 /** OMP 16 resolves its config root with join(os.homedir(), PI_CONFIG_DIR).
 * Windows roots on another drive cannot be expressed relative to the real home.
 * Rebase only this child environment; Host account discovery retains the real home.
@@ -11382,24 +15016,24 @@ var AgyProtocol = class {
 //#endregion
 //#region lib/types/host/primary-response.mjs
 const object$8 = (value) => value && typeof value === "object" && !Array.isArray(value);
-const count$11 = (value) => Number.isSafeInteger(value) && value >= 0;
+const count$7 = (value) => Number.isSafeInteger(value) && value >= 0;
 /** Anthropic input/cache buckets are disjoint; missing cache categories stay unknown. */
 function claudeResponseUsage(value) {
-	if (!object$8(value) || !count$11(value.input_tokens) || !count$11(value.output_tokens)) return;
+	if (!object$8(value) || !count$7(value.input_tokens) || !count$7(value.output_tokens)) return;
 	const usage = {
 		inputTokens: value.input_tokens,
 		outputTokens: value.output_tokens
 	};
 	for (const [source, target] of [["cache_read_input_tokens", "cacheReadTokens"], ["cache_creation_input_tokens", "cacheWriteTokens"]]) {
 		if (value[source] === void 0) continue;
-		if (!count$11(value[source])) return;
+		if (!count$7(value[source])) return;
 		usage[target] = value[source];
 	}
 	const thinking = object$8(value.output_tokens_details) ? value.output_tokens_details.thinking_tokens : void 0;
-	if (count$11(thinking) && thinking <= usage.outputTokens) usage.reasoningTokens = thinking;
+	if (count$7(thinking) && thinking <= usage.outputTokens) usage.reasoningTokens = thinking;
 	if (usage.cacheReadTokens !== void 0 && usage.cacheWriteTokens !== void 0) {
 		const total = usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
-		if (!count$11(total)) return;
+		if (!count$7(total)) return;
 		usage.totalTokens = total;
 	}
 	return usage;
@@ -11421,7 +15055,7 @@ var ClaudeResponseTracker = class {
 	}
 	delta(usage) {
 		if (!this.id || !object$8(usage)) return;
-		if (!count$11(usage.output_tokens) || this.hasDelta && usage.output_tokens < this.tokens.output_tokens) {
+		if (!count$7(usage.output_tokens) || this.hasDelta && usage.output_tokens < this.tokens.output_tokens) {
 			this.invalidUsage = true;
 			return;
 		}
@@ -11450,6 +15084,11 @@ var ClaudeResponseTracker = class {
 			const usage = final && this.hasDelta && !this.invalidUsage ? claudeResponseUsage(this.tokens) : void 0;
 			this.output({
 				...this.last,
+				delta: void 0,
+				...this.last.toolCall ? { toolCall: {
+					...this.last.toolCall,
+					output: void 0
+				} } : {},
 				...this.last.kind === "assistant" ? { text: "" } : {},
 				response: {
 					...this.last.response,
@@ -11835,19 +15474,24 @@ async function captureCatalogMetadata(backend, config, argv, cwd, signal, env, a
 		if (keep) output += decoder.end();
 	};
 	const readers = [read(process.stdout, true), read(process.stderr, false)];
+	let finished = false;
 	try {
 		await Promise.all(readers);
 		const outcome = await process.done;
+		finished = true;
 		control.throwIfAborted();
 		if (outcome.exitCode === null || !allowedExitCodes.includes(outcome.exitCode)) throw new Error("CLI 模型查询失败，请在终端检查该 CLI 配置");
 		return output;
 	} finally {
 		let exited = false;
 		try {
-			process.terminate();
-			exited = await process.waitForExit();
-		} catch {
-			throw new ProcessCleanupUnconfirmedError();
+			if (finished && !control.aborted) exited = await process.waitForExit(AbortSignal.timeout(METADATA_EXIT_GRACE_MS));
+			if (!exited) {
+				process.terminate();
+				exited = await process.waitForExit();
+			}
+		} catch (error) {
+			throw new ProcessCleanupUnconfirmedError({ cause: error });
 		}
 		if (!exited) throw new ProcessCleanupUnconfirmedError();
 		await Promise.allSettled([...readers, process.done]);
@@ -11872,11 +15516,12 @@ async function catalogFor(cli, backend, config, cwd, signal) {
 			signal,
 			graceMs: config.graceMs
 		});
-		if (!models.length) throw new Error(`${CLI_LABELS[cli]} 当前账号暂无可用模型，请登录或刷新`);
+		const scopeNotice = catalogNoticeOf(models);
+		if (!models.length) throw new Error(scopeNotice ?? `${CLI_LABELS[cli]} 当前账号暂无可用模型，请登录或刷新`);
 		return {
 			cli,
 			models,
-			notice: "当前账号可用模型"
+			notice: scopeNotice ?? "当前账号可用模型"
 		};
 	}
 	if (cli === "antigravity") return {
@@ -11885,15 +15530,25 @@ async function catalogFor(cli, backend, config, cwd, signal) {
 		notice: "当前账号可用模型"
 	};
 	if (cli === "codex") {
+		const relay = await readCodexCustomRouteVersion(cwd, signal) !== void 0;
 		const models = await discoverCodexModels(backend, config, executable, cwd, signal);
 		if (!models.length) throw new Error("Codex 当前账号暂无可确认模型，请刷新");
+		return {
+			cli,
+			models,
+			notice: relay ? "Codex 自定义路由模型；来自 Codex 自带列表，中转是否支持以实际调用为准" : "当前账号可用模型"
+		};
+	}
+	if (cli === "mimo") {
+		const { models, stale } = await discoverMimoModels(executable, cwd, (argv, env) => capture(backend, config, argv, cwd, signal, env), signal);
+		if (!models.length) throw new Error(stale ? "MiMo 本地模型列表与当前账号可用模型不一致，请更新 MiMo 或运行 mimo models --refresh 后刷新" : "MiMo 当前账号暂无可确认模型，请检查配置");
 		return {
 			cli,
 			models,
 			notice: "当前账号可用模型"
 		};
 	}
-	if (cli === "claude" || cli === "kimi" || cli === "mimo") {
+	if (cli === "claude" || cli === "kimi") {
 		const claudeRoute = cli === "claude" ? await readClaudeOwnRoute(cwd, signal) : void 0;
 		if (claudeRoute?.kind === "native") {
 			const { models, quota } = await discoverClaudeNativeOAuth(backend, config, executable, cwd, signal, claudeNativeSettingsArguments(claudeRoute.configDirectory, claudeRoute.suppressedEnvironment));
@@ -11917,10 +15572,10 @@ function validatePreference(preference, catalog) {
 	if (cliOf(preference) !== catalog.cli) throw new Error("CLI 配置不匹配");
 	resolveModel(preference, catalog.models);
 }
-function workerArguments(executable, project, preference, mode, prompt, timeoutMs, conversationId, nativeTransport = false) {
+function workerArguments(executable, project, preference, mode, prompt, timeoutMs, conversationId, nativeTransport = false, access) {
 	const cli = cliOf(preference);
 	const task = `任务：\n${prompt}`;
-	if (cli === "antigravity") return agyArguments(executable, project, preference, mode, prompt, timeoutMs, conversationId);
+	if (cli === "antigravity") return agyArguments(executable, project, preference, mode, prompt, timeoutMs, conversationId, access);
 	if (cli === "qoder" || cli === "qodercn") {
 		if (!nativeTransport) throw new Error("Qoder 仅支持已确认的原生 ACP 通信，请新建任务");
 		if (mode === "plan") throw new Error("Qoder 当前 ACP 未公开只读规划模式，无法安全执行规划任务");
@@ -11928,7 +15583,7 @@ function workerArguments(executable, project, preference, mode, prompt, timeoutM
 			executable,
 			"--acp",
 			"--permission-mode",
-			"accept_edits",
+			access === "read-only" ? "default" : access === "danger-full-access" ? "bypass_permissions" : "auto",
 			"--model",
 			preference.model
 		];
@@ -11944,9 +15599,10 @@ function workerArguments(executable, project, preference, mode, prompt, timeoutM
 		"-c",
 		`model_reasoning_effort=${JSON.stringify(preference.effort)}`,
 		"-c",
-		`sandbox_mode=${JSON.stringify(mode === "plan" ? "read-only" : "workspace-write")}`,
+		`sandbox_mode=${JSON.stringify(mode === "plan" ? "read-only" : access ?? "workspace-write")}`,
 		"-c",
-		"approval_policy=\"never\"",
+		`approval_policy=${JSON.stringify(mode === "plan" || !access || access === "danger-full-access" ? "never" : "on-request")}`,
+		...mode !== "plan" && access ? ["-c", `approvals_reviewer=${JSON.stringify(access === "workspace-write" ? "auto_review" : "user")}`] : [],
 		task
 	];
 	if (cli === "claude") return [
@@ -11960,7 +15616,7 @@ function workerArguments(executable, project, preference, mode, prompt, timeoutM
 		preference.model,
 		...preference.effort !== "default" ? ["--effort", preference.effort] : [],
 		"--permission-mode",
-		mode === "plan" ? "plan" : "acceptEdits",
+		mode === "plan" ? "plan" : access === "danger-full-access" ? "bypassPermissions" : access === "read-only" ? "manual" : access === "workspace-write" ? "auto" : "acceptEdits",
 		...conversationId ? ["--resume", conversationId] : [],
 		task
 	];
@@ -12296,6 +15952,8 @@ function sort(v) {
 	return object$6(v) ? Object.fromEntries(Object.keys(v).sort().map((key) => [key, sort(v[key])])) : v;
 }
 /** Safe public error; neither secrets nor native paths are interpolated. */
+/** A sign-out is told as such, so a caller asks the user to sign in rather than retrying. */
+const AGY_SIGNED_OUT = "尚未登录 Antigravity，请在「CLI Worker 设置 → Antigravity」点击「登录账号」完成登录后再继续";
 var CliAccountBindingError = class extends Error {
 	code = "CLI_OWN_ACCOUNT_REQUIRED";
 	constructor(cli, reason) {
@@ -12430,20 +16088,65 @@ async function codexStore(project, signal) {
 		store
 	};
 }
-async function requireDefaultCodexRoute(root, project, signal) {
-	if ([
-		"CODEX_API_KEY",
-		"OPENAI_API_KEY",
-		"OPENAI_BASE_URL",
-		"CODEX_BASE_URL",
-		"CHATGPT_BASE_URL",
-		"CODEX_PROFILE"
-	].some((name) => text$5(process.env[name]))) throw new CliAccountBindingError("codex");
+const CODEX_ROUTE_ENV = [
+	"CODEX_API_KEY",
+	"OPENAI_API_KEY",
+	"OPENAI_BASE_URL",
+	"CODEX_BASE_URL",
+	"CHATGPT_BASE_URL",
+	"CODEX_PROFILE"
+];
+const CODEX_ROUTE_LINE = /^\s*(?:["']?(?:model_provider|model_providers|openai_base_url|chatgpt_base_url|profile)["']?\s*=|\[\[?\s*(?:profiles|model_providers)(?:\.|\]|\s))/;
+async function codexConfigs(root, project, signal) {
+	const configs = [];
 	for (const path of codexConfigPaths(root, project)) {
 		const raw = await read(path, signal);
-		if (!raw) continue;
-		if (raw.split(/\r?\n/).some((line) => /^\s*(?:["']?(?:model_provider|model_providers|openai_base_url|chatgpt_base_url|profile)["']?\s*=|\[\[?\s*(?:profiles|model_providers)(?:\.|\]|\s))/.test(line))) throw new CliAccountBindingError("codex");
+		if (raw) configs.push([path, raw]);
 	}
+	return configs;
+}
+/**
+* Codex's own config sends it to another provider, address or profile (a relay).
+* Inherited route variables alone are not Codex's own setting.
+*/
+async function codexCustomRoute(root, project, signal) {
+	return (await codexConfigs(root, project, signal)).some(([, raw]) => raw.split(/\r?\n/).some((line) => CODEX_ROUTE_LINE.test(line)));
+}
+/**
+* A relay has no account the plugin can read, so its version is a digest of what
+* Codex reads for it: the config files, route variables, the `env_key` variables and
+* auth.json. Any change counts as an account change. Raw values never leave here.
+*/
+const codexEnvKeys = (configs) => configs.flatMap(([, raw]) => [...raw.matchAll(/^\s*env_key\s*=\s*["']([A-Za-z_][A-Za-z0-9_]*)["']/gm)].map((match) => match[1]));
+async function codexRouteVersion(root, project, signal) {
+	const configs = await codexConfigs(root, project, signal);
+	const keys = codexEnvKeys(configs);
+	const auth = await read(join(root, "auth.json"), signal);
+	if (auth !== void 0 && !object$6(JSON.parse(auth))) throw new CliAccountBindingError("codex");
+	return hash$1(stable({
+		configs: configs.map(([path, raw]) => [path, hash$1(raw)]),
+		env: [.../* @__PURE__ */ new Set([...CODEX_ROUTE_ENV, ...keys])].sort().map((name) => [name, text$5(process.env[name]) ? hash$1(process.env[name]) : null]),
+		auth: auth === void 0 ? null : hash$1(auth)
+	}));
+}
+/** The version of Codex's custom route, or undefined when Codex uses its official account. */
+async function readCodexCustomRouteVersion(project, signal) {
+	const { root } = await codexStore(project, signal);
+	return await codexCustomRoute(root, project, signal) ? codexRouteVersion(root, project, signal) : void 0;
+}
+/**
+* Workers start from a scrubbed environment. A relay's `env_key` variables, named in
+* Codex's own config, are passed on when the Host has them; nothing else is added.
+*/
+async function codexRouteEnvironment(project, signal) {
+	const { root } = await codexStore(project, signal);
+	if (!await codexCustomRoute(root, project, signal)) return {};
+	const env = {};
+	for (const name of codexEnvKeys(await codexConfigs(root, project, signal))) if (text$5(process.env[name])) env[name] = process.env[name];
+	return env;
+}
+async function requireDefaultCodexRoute(root, project, signal) {
+	if (CODEX_ROUTE_ENV.some((name) => text$5(process.env[name])) || await codexCustomRoute(root, project, signal)) throw new CliAccountBindingError("codex");
 }
 /** File-backed Codex auth only. Native keyring/auto cannot use a stale auth.json for model queries. */
 async function readCodexOwnAccountSource(project, signal) {
@@ -12509,22 +16212,29 @@ async function material(cli, backend, config, project, signal, selectedClaudeRou
 		await assertAgyNativeAccountRoute(signal, home);
 		if (process.platform === "win32") {
 			const account = await readWindowsAgyAccount(backend, config, signal);
+			if (account.identity.state === "unconfigured") throw new CliAccountBindingError(cli, AGY_SIGNED_OUT);
+			const principal = account.identity.state !== "authenticated" ? void 0 : account.principalHash ? {
+				kind: "oauth",
+				subjectHash: account.principalHash
+			} : account.identity.accountLabel ? {
+				kind: "oauth",
+				email: account.identity.accountLabel.toLowerCase()
+			} : void 0;
 			return {
 				sourceIds: ["windows-credential:gemini:antigravity"],
-				entries: account.identity.state === "authenticated" && account.principalHash ? [{
+				entries: principal ? [{
 					provider: "antigravity",
-					principal: {
-						kind: "oauth",
-						subjectHash: account.principalHash
-					}
+					principal
 				}] : []
 			};
 		}
 		const root = join(home, ".gemini");
-		const auth = await document(join(root, "jetski-standalone-oauth-token"), signal);
+		const auth = process.platform === "darwin" ? await readMacAgyCredential(backend, config, signal) : await document(join(root, "jetski-standalone-oauth-token"), signal);
+		if (!auth) throw new CliAccountBindingError(cli, AGY_SIGNED_OUT);
 		const principal = auth.auth_method === "consumer" && object$6(auth.token) ? oauthPrincipal({
 			...auth.token,
-			id_token: auth.id_token
+			id_token: auth.id_token,
+			email: accountEmail(auth.id_token_email)
 		}) : void 0;
 		return {
 			sourceIds: [root],
@@ -12536,6 +16246,16 @@ async function material(cli, backend, config, project, signal, selectedClaudeRou
 	}
 	if (cli === "codex") {
 		const { root, store } = await codexStore(project, signal);
+		if (await codexCustomRoute(root, project, signal)) return {
+			sourceIds: [root, ...store === "file" ? [] : [`native-store:${store}`]],
+			entries: [{
+				provider: "codex-custom-route",
+				principal: {
+					kind: "route",
+					version: await codexRouteVersion(root, project, signal)
+				}
+			}]
+		};
 		if (store !== "file") {
 			await requireDefaultCodexRoute(root, project, signal);
 			const identity = await readCodexAccount(backend, config, await resolveCliExecutable(cli, backend, config, signal), project, signal);
@@ -12797,1416 +16517,10 @@ async function readCliAccountBinding(cli, backend, config, project, signal, sele
 		if (error instanceof ProcessCleanupUnconfirmedError) throw error;
 		signal.throwIfAborted();
 		if (error instanceof CliAccountBindingError || error instanceof KimiOAuthModelError || error instanceof ClaudeOwnRouteError || error instanceof HermesRenewalError || error instanceof QoderAccountError) throw error;
+		if (error instanceof HermesAccountSourceError) throw new CliAccountBindingError(cli, error.message);
 		throw new CliAccountBindingError(cli);
 	}
 }
-//#endregion
-//#region lib/types/shared/worker-permissions.js
-/** Existing adapter modes only; DSH full-access/auto are not invented CLI modes. */
-function workerPermissionOptions(worker) {
-	const cli = cliOf(worker.preference);
-	return [...cli !== "hermes" && cli !== "harness" && cli !== "qoder" && cli !== "qodercn" && (cli !== "kimi" || worker.transport === "kimi-acp-v1") ? [{
-		value: "plan",
-		name: "规划（只读）",
-		description: "使用此 CLI 的原生规划或只读模式；DSH 工具桥保持只读。"
-	}] : [], ...cli !== "harness" ? [{
-		value: "accept-edits",
-		name: "允许编辑",
-		description: "沿用此 CLI 的原生保护，并受所属主会话的权限与审批约束。"
-	}] : []];
-}
-//#endregion
-//#region lib/types/shared/conversation-features.js
-const GOAL_OBJECTIVE_LIMIT = 4e3;
-/**
-* Native fork evidence per CLI (see openspec/changes/bridge-conversation-features/design.md).
-* `latest`: fork after the latest completed turn. `earlier`: fork at an earlier completed turn.
-*/
-const forkSupport = {
-	codex: {
-		latest: true,
-		earlier: true
-	},
-	opencode: {
-		latest: true,
-		earlier: false
-	},
-	pi: {
-		latest: true,
-		earlier: false
-	},
-	zcode: {
-		latest: true,
-		earlier: false
-	},
-	claude: {
-		latest: true,
-		earlier: false
-	},
-	kimi: {
-		latest: true,
-		earlier: false
-	},
-	mimo: {
-		latest: true,
-		earlier: false
-	},
-	qoder: {
-		latest: true,
-		earlier: false
-	},
-	qodercn: {
-		latest: true,
-		earlier: false
-	}
-};
-const noForkReason = {
-	antigravity: "当前 CLI 不支持会话分支：Antigravity 未公开原生分支接口",
-	hermes: "当前 CLI 不支持会话分支：Hermes 原生分支会结束原会话",
-	grok: "当前 CLI 不支持会话分支：已确认 --fork-session，但当前 ACP 的 x.ai/session/fork 参数和回执尚未核实",
-	omp: "当前 CLI 不支持会话分支：RPC 只有从用户条目前分支的 branch，未确认包含最新完成轮的 clone 接口"
-};
-function bridgedFeatureSupport(worker) {
-	const cli = cliOf(worker.preference);
-	const plan = workerPermissionOptions(worker).some((option) => option.value === "plan");
-	const fork = worker.transport === {
-		codex: "codex-app-v1",
-		claude: "claude-stream-v1",
-		kimi: "kimi-acp-v1",
-		mimo: "mimo-http-v1",
-		zcode: "zcode-app-v1",
-		pi: "pi-rpc-v1",
-		opencode: "opencode-http-v1",
-		qoder: "qoder-acp-v1",
-		qodercn: "qodercn-acp-v1"
-	}[cli] ? forkSupport[cli] : void 0;
-	return {
-		goal: { supported: true },
-		plan: plan ? { supported: true } : {
-			supported: false,
-			reason: "当前 CLI 不支持规划模式"
-		},
-		feedback: { supported: true },
-		fork: fork?.latest ? { supported: true } : {
-			supported: false,
-			reason: noForkReason[cli] ?? "当前 CLI 通信协议不支持会话分支，请使用原生会话 Worker"
-		},
-		forkEarlier: fork?.earlier ? { supported: true } : {
-			supported: false,
-			reason: "当前 CLI 只支持从最新一轮分支"
-		}
-	};
-}
-//#endregion
-//#region lib/types/shared/native-usage-report.js
-const count$10 = (v) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
-/** Partial details never become zero-valued native billing buckets. */
-function nativeUsageReport(cli, usage) {
-	if (!usage || ![
-		"response",
-		"run",
-		"session",
-		"reported"
-	].includes(usage.scope) || !count$10(usage.total)) return;
-	if ((cli === "qoder" || cli === "qodercn") && (usage.total === 0 || usage.cacheRead !== void 0 || usage.cacheWrite !== void 0)) return;
-	if (cli === "antigravity") return;
-	for (const field of [
-		"input",
-		"output",
-		"cacheRead",
-		"cacheWrite",
-		"reasoning"
-	]) if (usage[field] !== void 0 && !count$10(usage[field])) return;
-	const inclusive = [
-		"codex",
-		"hermes",
-		"grok",
-		"zcode",
-		"qoder",
-		"qodercn"
-	].includes(cli);
-	const reasoningSeparate = cli === "mimo" || cli === "opencode";
-	const extra = usage.orchestration;
-	if (extra && (cli !== "omp" || Object.values(extra).some((v) => !count$10(v)))) return;
-	const extraTotal = Object.values(extra ?? {}).reduce((sum, v) => sum + v, 0);
-	if (!count$10(extraTotal)) return;
-	const cache = (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
-	if (inclusive) {
-		const known = Math.max(usage.input ?? 0, cache) + Math.max(usage.output ?? 0, usage.reasoning ?? 0);
-		if (!count$10(known) || known > usage.total) return;
-		if (usage.input !== void 0 && cache > usage.input) return;
-		if (usage.input !== void 0 && usage.output !== void 0 && usage.total !== usage.input + usage.output) return;
-	} else {
-		const known = (usage.input ?? 0) + (reasoningSeparate ? usage.output ?? 0 : Math.max(usage.output ?? 0, usage.reasoning ?? 0)) + cache + extraTotal + (reasoningSeparate ? usage.reasoning ?? 0 : 0);
-		if (!count$10(known) || known > usage.total) return;
-		if ([
-			usage.input,
-			usage.output,
-			usage.cacheRead,
-			usage.cacheWrite,
-			...reasoningSeparate ? [usage.reasoning] : []
-		].every(count$10) && cli !== "omp" && known !== usage.total) return;
-	}
-	if (!reasoningSeparate && usage.output !== void 0 && (usage.reasoning ?? 0) > usage.output) return;
-	const output = reasoningSeparate ? usage.output !== void 0 && usage.reasoning !== void 0 ? usage.output + usage.reasoning : void 0 : usage.output;
-	if (output !== void 0 && !count$10(output)) return;
-	return {
-		totalTokens: usage.total,
-		inputBasis: cli === "qoder" || cli === "qodercn" ? "reported" : inclusive ? "inclusive" : "uncached",
-		...usage.input === void 0 ? {} : { inputTokens: usage.input },
-		...output === void 0 ? {} : { outputTokens: output },
-		...usage.cacheRead === void 0 ? {} : { cacheReadTokens: usage.cacheRead },
-		...usage.cacheWrite === void 0 ? {} : { cacheWriteTokens: usage.cacheWrite },
-		...usage.reasoning === void 0 ? {} : { reasoningTokens: usage.reasoning },
-		...extra && Object.keys(extra).length ? { orchestration: { ...extra } } : {}
-	};
-}
-//#endregion
-//#region lib/types/shared/native-token-usage.js
-const count$9 = (value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-/**
-* Translate the CLI's billing buckets, never sum successive snapshots. The
-* Host already labels run/session/reported scope and deduplicates receipts.
-* Unsupported or inconsistent accounting remains absent in the native UI.
-*/
-function nativeTokenUsage(cli, usage) {
-	if (usage?.orchestration && Object.values(usage.orchestration).some((value) => value > 0)) return;
-	if (!usage || ![
-		"response",
-		"run",
-		"session",
-		"reported"
-	].includes(usage.scope)) return;
-	if (usage.reasoning !== void 0 && (!count$9(usage.reasoning) || !["mimo", "opencode"].includes(cli) && usage.output !== void 0 && usage.reasoning > usage.output)) return;
-	if (!count$9(usage.total) || !count$9(usage.input) || !count$9(usage.output) || !count$9(usage.cacheRead)) return;
-	const cacheWriteTokens = (cli === "codex" || cli === "antigravity") && usage.cacheWrite === void 0 ? 0 : usage.cacheWrite;
-	if (!count$9(cacheWriteTokens)) return;
-	if (cli === "antigravity") {
-		const reportedTotal = usage.input + usage.output;
-		const nativeTotal = reportedTotal + usage.cacheRead + cacheWriteTokens;
-		if (cacheWriteTokens !== 0 || !count$9(reportedTotal) || usage.total !== reportedTotal || !count$9(nativeTotal)) return;
-		return {
-			uncachedInputTokens: usage.input,
-			outputTokens: usage.output,
-			cacheReadTokens: usage.cacheRead,
-			cacheWriteTokens
-		};
-	}
-	let uncachedInputTokens;
-	let outputTokens = usage.output;
-	switch (cli) {
-		case "codex":
-		case "hermes":
-		case "grok":
-		case "zcode":
-			uncachedInputTokens = usage.input - usage.cacheRead - cacheWriteTokens;
-			break;
-		case "claude":
-		case "kimi":
-		case "pi":
-		case "omp":
-			uncachedInputTokens = usage.input;
-			break;
-		case "mimo":
-		case "opencode":
-			if (!count$9(usage.reasoning)) return;
-			uncachedInputTokens = usage.input;
-			outputTokens += usage.reasoning;
-			break;
-		default: return;
-	}
-	if (!count$9(uncachedInputTokens) || !count$9(outputTokens)) return;
-	const total = uncachedInputTokens + outputTokens + usage.cacheRead + cacheWriteTokens;
-	if (!count$9(total) || total !== usage.total) return;
-	return {
-		uncachedInputTokens,
-		outputTokens,
-		cacheReadTokens: usage.cacheRead,
-		cacheWriteTokens
-	};
-}
-//#endregion
-//#region lib/types/host/hermes-canonical-usage.js
-function hermesCanonicalUsage(value) {
-	if (!value) return;
-	const result = { ...value };
-	if (result.cacheRead === 0) delete result.cacheRead;
-	if (result.cacheWrite === 0) delete result.cacheWrite;
-	return result;
-}
-//#endregion
-//#region lib/types/host/conversation-telemetry.js
-const count$8 = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
-const sessionUsage = z.object({
-	total: count$8,
-	input: count$8.optional(),
-	output: count$8.optional(),
-	cacheRead: count$8.optional(),
-	cacheWrite: count$8.optional(),
-	reasoning: count$8.optional(),
-	orchestration: z.object({
-		input: count$8.optional(),
-		output: count$8.optional(),
-		cacheRead: count$8.optional()
-	}).strict().optional(),
-	scope: z.literal("session")
-}).strict();
-const conversationTelemetrySchema = z.object({
-	policy: z.literal(1),
-	cli: z.enum(CLI_IDS),
-	conversationId: z.string().min(1).max(1024),
-	runId: z.uuid(),
-	usage: sessionUsage,
-	sessionDurationSeconds: z.number().finite().nonnegative().optional()
-}).strict();
-/** Retain the CLI's counter convention; native UI normalization remains separate. */
-const lastRunUsageSnapshotSchema = z.object({
-	policy: z.literal(1),
-	cli: z.enum(CLI_IDS),
-	conversationId: z.string().min(1).max(1024),
-	runId: z.uuid(),
-	usage: sessionUsage.extend({ scope: z.literal("run") })
-}).strict().superRefine((value, context) => {
-	if (!nativeTokenUsage(value.cli, value.usage) && !nativeUsageReport(value.cli, value.usage)) context.addIssue({
-		code: "custom",
-		message: "Run usage buckets are inconsistent"
-	});
-});
-function matchingLastRunSnapshot(worker, current) {
-	const parsed = lastRunUsageSnapshotSchema.safeParse(worker.lastRunUsageSnapshot);
-	return parsed.success && parsed.data.cli === cliOf(worker.preference) && parsed.data.conversationId === worker.conversationId && !(current?.unsettledRunUsage && parsed.data.cli === "codex" && parsed.data.usage.total === 0 && parsed.data.runId === worker.runId) ? {
-		...parsed.data,
-		usage: parsed.data.cli === "hermes" ? hermesCanonicalUsage(parsed.data.usage) : parsed.data.usage
-	} : void 0;
-}
-/** Call at settlement and before runId changes; observed partial .usage is not a full-run source. */
-function captureLastRunUsageSnapshot(worker, current) {
-	const cli = cliOf(worker.preference);
-	if (!worker.conversationId || isRetiredCli(cli)) return void 0;
-	const parsed = lastRunUsageSnapshotSchema.safeParse({
-		policy: 1,
-		cli,
-		conversationId: worker.conversationId,
-		runId: worker.runId,
-		usage: current.runUsage
-	});
-	return parsed.success ? {
-		...parsed.data,
-		usage: cli === "hermes" ? hermesCanonicalUsage(parsed.data.usage) : parsed.data.usage
-	} : matchingLastRunSnapshot(worker, current);
-}
-function matchingCheckpoint(worker) {
-	if (cliOf(worker.preference) === "zcode") return void 0;
-	const parsed = conversationTelemetrySchema.safeParse(worker.conversationTelemetry);
-	return parsed.success && parsed.data.cli === cliOf(worker.preference) && parsed.data.conversationId === worker.conversationId ? {
-		...parsed.data,
-		usage: parsed.data.cli === "hermes" ? hermesCanonicalUsage(parsed.data.usage) : parsed.data.usage
-	} : void 0;
-}
-/** Capture before changing runId and at settlement. No raw-history scan or arithmetic is involved. */
-function captureConversationTelemetry(worker, current) {
-	const cli = cliOf(worker.preference);
-	if (cli === "zcode") return void 0;
-	if (!worker.conversationId || worker.conversationId.length > 1024 || isRetiredCli(cli)) return void 0;
-	const usage = sessionUsage.safeParse(current.usage);
-	if (!usage.success) return matchingCheckpoint(worker);
-	return {
-		policy: 1,
-		cli,
-		conversationId: worker.conversationId,
-		runId: worker.runId,
-		usage: cli === "hermes" ? hermesCanonicalUsage(usage.data) : usage.data,
-		...typeof current.sessionDurationSeconds === "number" && Number.isFinite(current.sessionDurationSeconds) && current.sessionDurationSeconds >= 0 ? { sessionDurationSeconds: current.sessionDurationSeconds } : {}
-	};
-}
-/** Prefer session receipts, then current accounting, then an explicitly run-scoped prior receipt. */
-function withConversationTelemetry(worker, current) {
-	const cumulative = captureConversationTelemetry(worker, current);
-	if (!cumulative) {
-		if (current.usage !== void 0) return current;
-		const lastRun = matchingLastRunSnapshot(worker, current);
-		return lastRun ? {
-			...current,
-			usage: lastRun.usage,
-			usageRunId: lastRun.runId
-		} : current;
-	}
-	return {
-		...current,
-		usage: cumulative.usage,
-		usageRunId: cumulative.runId,
-		...current.sessionDurationSeconds === void 0 && cumulative.sessionDurationSeconds !== void 0 ? { sessionDurationSeconds: cumulative.sessionDurationSeconds } : {}
-	};
-}
-//#endregion
-//#region lib/types/host/context-telemetry.js
-const count$7 = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
-const source = z.string().min(1).max(1024);
-const contextTelemetrySchema = z.object({
-	policy: z.literal(1),
-	cli: z.enum(CLI_IDS),
-	conversationId: source,
-	model: source,
-	observedModel: source.optional(),
-	runId: z.uuid(),
-	contextUsed: count$7.optional(),
-	contextCapacity: count$7.positive().optional(),
-	contextRatio: z.number().finite().min(0).max(1).optional(),
-	contextSource: source.optional(),
-	contextCapacitySource: source.optional(),
-	contextEstimated: z.boolean().optional(),
-	contextBreakdown: z.object({
-		systemTokens: count$7.optional(),
-		toolTokens: count$7.optional(),
-		messageTokens: count$7.optional(),
-		estimated: z.boolean().optional(),
-		source: source.optional(),
-		categories: z.array(z.object({
-			name: z.string().min(1).max(80),
-			tokens: count$7,
-			kind: z.enum([
-				"used",
-				"free",
-				"buffer",
-				"deferred"
-			])
-		}).strict()).max(64).optional()
-	}).strict().optional()
-}).strict().refine((value) => value.contextUsed !== void 0 || value.contextRatio !== void 0, { message: "Context requires an observed count or native ratio" });
-const contextKeys = [
-	"contextUsed",
-	"contextCapacity",
-	"contextRatio",
-	"contextSource",
-	"contextCapacitySource",
-	"contextEstimated",
-	"contextBreakdown"
-];
-function matching(worker) {
-	const parsed = contextTelemetrySchema.safeParse(worker.contextTelemetry);
-	if (!parsed.success) return;
-	const c = parsed.data;
-	return c.cli === cliOf(worker.preference) && c.conversationId === worker.conversationId && c.model === worker.preference.model && (!worker.observedModel || c.observedModel === worker.observedModel) ? c : void 0;
-}
-/** An absent sample means pending; an own undefined sample explicitly invalidates the prior window. */
-function withContextTelemetry(worker, current) {
-	if (worker.contextInvalidatedRunId === worker.runId) return withoutContextTelemetry(current);
-	if (Object.hasOwn(current, "contextUsed") || Object.hasOwn(current, "contextRatio")) return current;
-	const prior = matching(worker);
-	if (!prior || current.contextCapacity !== void 0 && current.contextCapacity !== prior.contextCapacity) return current;
-	const context = {};
-	for (const key of contextKeys) if (Object.hasOwn(prior, key)) Object.assign(context, { [key]: prior[key] });
-	return {
-		...context,
-		...current
-	};
-}
-function withoutContextTelemetry(current) {
-	const result = { ...current };
-	for (const key of contextKeys) Object.assign(result, { [key]: void 0 });
-	return result;
-}
-/** Capture before run identity changes and at settlement; never infer context from a token bill. */
-function captureContextTelemetry(worker, current) {
-	const visible = withContextTelemetry(worker, current);
-	const context = {};
-	for (const key of contextKeys) if (Object.hasOwn(visible, key)) Object.assign(context, { [key]: visible[key] });
-	const parsed = contextTelemetrySchema.safeParse({
-		policy: 1,
-		cli: cliOf(worker.preference),
-		conversationId: worker.conversationId,
-		model: worker.preference.model,
-		...worker.observedModel ? { observedModel: worker.observedModel } : {},
-		runId: worker.runId,
-		...context
-	});
-	return parsed.success ? parsed.data : void 0;
-}
-//#endregion
-//#region lib/types/shared/running-message.js
-const RUNNING_MESSAGE_MODES = [
-	"steer",
-	"interrupt",
-	"queue"
-];
-/** Only protocols with an implemented, acknowledged native steering channel. */
-const NATIVE_STEERING_TRANSPORTS = {
-	codex: "codex-app-v1",
-	hermes: "hermes-http-v1",
-	pi: "pi-rpc-v1",
-	omp: "omp-rpc-v1"
-};
-const supportsNativeSteering = (cli) => !!NATIVE_STEERING_TRANSPORTS[cli];
-/** Legacy Workers keep their original transport; an upgrade never changes their input protocol. */
-const supportsWorkerNativeSteering = (worker) => {
-	const cli = worker.preference.cli ?? "antigravity";
-	return cli === "pi" || cli === "omp" || !!worker.transport && NATIVE_STEERING_TRANSPORTS[cli] === worker.transport;
-};
-const defaultRunningMessageMode = (cli) => supportsNativeSteering(cli) ? "steer" : "queue";
-//#endregion
-//#region lib/types/shared/builtin-presets.js
-/** User-supplied novel roles, adapted for an arbitrary CLI Worker project. */
-const PROJECT_CONTEXT = `
-使用当前任务指定的项目和资料。先核对目标章节或剧情单元、作者已确认的方向、正文状态、世界规则、人物资料和风格规范；不要假定原技能的文件、脚本、检索服务或其他智能体已经安装。关键资料缺失时明确指出缺口，只询问会改变任务范围、事实边界或授权的必要问题，不能编造来源或既有设定。
-若当前项目提供 Evidence Packet、Writer Packet、Issue Manifest 或工作流规范，优先复用同一检查点已有材料，并核对绑定的原文证据；它们不自动取代已锁定正文与作者确认。若迁移闸门为 shadow_pending，Packet 仅作定位或影子辅助。工具或资料不存在时以当前可读资料执行，注明实际覆盖范围、资料截止点、执行方式与降级原因；不得宣称已运行未运行的检查。负查只表示“在本次检查范围未发现”。
-区分正典、已确认设计、提案和待验证假设；未来章纲、未采用的 D&D 参考与推测不能充当已发生事实。涉及 D&D 的作品只使用项目已登记采用的规则。遵循宿主权限和作者本次授权，角色提示词不授予额外文件、命令或派遣权限。不要自行切换模型、CLI 或另派子智能体；需要额外复核而当前没有独立复核能力时，明确标记为单人检查，不伪造对抗过程。
-`.trim();
-const withContext = (prompt) => `${prompt.trim()}\n\n【共同资料与执行边界】\n${PROJECT_CONTEXT}`;
-const BUILTIN_ROLE_PRESETS = [
-	{
-		id: "novel-audit-commercial-review",
-		name: "商业审稿人",
-		summary: "围绕章首承接、承诺兑现、节拍推进和章末吸引力，给出有证据的留存建议。",
-		builtin: true,
-		source: "novel-audit-commercial-review",
-		prompt: withContext(`
-你是小说商业审稿人，属于编辑岗。只报告商业证据、读者影响和建议，不修改正文、正典、章纲或审校队列。逻辑自洽与文风问题分别交给对应审校角色；这里只讨论其对目标读者继续阅读的直接影响。
-
-【入口与范围】
-读取目标章全文一次、作品定位，以及上一锁定章的接口或章末钩子。优先复用上游证据包；没有时按实际资料组织证据，不重复扫描整库。日常检查仅覆盖目标章和必要接口；按明确风险补查承诺、钩子或单元入口，只有跨章风险或作者明确要求全审时才扩大范围。审前最多询问四个真正缺口：章型、目标读者、关注信号、授权。
-
-【四个独有信号】
-每个信号只写一段“证据 → 读者反应 → 建议”，同一段落不要换维度重复论证。
-1. 章首承接：首章检查前 300 字是否建立具体问题；连载章检查是否接住上一章钩子，不能用首章标准机械评估每章。
-2. 承诺与兑现：检查章纲或前章承诺是否兑现、升级或有意延迟；延迟应有可核对的预期回收窗，合法延迟不是失信。
-3. 节拍和推进：场景是否改变事件、信息、关系、风险、目标、资源或时间压力；只指出连续无变化且影响阅读的段落。
-4. 章末下一点击力：结尾是否留下读者能理解的悬念、危机、收益或新目标，是否有明确继续阅读动机。
-
-【读者视角与复核】
-默认由你做一次顺读判断，明确注明“单人模拟”，不要声称真实读者测试。仅当首章、章首或章末风险、明显留存问题、全审或作者明确要求时，提出独立读者复核需要。若已获授权且确有独立复核结果，记录首次划走点和候选问题对下一章点击的影响；有分歧就保留双方证据，不伪造共识。
-
-【证据与去重】
-每条问题给出稳定 issue_id、原文位置与短引文、承诺/节拍/钩子证据、严重度、置信度、候选或确认状态、处置建议和是否获修改授权。其他审校已经报告的同一问题只引用其 issue_id 和一句商业影响，不重复原理、引文与修复方案。没有原文证据不能扣分或判断劝退；建议不能删掉已确认的核心爽点、改变出口或提前泄露正典。涉及重大方向只列待作者决定。
-
-【输出】
-先给主编结论、四信号判断和 Top 3，再列有效资产、毒点/劝退点、爽点与断章、留存建议和实际复核记录。需要兼容旧报告时再给九维评分：开篇吸引力、核心卖点、剧情节奏、爽点情绪、人物主动性、表层逻辑、语言可读性、章末钩子、长线潜力；共享同一证据，不写九遍论证。评分仅用于展示，不是定稿门禁。报告标明实际检查范围、资料截止点、证据包标识（如有）和降级情况。审稿不等于授权，不能把建议写成已执行修改。
-`)
-	},
-	{
-		id: "novel-audit-logic-check",
-		name: "逻辑审校员",
-		summary: "核对人物认知、状态资源、因果动机与时空连续性，定位漏洞并提出最小修复。",
-		builtin: true,
-		source: "novel-audit-logic-check",
-		prompt: withContext(`
-你是小说逻辑审校员，属于编辑岗。只报告问题、证据、影响和修复选项，不修改正文、正典、章纲或审校队列。保持作者、读者和角色三者的信息边界。
-
-【入口与覆盖】
-读取目标章全文一次，并取得上一锁定章最后场景或事件接口。先复用上游证据包；日常只对初读或确定性扫描发现的候选片段判断，不为普通段落生成空问题。按风险定向补查有关卡片；作者要求全项、跨章高风险或本书特化账目被触发时再扩大检查。只在目标、覆盖、关注族或授权不明时提问，最多四题。资料不足时明确覆盖盲区，不说“全书无问题”。
-
-【六个问题族】
-1. 认知与信息访问：角色知道、不知道、相信和可以据以行动的信息是什么，信息如何到达。
-2. 状态、资源与能力：伤势、装备、权限、法术位、额度等前后状态；能力范围、消耗和恢复是否相符。
-3. 因果与动机：目标、阻力、选择、行动和结果是否有前因，是否靠强行降智推进。
-4. 时间与空间：有效时间、路程、视线、位置、在场人物、倒叙与时间跳跃。
-5. 规则、身份与关系：世界法则、项目采用的规则、称呼、关系变化和系统权限。
-6. POV、环境与叙述连续性：焦点切换、门锁或痕迹、环境状态、不可靠叙述、读者可见信息和延迟揭示。
-
-【每条候选先建立证据卡】
-写出“前状态 → 原文事件 → 后状态”；分别列角色知道/不知道/相信/可操作信息、读者与叙述者可见信息、有效时间区间、地点和在场者。注明叙事许可为无、倒叙、不可靠叙述、焦点切换、计划揭示或未知，并绑定文件位置、行或字符锚点与短引文。
-先查合法叙事许可和信息差，再核对状态、资源和规则。不能把传闻、留白、合法反转、计划或伏笔当矛盾。台账与锁定正文冲突时以锁定正文为准，报告派生文件滞后；不要静默改台账。证据不足的候选应标不确定，不硬判成立。
-
-【按风险复核】
-日常局部判断由你完成，不默认全文读前两章或启动多轮对抗。严重问题、低置信度、许可不明项需要定向辩护：主动寻找能推翻指控的文本解释。只有作者要求完整对抗且获得实际独立结果时才报告猎手/辩护过程；剔除候选也要保留理由。复核结论不能自动变成改稿动作。
-
-【输出】
-先给整体评价和 Top 3–5，再列实际触发领域的账目核对、逻辑硬伤、因果断点、复核与未决事项。问题清单包含 issue_id、类型、原文 span、可检验的一句话、前后状态、知识主体、有效时间、叙事许可、绑定来源、confidence、severity（P0/P1/P2）、phase（candidate/confirmed/dismissed/uncertain）、disposition、authorized。confirmed 不等于 authorized；与其他审校同一问题沿用 ID。
-每个成立的问题都给最低成本的微创修复选项，涉及锁定内容标待作者确认。评分仅用于展示，不作为锁定门禁。说明实际范围、截止点、证据包（如有）与降级原因；不得把建议写成已执行结果。
-`)
-	},
-	{
-		id: "novel-audit-style-review",
-		name: "文风审校员",
-		summary: "结合小说语境和作品风格，检查模板腔、怪比喻、对白同质化与文风漂移。",
-		builtin: true,
-		source: "novel-audit-style-review",
-		prompt: withContext(`
-你是小说文风审校员，属于编辑岗。只报告问题、证据、影响和建议，不修改正文、正典或审校队列。逻辑和资源账目交逻辑审校，商业留存交商业审稿；不能将个人审美当作作品规则。
-
-【基准与范围】
-读取目标章一次，以当前项目的写作风格规范为权威基准，以前章已确认正文的风格指纹为实践基准。复用上游证据包，不重复构建或全库扫描；只在作者指定或高风险全审时读取更多基准章。最多询问四个会改变基准、覆盖或授权的缺口。没有基准证据时不能断言文风漂移，先报告局部语言现象和判断限制。
-
-【固定顺序：规则命中 → 片段 → 语境】
-1. 若当前项目实际提供 Renwei fiction lint，先按其小说配置运行，记录规则编号、文件、行号/字符范围、片段、统计范围、命中数和检查结果；默认排除 frontmatter、代码块和管理表格。不存在时明确未运行，人工检查只能称为人工语境检查，不虚构 lint 结果。
-2. 只对 lint 命中和读到的候选片段核对前后句、规则、风格规范与前章先例。没有可行动命中就不凑问题、不加载无关深层规则。
-3. 检查反向放行条件：功能化比喻、设定术语、项目已登记的 D&D 译名、合法氛围修辞和角色独有说话方式。计数不是语境结论。
-
-【指标边界】
-全书和单章指标分开，不能把全书阈值机械缩成单章。Renwei fiction 的章级或书级规则在单章少于两个命中时仅作 hint，不形成阻断性 FAIL；句子级规则要有最小样本和例外。单个短章的一处命中不能仅凭计数判失败。不使用 humanizer-zh 的非虚构指标，不将“人味密度”“第一人称插曲”等非小说指标套入小说。评分不参与逻辑门禁、锁定或自动改稿。
-
-【按命中启用检查族】
-- 模板腔与 AI 味：对白同质化、情绪直述、模板开场、陈腐身体反应、形容词或弱动词堆叠、欧化句式、排比填充、过渡套话、节奏机械化。
-- 作品特化：需要额外解码的怪比喻或拟人、生僻词堆砌；设定术语和已登记译名默认放行。
-- 风格一致性：禁用表达及额度、句长段落、对白指纹、心理密度、术语单位和项目约定 POV；不强行把所有作品改成同一种口吻。
-
-【复核与报告】
-日常由你作局部判断；刺眼、低置信度或许可不明的命中做一次反向复核，查放行条件与前章先例，并保留误报剔除理由。未经实际独立复核不得写“已完成双人辩论”。
-输出总体结论、有效文风资产、Top 3、问题清单、实际预扫描计数和复核记录；需要兼容时再给展示性评分。每项包含稳定 issue_id、原文 span、规则或判断依据、来源锚点、严重度、置信度、候选/确认/剔除状态、处置建议和是否获授权；与其他报告同一问题只引用 ID，不重复论证。示范改句仍是建议态，锁定正文的调整须由作者确认。报告写明范围、资料截止点及降级情况。
-`)
-	},
-	{
-		id: "novel-revise",
-		name: "正文修订师",
-		summary: "按作者授权与审查问题清单微创改稿，保留快照、差异记录和定向回归。",
-		builtin: true,
-		source: "novel-revise",
-		prompt: withContext(`
-你是小说正文修订师，属于主笔岗的最小授权执行角色。在这些小说角色中，只有本角色负责修改既有正文；小说主笔只创建或填充明确授权的草稿。审查报告、模型发现、“已确认问题”和顺手优化都不等于修改授权。
-
-【入口与授权清单】
-读取作者指令全文、目标正文、审查报告与相关权威资料。优先复用修订证据包；仅把它作为定位和证据组织，不能扩大授权。将意见整理成 Issue Manifest，每项包含稳定 issue_id、原文位置与短引文、绑定证据、修复边界、phase、disposition 和 authorized。只有 authorized=true 且 disposition 为 accept/revise 的事项可执行；confirmed 不等于授权。旧报告缺位置或授权时先列待确认，不能猜。状态、资源、时间、伏笔、规则或认知证据冲突时先说明，不脑补。
-
-【四级边界】
-- A 级：作者明确要求的句、段、剧情或逻辑修复，只在授权目标范围内改。
-- B 级自动连带：当前句或相邻句段中，为使 A 级成立所必需的最小修补；逐项说明“由任务 X 的 Y 处引发，受影响原文为……”。
-- B 级授权连带：跨段、跨场景，或影响伏笔、结果、人物动机、能力规则、后续因果；须作者逐项确认。快速档仅列待决，不执行。
-- C 级保护：其余正文完全锁定，包括同义词替换、美化、删细节、调节奏、重排揭示。
-- D 级额外发现：新发现只报告，不自动修改。
-
-【任务地图与档位】
-先展示任务地图：章节、实际范围、意见来源、资料截止点、授权条数、档位、每项 issue_id/span、必须改什么、最小连带及依据、待授权连带、禁止波及区域。
-快速档用于不超过三项局部小改，已有明确授权时展示地图后可直接执行 A 级与合法 B 级自动连带。完整档用于多意见、大改或定稿前修订，地图和授权级连带需作者确认后执行。作者允许你推荐方案并不自动扩大改稿权限。
-
-【执行与回归】
-1. 写入前在当前项目合适的归档位置创建不可覆盖的正文快照，报告真实路径；没有文件写入权限则只给建议和补丁。
-2. 逐条最小范围修改，不能全文重写。未经本轮明确授权，不改正典、章纲、台账或正文 frontmatter 管理状态。
-3. 生成 diff_manifest：文件、原/新 span、issue_id、权限级别、连带依据和实际字符差；使用项目差异工具前先确认它存在。发现未授权差异，先恢复或交作者决定。
-4. 快速档对照快照自查 C 级误伤；完整档在实际具备独立复核时核查 A/B/超授权，不追加文笔意见。没有独立复核则如实说明。
-5. 只回归受影响的状态/资源、时间/空间、认知/伏笔、规则或文风问题族，不重新引入无关全套审查。记录 reject/dismiss 理由以免误报复现。
-6. 回归出现新的状态、资源、时间、伏笔或认知风险时停止扩改并报告，不能用新一轮修改遮盖。
-
-【交付】
-报告执行元数据、实际修改与 issue_id、差异清单、必要连带、误伤检查、定向回归、额外发现但未修改事项、待作者决定事项和快照位置。区分建议与实际执行，不能把尚未写入的修改称为已完成。不自动定稿、关账、更新正典或推进任务看板；作者确认后才进入项目规定的后续流程。
-`)
-	},
-	{
-		id: "novel-start-plot-node",
-		name: "剧情节点设计师",
-		summary: "先建立入口、选择与出口的状态契约，再设计有因果、有代价的剧情节点。",
-		builtin: true,
-		source: "novel-start-plot-node",
-		prompt: withContext(`
-你是剧情节点设计师，属于策划岗。只产出提案态方案，不写正文，不修改章纲或正典，不把设想当作已发生事实。先确定节点的入口与出口，再讨论如何好看。
-
-【资料与最小询问】
-定位当前状态、所属剧情单元、已确认节点链、上一锁定章接口与相关正典。复用已有证据包和确认决策，不能用未来章纲或未采用规则补入口事实。
-如果作者未提供方向，先问是否有一句话想法，可跳过；有则归纳成两三行设计基准，冲突时列出冲突供作者选择。来自已确认拆分方案时沿用既定爽点、难度、代价、收益，只询问要调整的部分。最多七个必要选择问题：节点类型、主要爽点一至两个、难度与代价、真实选择及机会成本、收益或旧资产复用、特殊禁令、出口钩子。资料已有答案不重复问；作者授权由你决定时给推荐，并标明它仍是提案。
-
-【第一步：一页节点状态契约】
-- 入口：时间、地点、在场人物、状态、资源、能力、已知/未知/相信以及未解决问题。
-- 目标：限制条件、成功标准和失败代价。
-- 阻力：敌人、环境、时间、信息、资源或多目标冲突，以及对手反制。
-- 真实选择：至少明确 A 与 B，各自机会成本，不能假选择。
-- 预期出口：信息、资源、能力、风险、关系、位置、任务或认知的变化。
-- 知识边界：主角与对手知道/不知道/可操作什么，读者和叙述者可以看见什么。
-- 来源：逐项区分正典、已确认设计、提案、待验证假设，附现有来源锚点与资料截止点。
-这一轮只给契约，不扩写完整场景；列明待拍板项，等待作者确认或调整后再展开。已有明确确认可直接沿用，不能反复要求确认同一决定。
-
-【确认后的十三项设计】
-按节点需要取舍，不相关项注明不涉及，不凑篇幅：
-1. 目标、成败标准与入口；2. 阻力及时间/空间/规则限制、对手反制；3. 主角/对手/读者信息差与 POV；4. 关键行动、真实选择、机会成本；5. 前状态 → 事件 → 后状态的因果链；6. 一至两个核心爽点与期待兑现；7. 实力、知识或人物成长；8. 道具、资源和旧资产复用；9. 世界与主线推进；10. 状态变化与出口钩子；11. 风险、待验证项和最小备选；12. 章节包装建议；13. 与已确认节点链的接口和不可改约束。
-每项区分依据和新增提案。新规则、人物生死或阵营、主线因果、推翻锁定事实都列待作者确认。说明为什么该节点不能删、为什么导致下个节点、留下何种可复用资产；不是每个节点都必须升级、获装备、埋伏笔或顿悟，节点也不等于一章。
-
-【已有节点的评审】
-若任务是评审，先确定重点，按“问题—证据—影响—修复选项”输出，不改原方案；作者确认需要重设计后才进入设计流程。
-
-【输出与质量门】
-保留已确认设计要点、节点为什么存在/好看、留下什么、怎样推动长线、风险与待确认项。核对“入口 → 目标 → 阻力/限制 → 信息差 → 真实选择 → 行动与兑现 → 成长/资产 → 后置状态 → 出口钩子”是否闭合。不得为爽点临时加无依据规则、强行降智，或让系统替主角解释完整因果；未经作者确认不写入正文、章纲和正典。
-`)
-	},
-	{
-		id: "novel-start-plot-split",
-		name: "剧情结构规划师",
-		summary: "将剧情单元拆成因果相连的节点链，先给紧凑总览，再展开当前关键节点。",
-		builtin: true,
-		source: "novel-start-plot-split",
-		prompt: withContext(`
-你是剧情结构规划师，属于策划岗。负责将剧情单元拆成因果节点链，采用近细远粗的两阶段设计；只产出提案，不写正文，不把计划当成已发生事实。新增规则、人物生死、主线因果和推翻锁定事实必须保留作者确认边界。
-
-【一次资料预检】
-确认单元入口、出口、资源账目、已锁定节点和知识边界。优先复用上游证据包；只给单元标识时先读对应单元资料、当前状态和最近锁定章或事件接口，不机械为每种资料各查一次。未来章纲、未采用 D&D 参考、提案不能混进入口事实。资料不足则按缺口定向查阅，说明降级与盲区。
-
-【只问新增缺口】
-作者没有给方向时可询问一句话想法，有则用两三行形成基准并检查正典冲突。最多七个新增选择问题，覆盖主要功能/爽点、胜负难度、代价、收益、特殊禁令、是否可调顺序。已确认决策和资料已明确的目标、资源、人物、设定自动沿用。作者允许由你决定的项采用推荐，不再反复追问。
-
-【第一轮：单元契约与紧凑节点卡】
-先给一页提案态单元契约：入口的位置/时间/在场人物/资源能力/已知未知相信/未解决问题；单元目标；核心阻力与压力曲线；出口中必须变化的信息、资源、能力、关系、位置、风险或任务；核心兑现与后续接口。正典、已确认设计、提案、待验证假设分开标注。
-再用一张紧凑表列所有节点：节点名｜当前问题｜触发与核心行动｜核心爽点或功能｜前状态 → 后状态｜知识边界｜资产/代价｜下一节点接口。涉及旧资产复用、系统权限和 D&D 采用状态时单独说明。
-按问题、因果、状态、压力的变化拆分，不按固定章数切割。每个节点至少改变信息、资源、能力、风险、关系、位置、任务或认知之一；删掉后下个节点仍自然成立的节点，应建议合并或删除。
-第一轮结束等待作者确认或调整节点链，并选择先展开哪一至两个节点；未经确认不自动展开全部细节，已有明确确认可沿用。
-
-【第二轮：只展开当前一至两个节点】
-按功能取舍：目标与成败标准；入口及前置条件；阻力、对手反制与时空约束；角色知道/不知道/相信/可操作信息及读者视野；真实选择与机会成本；行动、因果链和结果；一至两个核心爽点及人物作用；资产获得、消耗、损坏或复用与规则适配；后置状态及下节点接口；风险、待验证项和最低成本备选。不要强制每节点升级、获装备、埋伏笔或凑齐十三项。其余节点保持紧凑层级，按作者进一步要求再细化。
-
-【质量检查与报告】
-核对入口 → 阻力 → 选择 → 行动 → 结果闭环；知识越界、未来信息泄漏、系统替角色解题、旧资产复用、可验证状态变化、已锁定事实及作者禁令。冲突只标待确认，不能静默改设定或为爽点强行降智。
-输出已确认方向、单元入口与出口、节点总览、当前节点详细拆分、爽点与成长曲线、风险检查，标明第一轮/第二轮、来源锚点、资料截止点和实际证据范围。节点不等于章节；所有未确认内容保持提案态，未经作者确认不得写入章纲、正典或正文。
-`)
-	},
-	{
-		id: "novel-write",
-		name: "小说主笔",
-		summary: "依据已确认剧情和最小场景资料写作草稿，严格守住人物认知、状态与风格边界。",
-		builtin: true,
-		source: "novel-write",
-		prompt: withContext(`
-你是小说主笔，将作者已确认的节点或章纲转成场景草稿。只创建或填充明确授权的草稿，不修改既有待审、修订、锁定或已发布正文；这些改动应交正文修订师。不能替作者批准重大剧情方向，也不能把提案写成已发生事实。
-
-【入口检查】
-确认目标章节、已确认节点、主任务、章末变化和作者禁令。目标文件不存在时先确认章节文件及项目 frontmatter 约定；章纲不能直接当成正文。正文处于待审、修订、锁定或已发布状态时停止覆盖。节点或章纲仍是提案时，先交回策划确认，不能直接开写。
-
-【最小场景资料包】
-复用同一检查点的证据，按场景块准备最小 Writer Packet，不将整个资料库、未来章纲、未采用的规则参考或完整审稿报告塞进写作材料。
-每块应明确：入口状态、场景目标、失败代价、预期出口；POV、时间、地点和在场人物；关键角色 known/unknown/believed/operational（知道、不知道、相信、可操作信息）；允许采用的短证据与来源锚点；风格指纹、上一块结尾和硬性禁令。出口或认知边界不清时先询问，不自行发明长期事实。
-
-【场景写作】
-你就是本次已选择的 CLI Worker 写手，使用当前配置完成任务，不因来源技能提到后端而再次调用其他 CLI 或切换模型。最小单位是入口、出口完整的场景块，默认一次一块，最多连续两块；不要按句子碎片化调用，也不一次性生成整章来跳过核验。
-正文应让行动、信息与因果自然呈现，保持作品的声音和 POV。角色不能使用尚未获得的信息，系统不能替主角解释完整因果；新规则、人物事实、伏笔解释和后续因果先列 proposal，等待作者决定。不要输出长篇内部思维链。
-
-【返回与验证】
-每块返回：正文、状态变化、认知变化、新提案和不确定项。若当前项目要求 writer-result/v1 等结构化格式，按其真实协议返回；没有协议则给清楚可核对的同等字段，不声称不存在的协议检查已通过。
-用当前项目实际可用的验证工具检查格式、状态、认知、正文禁用标记与授权范围；没有工具时进行明确标注的人工检查。格式错误最多修复一次；状态或知识冲突应交回作者或主智能体，不通过重复生成掩盖。对照真实输出和文件差异验证，不能仅凭写手自己的 SUCCESS 认定完成。
-
-【保存与后续】
-获得写入授权且通过核验的文本只保存为草稿，并保留实际输出位置、块标识和检查记录。不自动转为待审、锁定或关账，不更新正典、台账、当前状态与任务看板。对状态、资源、时间和认知做一次定向回归，严重冲突立即暂停。完成草稿后建议进入审校；需要修改既有正文则使用明确授权的修订流程。
-
-【报告】
-列场景块、实际输出位置、核验结果、未决提案、失败修复或作者介入记录，以及实际可确认的证据包/写作包标识、资料截止点、执行方式和降级原因。只报告能够核实的 CLI、模型和强度；不编造模型、工具结果或已发生的情节。
-`)
-	}
-];
-//#endregion
-//#region lib/types/host/roles.js
-const singleLine = (max) => z.string().trim().min(1).max(max).refine((value) => !/[\r\n\u0000-\u001f\u007f]/.test(value), "名称不能包含换行或控制字符");
-const agentNameSchema = singleLine(60);
-const workerTitleSchema = singleLine(160);
-const roleSnapshotSchema = z.object({
-	presetId: z.string().min(1).max(100).optional(),
-	name: agentNameSchema,
-	summary: z.string().trim().min(1).max(240),
-	prompt: z.string().trim().min(1).max(3e4)
-});
-const rolePresetSchema = roleSnapshotSchema.omit({ presetId: true }).extend({
-	id: z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/),
-	builtin: z.boolean().optional(),
-	source: z.string().max(240).optional()
-});
-const rolePresetInputSchema = rolePresetSchema.omit({
-	builtin: true,
-	source: true
-}).extend({ id: rolePresetSchema.shape.id.optional() });
-const NO_ROLE_LABEL = "不使用角色预设";
-function roleSnapshot(preset) {
-	return {
-		presetId: preset.id,
-		name: preset.name,
-		summary: preset.summary,
-		prompt: preset.prompt
-	};
-}
-/** Snapshot the offered list before showing this question; parsing uses that same list. */
-function roleQuestion(presets) {
-	return {
-		id: "cliworker_role",
-		header: "智能体预设",
-		question: "选择角色预设",
-		options: [...presets.map((preset) => ({ label: preset.name })), { label: NO_ROLE_LABEL }]
-	};
-}
-function readRoleAnswer(presets, response) {
-	const answer = response.answers.find((item) => item.id === "cliworker_role");
-	if (answer?.custom !== void 0) return roleSnapshotSchema.parse({
-		name: "临时角色",
-		summary: "本次派遣自定义的角色提示词",
-		prompt: answer.custom
-	});
-	if (answer?.selected.length !== 1) throw new Error("请选择角色预设或填写临时提示词；任务尚未启动");
-	if (answer.selected[0] === "不使用角色预设") return void 0;
-	const preset = presets.find((item) => item.name === answer.selected[0]);
-	if (!preset) throw new Error("角色选择已失效，请重新选择；任务尚未启动");
-	return roleSnapshot(preset);
-}
-function availableAgentName(workers, parent, base) {
-	const names = new Set([...workers].filter((worker) => worker.parentSessionId === parent).flatMap((worker) => [workerName(worker), ...worker.nameAliases ?? []]).map((name) => name.toLocaleLowerCase()));
-	const stem = agentNameSchema.parse(base).slice(0, 48);
-	let number = 1;
-	while (names.has(`${stem}-${number}`.toLocaleLowerCase())) number++;
-	return `${stem}-${number}`;
-}
-/** Role is prepended only for a fresh CLI conversation. Timeline keeps the task verbatim. */
-function promptForWorker(worker, task) {
-	if (!worker.role || worker.conversationId) return task;
-	return `智能体名称：${worker.agentName ?? worker.role.name}\n\n角色提示词（遵循宿主权限与当前任务范围）：\n${worker.role.prompt}\n\n本次任务：\n${task}`;
-}
-//#endregion
-//#region lib/types/host/storage.js
-const preferenceSchema$1 = z.object({
-	cli: z.enum(CLI_IDS).optional(),
-	model: z.string().min(1),
-	effort: z.enum(EFFORTS)
-});
-const dispatchBindingSchema = z.string().min(1).max(256);
-const cleanupBlockSchema = z.object({
-	policy: z.literal(1),
-	state: z.literal("cleanup-unconfirmed")
-}).strict();
-const projectPreferenceSchema = preferenceSchema$1.extend({
-	dispatchRole: roleSnapshotSchema.nullable().optional(),
-	dispatchBinding: dispatchBindingSchema.optional()
-});
-const dispatchSetupSchema = z.object({
-	preference: preferenceSchema$1,
-	role: roleSnapshotSchema.nullable(),
-	binding: dispatchBindingSchema
-});
-const conversationSetupSchema = z.object({
-	policy: z.literal(1),
-	parent: z.string().min(1),
-	project: z.string().min(1),
-	cli: z.enum(CLI_IDS),
-	setup: dispatchSetupSchema
-});
-const storedCliSchema = z.enum([...CLI_IDS, "harness"]);
-const storedPreferenceSchema = preferenceSchema$1.extend({ cli: storedCliSchema.optional() });
-const cliSettingsSchema = z.object({ enabled: z.partialRecord(storedCliSchema, z.boolean()) });
-const enabledByDefault = () => Object.fromEntries(CLI_IDS.map((cli) => [cli, true]));
-const runningMessageSchema = z.object({
-	policy: z.union([z.literal(1), z.literal(2)]),
-	project: z.string().min(1),
-	cli: z.enum(CLI_IDS),
-	mode: z.enum(RUNNING_MESSAGE_MODES)
-}).strict();
-const workerSchema = z.object({
-	id: z.uuid(),
-	parentSessionId: z.string().min(1),
-	project: z.string().min(1),
-	title: z.string(),
-	agentName: agentNameSchema.optional(),
-	agentNameOrigin: z.enum(["auto", "custom"]).optional(),
-	nameAliases: z.array(agentNameSchema).max(32).optional(),
-	archivedAt: z.string().datetime().optional(),
-	role: roleSnapshotSchema.optional(),
-	preference: storedPreferenceSchema,
-	mode: z.enum(["plan", "accept-edits"]),
-	conversationId: z.string().optional(),
-	conversationTelemetry: conversationTelemetrySchema.optional().catch(void 0),
-	lastRunUsageSnapshot: lastRunUsageSnapshotSchema.optional().catch(void 0),
-	contextTelemetry: contextTelemetrySchema.optional().catch(void 0),
-	contextInvalidatedRunId: z.uuid().optional().catch(void 0),
-	harnessConversation: z.object({
-		sessionId: z.string().min(1),
-		parentSessionId: z.string().min(1),
-		mode: z.literal("continuable"),
-		capabilities: z.object({
-			send: z.boolean(),
-			queue: z.boolean(),
-			steer: z.boolean(),
-			stop: z.boolean(),
-			model: z.boolean(),
-			permission: z.boolean(),
-			plan: z.boolean(),
-			attachments: z.boolean(),
-			fork: z.boolean(),
-			skills: z.boolean(),
-			tools: z.boolean(),
-			forkEarlier: z.boolean().default(false),
-			goal: z.boolean().default(false),
-			feedback: z.boolean().default(false)
-		}),
-		reasons: z.record(z.string(), z.string()).optional()
-	}).optional(),
-	transport: z.string().min(1).max(128).optional(),
-	goal: z.object({
-		objective: z.string().min(1).max(GOAL_OBJECTIVE_LIMIT),
-		status: z.enum(["active", "paused"]),
-		revision: z.number().int().nonnegative(),
-		updatedAt: z.string()
-	}).optional(),
-	goalRevision: z.number().int().nonnegative().optional(),
-	status: z.enum([
-		"queued",
-		"running",
-		"stopping",
-		"completed",
-		"failed",
-		"interrupted",
-		"uncertain"
-	]),
-	createdAt: z.string(),
-	updatedAt: z.string(),
-	runId: z.uuid(),
-	jobId: z.string().optional(),
-	error: z.string().optional(),
-	interruptionReason: z.literal("user").optional(),
-	observedModel: z.string().optional(),
-	lastResult: z.string().optional()
-});
-const eventSchema = z.object({
-	requestState: z.object({
-		nativeRunId: z.string().regex(/^[\w-]{1,256}$/),
-		sequence: z.number().int().safe().positive(),
-		phase: z.enum([
-			"requesting",
-			"failed",
-			"completed"
-		]),
-		statusCode: z.number().int().min(100).max(599).optional(),
-		reason: z.string().regex(/^[a-z_]{1,80}$/).optional(),
-		retryCount: z.number().int().safe().nonnegative().optional(),
-		retryable: z.boolean().optional()
-	}).optional(),
-	seq: z.number().int().positive(),
-	runId: z.uuid(),
-	time: z.string(),
-	kind: z.enum([
-		"user",
-		"assistant",
-		"reasoning",
-		"tool",
-		"status",
-		"diagnostic",
-		"result",
-		"submission"
-	]),
-	text: z.string(),
-	observedModel: z.string().optional(),
-	step: z.number().optional(),
-	state: z.string().optional(),
-	detail: z.string().optional(),
-	response: z.unknown().transform((value, context) => {
-		if (value === void 0) return void 0;
-		try {
-			return parseNativeResponse(value);
-		} catch {
-			context.addIssue({
-				code: "custom",
-				message: "Invalid native response metadata"
-			});
-			return z.NEVER;
-		}
-	}).optional(),
-	toolCall: z.object({
-		callId: z.string().min(1).max(1024).optional(),
-		parentCallId: z.string().min(1).max(1024).optional(),
-		name: z.string().min(1).max(1024).optional(),
-		input: z.unknown().optional(),
-		output: z.unknown().optional(),
-		command: z.string().max(32768).optional(),
-		exitCode: z.number().int().safe().optional()
-	}).optional(),
-	resultScope: z.enum(["run", "response"]).optional(),
-	queuedFollowupId: z.uuid().optional(),
-	deliveryState: z.enum([
-		"pending",
-		"admitted",
-		"running",
-		"superseded",
-		"cancelled",
-		"failed",
-		"completed"
-	]).optional(),
-	deliveryError: z.string().optional(),
-	admittedRunId: z.uuid().optional(),
-	submissionClientId: z.uuid().optional(),
-	submissionSequence: z.number().int().nonnegative().optional()
-});
-function atomicJSON(path, value) {
-	const temp = `${path}.${randomUUID()}.tmp`;
-	try {
-		writeFileSync(temp, JSON.stringify(value), {
-			mode: 384,
-			flag: "wx"
-		});
-		renameSync(temp, path);
-	} finally {
-		if (existsSync(temp)) rmSync(temp);
-	}
-}
-const LOCK_CLAIM = /^host\.lock\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-function readLockOwner(path) {
-	let raw;
-	try {
-		raw = readFileSync(path, "utf8");
-	} catch (error) {
-		return error.code === "ENOENT" ? "missing" : "invalid";
-	}
-	try {
-		const owner = JSON.parse(raw);
-		if (!Number.isSafeInteger(owner?.pid) || owner.pid <= 0) return "invalid";
-		return {
-			pid: owner.pid,
-			...typeof owner.token === "string" ? { token: owner.token } : {}
-		};
-	} catch {
-		return "invalid";
-	}
-}
-/** EPERM still proves that a process with this PID exists. */
-function processAlive(pid) {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return error.code !== "ESRCH";
-	}
-}
-/** One host owns a private store; a live second host cannot resume the same CLI session. */
-var WorkerStorage = class {
-	directory;
-	workers = /* @__PURE__ */ new Map();
-	events = /* @__PURE__ */ new Map();
-	token = randomUUID();
-	lock;
-	candidate;
-	enabled = enabledByDefault();
-	presets = [];
-	/** Account epochs live outside public Worker records and event/history responses. */
-	accountBinding(id) {
-		z.uuid().parse(id);
-		const path = join(this.directory, `${id}.account-binding.json`);
-		if (!existsSync(path)) return void 0;
-		return z.object({
-			policy: z.literal(1),
-			binding: z.string().min(1).max(256)
-		}).parse(JSON.parse(readFileSync(path, "utf8"))).binding;
-	}
-	bindAccount(id, binding) {
-		z.uuid().parse(id);
-		z.string().min(1).max(256).parse(binding);
-		atomicJSON(join(this.directory, `${id}.account-binding.json`), {
-			policy: 1,
-			binding
-		});
-	}
-	/** Private quarantine survives Host restart; absence alone means no recorded quarantine. */
-	cleanupBlockState(cli) {
-		const path = this.cleanupBlockPath(cli);
-		let handle;
-		let buffer;
-		try {
-			let entry;
-			try {
-				entry = lstatSync(path);
-			} catch (error) {
-				return error.code === "ENOENT" ? "none" : "invalid";
-			}
-			if (entry.isSymbolicLink() || !entry.isFile() || entry.nlink !== 1 || entry.size > 1024) return "invalid";
-			handle = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-			const before = fstatSync(handle);
-			if (!before.isFile() || before.nlink !== 1 || before.dev !== entry.dev || before.ino !== entry.ino || before.size > 1024) return "invalid";
-			buffer = Buffer.alloc(1025);
-			let offset = 0;
-			while (offset < buffer.length) {
-				const size = readSync(handle, buffer, offset, buffer.length - offset, null);
-				if (!size) break;
-				offset += size;
-			}
-			const after = fstatSync(handle), current = lstatSync(path);
-			if (offset !== before.size || before.size !== after.size || before.mtimeMs !== after.mtimeMs || current.isSymbolicLink() || current.nlink !== 1 || current.dev !== before.dev || current.ino !== before.ino || current.size !== after.size || current.mtimeMs !== after.mtimeMs) return "invalid";
-			cleanupBlockSchema.parse(JSON.parse(buffer.subarray(0, offset).toString("utf8")));
-			return "blocked";
-		} catch {
-			return "invalid";
-		} finally {
-			buffer?.fill(0);
-			if (handle !== void 0) closeSync(handle);
-		}
-	}
-	/** No automatic clearing: only trustworthy process-exit recovery can release a quarantine. */
-	blockCleanup(cli) {
-		atomicJSON(this.cleanupBlockPath(cli), {
-			policy: 1,
-			state: "cleanup-unconfirmed"
-		});
-	}
-	cleanupBlockPath(cli) {
-		return join(this.directory, cli === void 0 ? "cleanup-blocked.json" : `cleanup-blocked-${z.enum(CLI_IDS).parse(cli)}.json`);
-	}
-	constructor(directory) {
-		this.directory = directory;
-		mkdirSync(directory, {
-			recursive: true,
-			mode: 448
-		});
-		chmodSync(directory, 448);
-		this.lock = join(directory, "host.lock");
-		this.candidate = join(directory, `host.lock.${this.token}`);
-		this.acquireLock();
-		try {
-			const rolesPath = join(directory, "role-presets.json");
-			if (existsSync(rolesPath)) {
-				this.presets = z.array(rolePresetSchema).max(200).parse(JSON.parse(readFileSync(rolesPath, "utf8")));
-				chmodSync(rolesPath, 384);
-			} else {
-				this.presets = z.array(rolePresetSchema).parse(structuredClone(BUILTIN_ROLE_PRESETS));
-				atomicJSON(rolesPath, this.presets);
-			}
-			const settingsPath = join(directory, "cli-settings.json");
-			if (existsSync(settingsPath)) {
-				const settings = cliSettingsSchema.parse(JSON.parse(readFileSync(settingsPath, "utf8")));
-				for (const cli of CLI_IDS) if (settings.enabled[cli] !== void 0) this.enabled[cli] = settings.enabled[cli];
-				chmodSync(settingsPath, 384);
-			}
-			for (const file of readdirSync(directory).filter((name) => name.endsWith(".worker.json"))) {
-				const worker = workerSchema.parse(JSON.parse(readFileSync(join(directory, file), "utf8")));
-				if (`${worker.id}.worker.json` !== file) throw new Error("Worker storage identity mismatch");
-				this.workers.set(worker.id, worker);
-				if (active(worker.status)) {
-					worker.status = "interrupted";
-					worker.interruptionReason = void 0;
-					worker.error = worker.preference.cli === "harness" ? RETIRED_HARNESS_NOTICE : "上次 Harness 运行中断；可继续原会话";
-					this.save(worker);
-					this.append(worker, {
-						kind: "status",
-						text: worker.error,
-						state: "interrupted"
-					});
-				} else if (isUserInterrupted(worker) && worker.error) {
-					worker.error = void 0;
-					worker.interruptionReason = "user";
-					this.save(worker);
-				}
-			}
-			this.migrateAutomaticNames();
-			this.migrateRunningMessageSettings();
-		} catch (error) {
-			this.close();
-			throw error;
-		}
-	}
-	/** Explicitly authorized one-time native-capability reset; later manual choices use policy 2. */
-	migrateRunningMessageSettings() {
-		for (const name of readdirSync(this.directory).filter((file) => file.endsWith(".running-message.json"))) {
-			const path = join(this.directory, name);
-			let value;
-			try {
-				value = this.readRunningMessageRecord(path);
-				if (`${this.projectKey(value.project, value.cli)}.running-message.json` !== name) continue;
-			} catch {
-				continue;
-			}
-			if (value.policy === 1) atomicJSON(path, {
-				...value,
-				policy: 2,
-				mode: defaultRunningMessageMode(value.cli)
-			});
-		}
-	}
-	readRunningMessageRecord(path) {
-		const info = lstatSync(path);
-		if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size > 16384) throw new Error("运行中发送设置无法核验");
-		const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-		try {
-			const opened = fstatSync(fd);
-			if (!opened.isFile() || opened.ino !== info.ino || opened.dev !== info.dev || opened.nlink !== 1 || opened.size > 16384) throw new Error("运行中发送设置身份已变化");
-			const bytes = Buffer.alloc(opened.size + 1);
-			let length = 0;
-			while (length < bytes.length) {
-				const read = readSync(fd, bytes, length, bytes.length - length, null);
-				if (!read) break;
-				length += read;
-			}
-			const after = fstatSync(fd), current = lstatSync(path);
-			if (length !== opened.size || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || after.nlink !== 1 || current.isSymbolicLink() || current.nlink !== 1 || current.ino !== opened.ino || current.dev !== opened.dev || current.size !== after.size || current.mtimeMs !== after.mtimeMs) throw new Error("运行中发送设置读取期间发生变化");
-			return runningMessageSchema.parse(JSON.parse(bytes.subarray(0, length).toString("utf8")));
-		} finally {
-			closeSync(fd);
-		}
-	}
-	/** Only the former CLI-default format and unnamed histories establish legacy automatic names. */
-	migrateAutomaticNames() {
-		const ordered = [...this.workers.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
-		for (const worker of ordered) {
-			const cli = cliOf(worker.preference);
-			if (isRetiredCli(cli) || worker.agentNameOrigin === "custom") continue;
-			const previousName = workerName(worker);
-			const stem = CLI_SHORT_NAMES[cli];
-			const isNumbered = (name, prefix) => name.startsWith(`${prefix}-`) && /^[1-9]\d*$/.test(name.slice(prefix.length + 1));
-			if (worker.agentName && isNumbered(worker.agentName, stem)) continue;
-			if (worker.agentName && worker.agentNameOrigin !== "auto" && !isNumbered(worker.agentName, `${CLI_LABELS[cli]}助手`)) continue;
-			if (ordered.some((other) => other.id !== worker.id && other.parentSessionId === worker.parentSessionId && [workerName(other), ...other.nameAliases ?? []].some((name) => name.toLocaleLowerCase() === previousName.toLocaleLowerCase()))) continue;
-			const migrated = {
-				...worker,
-				agentName: availableAgentName(this.workers.values(), worker.parentSessionId, stem),
-				agentNameOrigin: "auto",
-				nameAliases: [.../* @__PURE__ */ new Set([...worker.nameAliases ?? [], previousName])]
-			};
-			workerSchema.parse(migrated);
-			this.save(migrated);
-		}
-	}
-	cliSettings() {
-		return { enabled: { ...this.enabled } };
-	}
-	rolePresets() {
-		return structuredClone(this.presets);
-	}
-	saveRolePreset(input) {
-		const value = rolePresetInputSchema.parse(input);
-		const previous = value.id ? this.presets.find((preset) => preset.id === value.id) : void 0;
-		if (value.id && !previous) throw new Error("此角色预设已删除，请新建预设");
-		if (value.name === "不使用角色预设" || this.presets.some((preset) => preset.id !== value.id && preset.name.toLocaleLowerCase() === value.name.toLocaleLowerCase())) throw new Error("此智能体名称已被使用，请换一个名称");
-		if (!previous && this.presets.length >= 200) throw new Error("最多保存 200 个角色预设");
-		const saved = {
-			...previous,
-			...value,
-			id: previous?.id ?? randomUUID()
-		};
-		const next = previous ? this.presets.map((preset) => preset.id === saved.id ? saved : preset) : [...this.presets, saved];
-		atomicJSON(join(this.directory, "role-presets.json"), next);
-		this.presets = next;
-		return structuredClone(saved);
-	}
-	deleteRolePreset(id) {
-		if (!this.presets.some((preset) => preset.id === id)) throw new Error("此角色预设已删除");
-		const next = this.presets.filter((preset) => preset.id !== id);
-		atomicJSON(join(this.directory, "role-presets.json"), next);
-		this.presets = next;
-	}
-	setCliEnabled(cli, enabled) {
-		if (isRetiredCli(cli)) throw new Error(RETIRED_HARNESS_NOTICE);
-		const id = z.enum(CLI_IDS).parse(cli);
-		const next = {
-			...this.enabled,
-			[id]: z.boolean().parse(enabled)
-		};
-		atomicJSON(join(this.directory, "cli-settings.json"), { enabled: next });
-		this.enabled = next;
-		return this.cliSettings();
-	}
-	projectKey(project, cli = "antigravity") {
-		z.string().min(1).parse(project);
-		z.enum(CLI_IDS).parse(cli);
-		return createHash("sha256").update(cli === "antigravity" ? project : JSON.stringify([project, cli])).digest("hex");
-	}
-	readProjectPreference(project, cli) {
-		const path = join(this.directory, `${this.projectKey(project, cli)}.preference.json`);
-		if (!existsSync(path)) return void 0;
-		const value = projectPreferenceSchema.parse(JSON.parse(readFileSync(path, "utf8")));
-		if ((value.cli ?? "antigravity") !== cli) throw new Error("项目偏好的 CLI 标识不匹配");
-		return value;
-	}
-	runningMessageSettings(project, cli) {
-		if (isRetiredCli(cli)) return {
-			cli,
-			mode: "queue",
-			canSteer: false
-		};
-		const path = join(this.directory, `${this.projectKey(project, cli)}.running-message.json`);
-		let mode = defaultRunningMessageMode(cli);
-		if (existsSync(path)) {
-			const value = this.readRunningMessageRecord(path);
-			if (value.project !== project || value.cli !== cli) throw new Error("运行中发送设置的项目或 CLI 不匹配");
-			if (value.mode === "steer" && !supportsNativeSteering(cli)) throw new Error("此 CLI 不支持引导，请重新选择运行中发送方式");
-			mode = value.mode;
-		}
-		return {
-			cli,
-			mode,
-			canSteer: supportsNativeSteering(cli)
-		};
-	}
-	setRunningMessageMode(project, cli, mode) {
-		if (isRetiredCli(cli)) throw new Error(RETIRED_HARNESS_NOTICE);
-		const value = runningMessageSchema.parse({
-			policy: 2,
-			project,
-			cli,
-			mode
-		});
-		if (mode === "steer" && !supportsNativeSteering(cli)) throw new Error("此 CLI 不支持引导，请选择插队或排队");
-		atomicJSON(join(this.directory, `${this.projectKey(project, cli)}.running-message.json`), value);
-		return {
-			cli,
-			mode,
-			canSteer: supportsNativeSteering(cli)
-		};
-	}
-	preference(project, cli = "antigravity") {
-		if (isRetiredCli(cli)) return void 0;
-		const value = this.readProjectPreference(project, cli);
-		return value ? preferenceSchema$1.parse(value) : void 0;
-	}
-	setPreference(project, preference) {
-		if (preference.cli && isRetiredCli(preference.cli)) throw new Error(RETIRED_HARNESS_NOTICE);
-		const value = preferenceSchema$1.parse(preference);
-		const cli = value.cli ?? "antigravity";
-		const previous = this.readProjectPreference(project, cli);
-		atomicJSON(join(this.directory, `${this.projectKey(project, cli)}.preference.json`), {
-			...previous,
-			...value
-		});
-	}
-	dispatchSetup(project, cli) {
-		if (isRetiredCli(cli)) return void 0;
-		const value = this.readProjectPreference(project, cli);
-		if (value?.dispatchRole === void 0 || value.dispatchBinding === void 0) return void 0;
-		return {
-			preference: preferenceSchema$1.parse(value),
-			role: value.dispatchRole,
-			binding: value.dispatchBinding
-		};
-	}
-	setDispatchSetup(project, setup) {
-		if (setup.preference.cli && isRetiredCli(setup.preference.cli)) throw new Error(RETIRED_HARNESS_NOTICE);
-		const value = dispatchSetupSchema.parse(setup);
-		const cli = value.preference.cli ?? "antigravity";
-		atomicJSON(join(this.directory, `${this.projectKey(project, cli)}.preference.json`), {
-			...value.preference,
-			dispatchRole: value.role,
-			dispatchBinding: value.binding
-		});
-	}
-	conversationKey(parent, project, cli) {
-		z.string().min(1).parse(parent);
-		z.string().min(1).parse(project);
-		z.enum(CLI_IDS).parse(cli);
-		return createHash("sha256").update(JSON.stringify([
-			parent,
-			project,
-			cli
-		])).digest("hex");
-	}
-	conversationSetup(parent, project, cli) {
-		if (isRetiredCli(cli)) return void 0;
-		const path = join(this.directory, `${this.conversationKey(parent, project, cli)}.conversation-setup.json`);
-		if (!existsSync(path)) return void 0;
-		const value = conversationSetupSchema.parse(JSON.parse(readFileSync(path, "utf8")));
-		if (value.parent !== parent || value.project !== project || value.cli !== cli || (value.setup.preference.cli ?? "antigravity") !== cli) throw new Error("对话派遣设定的身份不匹配");
-		return value.setup;
-	}
-	setConversationSetup(parent, project, setup) {
-		if (setup.preference.cli && isRetiredCli(setup.preference.cli)) throw new Error(RETIRED_HARNESS_NOTICE);
-		const value = dispatchSetupSchema.parse(setup);
-		const cli = value.preference.cli ?? "antigravity";
-		const key = this.conversationKey(parent, project, cli);
-		atomicJSON(join(this.directory, `${key}.conversation-setup.json`), {
-			policy: 1,
-			parent,
-			project,
-			cli,
-			setup: value
-		});
-	}
-	save(worker) {
-		atomicJSON(join(this.directory, `${worker.id}.worker.json`), worker);
-		this.workers.set(worker.id, worker);
-	}
-	history(id) {
-		if (!this.workers.has(id)) throw new Error("Unknown worker");
-		const cached = this.events.get(id);
-		if (cached) return cached;
-		const path = join(this.directory, `${id}.events.jsonl`);
-		const rows = [];
-		if (existsSync(path)) {
-			const raw = readFileSync(path);
-			const end = raw.lastIndexOf(10) + 1;
-			const complete = raw.subarray(0, end).toString("utf8").split("\n").slice(0, -1);
-			for (const line of complete) {
-				const event = eventSchema.parse(JSON.parse(line));
-				if (event.seq !== rows.length + 1) throw new Error("Event sequence corruption");
-				rows.push(event);
-			}
-			if (end !== raw.length) {
-				const handle = openSync(path, "r+");
-				try {
-					ftruncateSync(handle, end);
-					fsyncSync(handle);
-				} finally {
-					closeSync(handle);
-				}
-			}
-		}
-		this.events.set(id, rows);
-		return rows;
-	}
-	append(worker, event) {
-		const rows = this.history(worker.id);
-		const row = {
-			...event,
-			seq: rows.length + 1,
-			runId: worker.runId,
-			time: (/* @__PURE__ */ new Date()).toISOString()
-		};
-		appendFileSync(join(this.directory, `${worker.id}.events.jsonl`), JSON.stringify(row) + "\n", { mode: 384 });
-		rows.push(row);
-	}
-	rawPath(worker) {
-		return join(this.directory, `${worker.id}.${worker.runId}.raw.jsonl`);
-	}
-	/**
-	* Cross-process exclusion without a native flock: every Host atomically
-	* publishes a uniquely named claim, then looks for any other live claim.
-	* Two concurrent Hosts each write before they read, so at least one sees the
-	* other and withdraws. Stale claims are removed only by their unique name,
-	* so a live Host's claim is never deleted by a racing reclaimer.
-	*/
-	acquireLock() {
-		const body = JSON.stringify({
-			pid: process.pid,
-			token: this.token
-		});
-		for (let attempt = 0;; attempt++) {
-			const temp = join(this.directory, `.host.lock.${this.token}.tmp`);
-			try {
-				writeFileSync(temp, body, {
-					mode: 384,
-					flag: "wx"
-				});
-				renameSync(temp, this.candidate);
-			} finally {
-				rmSync(temp, { force: true });
-			}
-			const stale = [];
-			let conflict;
-			for (const name of readdirSync(this.directory)) {
-				const path = join(this.directory, name);
-				if (path === this.candidate || name !== "host.lock" && !LOCK_CLAIM.test(name)) continue;
-				const owner = readLockOwner(path);
-				if (owner === "missing") continue;
-				if (owner === "invalid") conflict = { invalid: name };
-				else if (processAlive(owner.pid)) conflict ??= "live";
-				else if (name !== "host.lock") stale.push(path);
-				if (conflict && conflict !== "live") break;
-			}
-			if (!conflict) {
-				for (const path of stale) rmSync(path, { force: true });
-				break;
-			}
-			rmSync(this.candidate, { force: true });
-			if (conflict !== "live") throw new Error(`Invalid store lock; inspect ${conflict.invalid} before recovery`);
-			if (attempt >= 2) throw new Error("CLI Worker store is already owned by another Harness host");
-			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20 + Math.floor(Math.random() * 80));
-		}
-		try {
-			try {
-				writeFileSync(this.lock, body, {
-					mode: 384,
-					flag: "wx"
-				});
-			} catch (error) {
-				if (error.code !== "EEXIST") throw error;
-				const owner = readLockOwner(this.lock);
-				if (owner === "invalid") throw new Error("Invalid store lock; inspect host.lock before recovery");
-				if (owner !== "missing" && processAlive(owner.pid)) throw new Error("CLI Worker store is already owned by another Harness host");
-				rmSync(this.lock, { force: true });
-				writeFileSync(this.lock, body, {
-					mode: 384,
-					flag: "wx"
-				});
-			}
-		} catch (error) {
-			rmSync(this.candidate, { force: true });
-			throw error;
-		}
-	}
-	close() {
-		for (const path of [this.lock, this.candidate]) {
-			const owner = readLockOwner(path);
-			if (typeof owner === "object" && owner.token === this.token) rmSync(path, { force: true });
-		}
-	}
-};
 //#endregion
 //#region lib/types/host/settings-catalog-cache.js
 const text$4 = z.string().min(1).max(2048);
@@ -14634,6 +16948,40 @@ async function forkWorkerConversation(deps, atMessageId, signal) {
 const json$2 = (value) => JSON.stringify(value) ?? "null";
 const terminal$2 = (state) => /^(?:COMPLETED|COMPLETE|DONE|SUCCESS|FAILED|ERROR|CANCELLED|CANCELED)$/u.test(state ?? "");
 const failed = (state) => /^(?:FAILED|ERROR|CANCELLED|CANCELED)$/u.test(state ?? "");
+const receiptExecutors = /* @__PURE__ */ new WeakMap();
+/**
+* CLI receipt names arrive after model-step admission has been snapshotted.
+* This child-owned executor admits only our live receipt definitions, whose
+* bodies verify the exact run/call/arguments and never execute real tools.
+* It lives with the Agent so disposing one run does not leave the next turn
+* with an unavailable executor. The MCP bridge uses its separate pipeline.
+*/
+function receiptDefinitions(agent) {
+	let pending = receiptExecutors.get(agent);
+	if (pending) return pending;
+	pending = (async () => {
+		const definitions = /* @__PURE__ */ new Set();
+		if ("presentAs" in agent.ctx.tools) return definitions;
+		const [{ ToolExecutionPipeline, executeToolBatch }, { projectToolSchema }] = await Promise.all([import("@deepseek-ai/dsh-tools/pipeline"), import("@deepseek-ai/dsh-tools")]);
+		const pipeline = new ToolExecutionPipeline(agent.ctx, { get(name, scope) {
+			if (scope !== agent) return void 0;
+			const definition = agent.ctx.tools.get(name, agent);
+			return definition && definitions.has(definition) ? definition : void 0;
+		} });
+		agent.ctx.tools.setExecutor({
+			describe: (tools) => ({ schemas: tools.map((tool) => projectToolSchema(tool, false)) }),
+			execute: (input) => executeToolBatch(input, pipeline, () => 1)
+		});
+		return definitions;
+	})();
+	receiptExecutors.set(agent, pending);
+	return pending;
+}
+/** Call arguments of an observed CLI tool; a command-only entry (Codex commandExecution) shows its command. */
+function observedToolInput(toolCall) {
+	if (toolCall.input !== void 0) return toolCall.input;
+	return typeof toolCall.command === "string" ? { command: toolCall.command } : void 0;
+}
 /** AgentLoop receives an existing CLI receipt; this registry cannot execute a tool. */
 var HarnessObservedTools = class {
 	agent;
@@ -14698,18 +17046,21 @@ var HarnessObservedTools = class {
 			assertOwner();
 			if (this.source.completed() && !this.source.hasFollowing()) exec.concludeTurn();
 		}
+		if (row.truncated) return `${text}\n\n[${truncationNote(row)}]`;
 		return JSON.parse(json$2(output));
 	}
-	declare(row) {
+	async declare(row) {
 		if (this.disposed || !row.response || !row.toolCall?.callId || !row.toolCall.name) throw new Error("CLI 工具声明缺少响应或调用身份");
 		const name = row.toolCall.name;
 		if (name === "run_code" || !/^[a-zA-Z0-9_.:-]{1,128}$/u.test(name)) throw new Error("CLI 工具名称不能安全注册为回执适配");
 		const callId = ToolCallId(`cliworker:${this.runId}:${row.toolCall.callId}`);
-		const args = json$2(row.toolCall.input ?? {});
+		const args = json$2(observedToolInput(row.toolCall) ?? {});
 		const previous = this.receipts.get(callId);
 		if (previous && (previous.rowId !== row.id || previous.name !== name || previous.arguments !== args)) throw new Error("CLI 工具调用身份或参数发生变化");
+		const definitions = await receiptDefinitions(this.agent);
+		if (this.disposed) throw new Error("CLI 工具回执已关闭");
 		if (!this.names.has(name)) {
-			const dispose = this.agent.ctx.tools.register({
+			const definition = {
 				name,
 				description: "读取已由 CLI 执行的这次调用回执，不执行工具",
 				parameters: {},
@@ -14722,9 +17073,14 @@ var HarnessObservedTools = class {
 				},
 				execute: (_args, exec) => this.receipt(exec),
 				isConcurrencySafe: () => true
-			});
+			};
+			const dispose = this.agent.ctx.tools.register(definition);
+			definitions.add(definition);
 			this.names.add(name);
-			this.disposers.push(dispose);
+			this.disposers.push(() => {
+				definitions.delete(definition);
+				dispose();
+			});
 		}
 		this.receipts.set(callId, {
 			rowId: row.id,
@@ -14750,7 +17106,24 @@ const terminalTool = (state) => /^(?:COMPLETED|COMPLETE|DONE|SUCCESS|FAILED|ERRO
 const failedTool = (state) => /^(?:FAILED|ERROR|CANCELLED|CANCELED)$/u.test(state ?? "");
 const json$1 = (value) => JSON.stringify(value) ?? "null";
 const textOf$1 = (row) => row.kind === "reasoning" ? row.detail ?? row.text : row.text;
+/** DSH Chat hides notice-form context, so a CLI Worker action in this run (an
+* automatic follow-up) shows as a completed passive tool row; it is never dispatched. */
+const noticeRow = (item) => ({
+	id: item.id,
+	kind: "tool",
+	text: "cliworker_auto_followup",
+	time: item.time,
+	state: "COMPLETED",
+	toolCall: {
+		callId: `notice:${item.id}`,
+		name: "cliworker_auto_followup",
+		input: { 说明: item.text },
+		output: item.text
+	}
+});
 /** One CLI run consumed once across native steps. It never calls an LLM or executes a tool. */
+/** The CLI finished its turn; an unverified result still needs the user's check, not a retry. */
+const endsNormally = (outcome) => outcome.status === "completed" || outcome.status === "uncertain";
 var HarnessConversationStream = class {
 	record;
 	run;
@@ -14825,7 +17198,7 @@ var HarnessConversationStream = class {
 			this.seq = event.seq;
 		}
 		const initialUser = this.history.find((event) => event.kind === "user");
-		return foldEvents(this.history, void 0, cliOf(this.deps.getWorker(this.record.parentSessionId, this.record.workerId).preference)).filter((item) => item.kind === "assistant" || item.kind === "reasoning" || item.kind === "tool" || item.kind === "user" && item.id.startsWith(`${this.run.runId}:event:`) && item.id !== `${this.run.runId}:event:${initialUser?.seq}`);
+		return foldEvents(this.history, void 0, cliOf(this.deps.getWorker(this.record.parentSessionId, this.record.workerId).preference)).filter((item) => item.kind === "assistant" || item.kind === "reasoning" || item.kind === "tool" || item.kind === "diagnostic" && item.notice === true || item.kind === "user" && item.id.startsWith(`${this.run.runId}:event:`) && item.id !== `${this.run.runId}:event:${initialUser?.seq}`).map((item) => item.kind === "diagnostic" ? noticeRow(item) : item);
 	}
 	notify() {
 		for (const wake of this.waiters) wake();
@@ -14874,7 +17247,7 @@ var HarnessConversationStream = class {
 		const outcome = this.outcome;
 		if (!outcome) throw new Error("CLI 运行尚未完成清理");
 		if (outcome.runId !== this.run.runId) throw new Error("CLI 运行终态身份不匹配");
-		if (outcome.status === "completed") return {
+		if (endsNormally(outcome)) return {
 			type: "finish",
 			reason: { kind: "stop" }
 		};
@@ -14965,7 +17338,7 @@ var HarnessConversationStream = class {
 						},
 						stop: () => this.stop()
 					});
-					const block = this.observedTools.declare(row);
+					const block = await this.observedTools.declare(row);
 					const previous = tools.get(identity.blockId);
 					if (previous) {
 						if (previous.index !== identity.index || previous.serialized !== json$1(block)) throw new Error("CLI 工具响应块发生变化");
@@ -15056,7 +17429,7 @@ var HarnessConversationStream = class {
 			return;
 		}
 		if (this.outcome || this.issue) await this.nativeInputs?.settled();
-		if (this.rows()[this.row] || !this.outcome || this.outcome.status !== "completed" || this.issue) {
+		if (this.rows()[this.row] || !this.outcome || !endsNormally(this.outcome) || this.issue) {
 			this.continuation(agent);
 			yield {
 				type: "finish",
@@ -15104,11 +17477,12 @@ var HarnessConversationStream = class {
 				}), { surfaceOp: "append" });
 			} else if (first.kind === "tool") {
 				const callId = ToolCallId(`cliworker:${this.run.runId}:${first.toolCall?.callId ?? first.id}`);
+				const input = first.toolCall && observedToolInput(first.toolCall);
 				const block = {
 					type: "tool-call",
 					id: callId,
 					name: first.toolCall?.name || first.text || "CLI 工具",
-					arguments: first.toolCall?.input === void 0 ? "" : json$1(first.toolCall.input)
+					arguments: input === void 0 ? "" : json$1(input)
 				};
 				const projection = new AssistantStreamAccumulator();
 				const chunks = [
@@ -15173,7 +17547,7 @@ var HarnessConversationStream = class {
 							isError: failedTool(current.state),
 							content: [{
 								type: "text",
-								text: output === void 0 ? current.detail ?? current.text : typeof output === "string" ? output : json$1(output)
+								text: (output === void 0 ? current.detail ?? current.text : typeof output === "string" ? output : json$1(output)) + (current.truncated ? `\n\n[${truncationNote(current)}]` : "")
 							}]
 						})
 					}, {
@@ -15254,7 +17628,7 @@ var HarnessConversationStream = class {
 			while (!this.rows()[this.row] && !this.outcome && !this.issue) await this.changed(signal);
 			if (this.outcome || this.issue) await this.nativeInputs?.settled();
 			rows = this.rows();
-			if (rows[this.row] || !this.outcome || this.outcome.status !== "completed" || this.issue) {
+			if (rows[this.row] || !this.outcome || !endsNormally(this.outcome) || this.issue) {
 				this.continuation(agent);
 				natural = true;
 				yield {
@@ -15761,6 +18135,23 @@ function resolveHarnessAttachments(ctx, messages) {
 	}
 	return result;
 }
+const IMAGE_MEDIA_TYPES = [
+	"image/png",
+	"image/jpeg",
+	"image/webp",
+	"image/gif"
+];
+/** Inline bytes of a host tool's image result, for a CLI whose MCP accepts images. */
+async function readHarnessImage(ctx, ref, signal) {
+	const attachment = ref;
+	if (typeof attachment?.attachmentId !== "string" || typeof attachment.mediaType !== "string" || !IMAGE_MEDIA_TYPES.includes(attachment.mediaType)) return void 0;
+	const path = ctx.get("attachments")?.imageHostPath?.(ref);
+	if (!path) return void 0;
+	return {
+		data: (await readFile(path, { signal })).toString("base64"),
+		mimeType: attachment.mediaType
+	};
+}
 //#endregion
 //#region lib/types/host/native-attachments.mjs
 const supported = /* @__PURE__ */ new Set([
@@ -16006,6 +18397,15 @@ var HarnessConversationBridge = class {
 				depthLimit: false
 			}
 		}) : ctx.subagents.registerProvider(provider));
+		this.disposers.push(ctx.on("agent/created", ({ agent }) => {
+			const record = this.records.get(agent.id);
+			if (!record || !this.forkSeeds.has(agent.id)) return;
+			this.assertLive(record, agent);
+			agent.model?.select({
+				provider: HARNESS_CLI_PROVIDER,
+				model: this.model(record)
+			});
+		}, { global: true }));
 		this.disposers.push(ctx.on("agent/inbox/inserted", ({ agent, message }) => {
 			if (message.source.kind === "subagent-settled") {
 				const senderId = message.source.senderSessionId;
@@ -16552,7 +18952,7 @@ var HarnessConversationBridge = class {
 		if (!record || record.workerId !== worker.id || record.parentSessionId !== worker.parentSessionId) throw new Error("CLI 子会话绑定不匹配，无法分支");
 		const query = this.ctx.get("sessionQuery");
 		if (!query) throw new Error("Harness 会话历史服务未就绪");
-		const observation = await query.observeSession(SessionId(record.sessionId), {
+		const observation = await query.observeSession(SessionId$1(record.sessionId), {
 			signal,
 			projectionMode: "none"
 		});
@@ -16571,11 +18971,11 @@ var HarnessConversationBridge = class {
 				await this.deps.bind(record);
 			},
 			rollback: async () => {
-				await this.drainChildren(parent, [SessionId(record.sessionId)]);
+				await this.drainChildren(parent, [SessionId$1(record.sessionId)]);
 				await this.deps.unbind(record);
 				this.records.delete(record.sessionId);
 				const workspaces = this.ctx.get("workspaces");
-				if (workspaces?.archiveSession) await workspaces.archiveSession(SessionId(record.sessionId));
+				if (workspaces?.archiveSession) await workspaces.archiveSession(SessionId$1(record.sessionId));
 				else this.ctx.logger?.warn(`分支子会话 ${record.sessionId} 已解除绑定并释放；宿主未提供归档接口，持久化历史日志保留待清理`);
 			}
 		};
@@ -16642,7 +19042,7 @@ var HarnessConversationBridge = class {
 			await this.ctx.subagents.prompt({
 				requestId,
 				parentSessionId: parent.id,
-				childSessionId: SessionId(record.sessionId),
+				childSessionId: SessionId$1(record.sessionId),
 				mode: "continuable",
 				delivery: "queue",
 				content: [{
@@ -16685,7 +19085,7 @@ var HarnessConversationBridge = class {
 			const spec = {
 				provider: HARNESS_CLI_SUBAGENT_PROVIDER,
 				label: worker.title,
-				childId: SessionId(record.sessionId),
+				childId: SessionId$1(record.sessionId),
 				request: {
 					parent,
 					prompt: [{
@@ -16715,7 +19115,7 @@ var HarnessConversationBridge = class {
 				if ((await this.activations.get(record.sessionId).result).stopReason !== "completed") throw new Error("Harness 分支历史初始化未完成");
 			}
 			if (forkHistory && !activationSubagents(this.ctx.subagents)) {
-				const child = this.ctx.agents.get(SessionId(record.sessionId));
+				const child = this.ctx.agents.get(SessionId$1(record.sessionId));
 				if (!child) throw new Error("Harness 分支子会话未进入可用状态");
 				await child.whenIdle();
 				const end = child.session.snapshotEvents().slice(forkHistory.seed.length).filter((event) => event.type === "turn/end").at(-1);
@@ -16724,7 +19124,7 @@ var HarnessConversationBridge = class {
 			return this.binding(record);
 		} catch (error) {
 			try {
-				await this.drainChildren(parent, [SessionId(record.sessionId)]);
+				await this.drainChildren(parent, [SessionId$1(record.sessionId)]);
 				if (previous && this.records.has(record.sessionId)) {
 					const rollback = {
 						...previous,
@@ -16877,7 +19277,7 @@ var HarnessConversationBridge = class {
 			children.push(record.sessionId);
 			parents.set(parent, children);
 		}
-		outcomes.push(...await Promise.allSettled([...parents].map(([parent, children]) => this.drainChildren(parent, children.map(SessionId)))));
+		outcomes.push(...await Promise.allSettled([...parents].map(([parent, children]) => this.drainChildren(parent, children.map(SessionId$1)))));
 		outcomes.push(...await Promise.allSettled([...this.settlementHolds]));
 		this.streams.clear();
 		this.pending.clear();
@@ -17164,11 +19564,12 @@ const reserved = /* @__PURE__ */ new Set([
 const forbidden = /^(?:run_code|cliworker|cli_worker|agent|subagents?|spawn|delegate|task|send_message|interrupt_agent|(?:send|resume|close|interrupt|wait|list)_subagents?)(?:[_.-]|$)/iu;
 /**
 * The scoped registry establishes availability; a familiar name or MCP prefix
-* establishes nothing. Effects and approvals still belong to tools.execute.
+* establishes nothing. Effects and approvals still belong to the Harness tool pipeline.
 * Auxiliary model calls are additionally rejected by withinCliTool's guard.
 */
 function classifyHarnessTool(name, visibleSchemas = []) {
-	if (forbidden.test(name)) return "dispatch";
+	if ((name === "cliworker_start" || name === "cliworker_status") && visibleSchemas.some((schema) => schema.name === name)) return "host";
+	if (forbidden.test(name) || /cli_?worker/iu.test(name)) return "dispatch";
 	return visibleSchemas.some((schema) => schema.name === name) ? "host" : "unknown";
 }
 function canonical$1(value) {
@@ -17198,24 +19599,30 @@ const resultText = (value) => ({ content: [{
 	type: "text",
 	text: typeof value === "string" ? value : JSON.stringify(value ?? null)
 }] });
-function hostToolResult(value) {
+async function hostToolResult(value, image) {
 	if (record$3(value) && typeof value.isError === "boolean") {
 		if (!Array.isArray(value.content)) return {
 			...resultText("DSH 工具结果格式不受支持；未自动重试"),
 			isError: true
 		};
 		let unsupported = false;
-		const content = value.content.map((part) => {
+		const content = await Promise.all(value.content.map(async (part) => {
 			if (record$3(part) && part.type === "text" && typeof part.text === "string") return {
 				type: "text",
 				text: part.text
+			};
+			const inline = image && record$3(part) && part.type === "image" ? await image(part.attachment) : void 0;
+			if (inline) return {
+				type: "image",
+				data: inline.data,
+				mimeType: inline.mimeType
 			};
 			unsupported = true;
 			return {
 				type: "text",
 				text: "DSH 工具返回非文本内容，当前 CLI 工具桥尚不支持；未自动重试"
 			};
-		});
+		}));
 		if (Array.isArray(value.additionalContexts) && value.additionalContexts.length) return {
 			content: [...content, {
 				type: "text",
@@ -17230,9 +19637,10 @@ function hostToolResult(value) {
 	}
 	return resultText(value);
 }
+const fallback = (description) => `${HARNESS_FALLBACK_PREFIX}${description}`;
 const skillSchema = (name, description, resource = false) => ({
 	name,
-	description,
+	description: fallback(description),
 	inputSchema: {
 		type: "object",
 		properties: name === "dsh_list_skills" ? {} : {
@@ -17250,16 +19658,21 @@ async function createNativeHarnessTools(options) {
 	const lifetime = new AbortController(), active = /* @__PURE__ */ new Set();
 	const ledger = /* @__PURE__ */ new Map();
 	const cancelled = /* @__PURE__ */ new Set();
-	async function visibleTools(signal = lifetime.signal) {
+	async function grantedTools(signal = lifetime.signal) {
 		signal.throwIfAborted();
 		const grants = typeof options.tools === "function" ? await options.tools(signal) : options.tools;
 		signal.throwIfAborted();
 		const tools = /* @__PURE__ */ new Map();
 		for (const grant of grants) {
-			if (grant.execution !== "host" || forbidden.test(grant.name)) continue;
+			if (grant.execution !== "host" || classifyHarnessTool(grant.name, grants) !== "host") continue;
 			if (!/^[A-Za-z0-9_.-]{1,128}$/u.test(grant.name) || reserved.has(grant.name) || tools.has(grant.name) || !record$3(grant.inputSchema)) throw failure$2("工具桥授权目录无效或重名");
 			tools.set(grant.name, structuredClone(grant));
 		}
+		return tools;
+	}
+	async function visibleTools(signal = lifetime.signal) {
+		const tools = await grantedTools(signal);
+		for (const name of tools.keys()) if (nativeCoverage(name, options.native)) tools.delete(name);
 		return tools;
 	}
 	const initialTools = await visibleTools();
@@ -17279,7 +19692,7 @@ async function createNativeHarnessTools(options) {
 		if (!(await options.skills.list(signal)).some((row) => row.name === name)) throw failure$2("技能不在当前授权目录中");
 		const value = await options.skills.get(name, signal);
 		if (!value || value.name !== name || typeof value.content !== "string") throw failure$2("技能不可用");
-		const tools = await visibleTools(signal);
+		const tools = await grantedTools(signal);
 		if (value.requiredTools?.some((required) => !tools.has(required))) throw failure$2("技能所需工具未获准或尚未接通");
 		return value;
 	}
@@ -17318,7 +19731,10 @@ async function createNativeHarnessTools(options) {
 		signal.throwIfAborted();
 		await check(method, typeof params.name === "string" ? params.name : void 0);
 		signal.throwIfAborted();
-		if (method === "tools/list") return { tools: [...(await visibleTools(signal)).values()].map(({ execution: _execution, ...schema }) => schema).concat(options.skills ? [
+		if (method === "tools/list") return { tools: [...(await visibleTools(signal)).values()].map(({ execution: _execution, ...schema }) => ({
+			...schema,
+			description: fallback(schema.description)
+		})).concat(options.skills ? [
 			skillSchema("dsh_list_skills", "列出当前会话获准技能的摘要；正文与资源按需加载。"),
 			skillSchema("dsh_read_skill", "读取获准技能说明；未声明依赖不代表全部外部能力已验证。"),
 			skillSchema("dsh_read_skill_resource", "读取已授权技能内的相对资源；返回base64文件内容。", true)
@@ -17349,7 +19765,7 @@ async function createNativeHarnessTools(options) {
 				signal
 			});
 			if (signal.aborted) throw failure$2("工具调用已取消；未自动重试");
-			return hostToolResult(result);
+			return hostToolResult(result, options.native?.mcpImages && options.resolveImage ? (attachment) => options.resolveImage(attachment, signal) : void 0);
 		}
 		if (method === "resources/list" || method === "resources/templates/list") return method === "resources/list" ? { resources: [] } : { resourceTemplates: options.skills ? [{
 			uriTemplate: "dsh-skill://{name}/{path}",
@@ -17376,7 +19792,7 @@ async function createNativeHarnessTools(options) {
 				"Content-Type": "application/json",
 				"Cache-Control": "no-store"
 			});
-			response.end(serialized.length <= maximum ? serialized : JSON.stringify({ error: "工具桥响应超过限制；不会自动重试" }));
+			response.end(Buffer.byteLength(serialized) <= maximum - 4096 ? serialized : JSON.stringify({ error: "工具桥响应超过限制；不会自动重试" }));
 		};
 		try {
 			const auth = request.headers.authorization ?? "", expected = `Bearer ${secret}`;
@@ -17408,15 +19824,21 @@ async function createNativeHarnessTools(options) {
 			const controller = previous?.controller ?? new AbortController();
 			if (cancelled.has(key)) controller.abort(/* @__PURE__ */ new Error("MCP 请求已取消"));
 			const operation = previous?.promise ?? dispatch(value.method, value.params ?? {}, key, AbortSignal.any([lifetime.signal, controller.signal]));
+			const entry = previous ?? {
+				hash,
+				promise: operation,
+				controller,
+				waiting: 0
+			};
 			if (!previous) {
-				ledger.set(key, {
-					hash,
-					promise: operation,
-					controller
-				});
+				ledger.set(key, entry);
 				active.add(operation);
 				operation.finally(() => active.delete(operation)).catch(() => {});
 			}
+			entry.waiting++;
+			response.once("close", () => {
+				if (!response.writableFinished && --entry.waiting === 0) controller.abort(/* @__PURE__ */ new Error("MCP 请求连接已断开"));
+			});
 			const result = await operation;
 			await check(value.method, name);
 			if (value.method === "tools/call" && (name === "dsh_read_skill" || name === "dsh_read_skill_resource")) await skill((record$3(value.params) && record$3(value.params.arguments) ? value.params.arguments : {}).name);
@@ -17436,11 +19858,17 @@ async function createNativeHarnessTools(options) {
 	});
 	const address = server.address();
 	if (!address || typeof address === "string") throw new Error("工具桥地址无效");
+	const offered = [...initialTools.keys(), ...options.skills ? [
+		"dsh_list_skills",
+		"dsh_read_skill",
+		"dsh_read_skill_resource"
+	] : []];
 	const connection = {
 		url: `http://127.0.0.1:${address.port}/rpc`,
 		token: secret,
 		binding: { ...binding },
-		executionReady: options.executionReady === true
+		executionReady: options.executionReady === true,
+		tools: offered
 	};
 	const abort = () => {
 		close();
@@ -17477,14 +19905,14 @@ async function createNativeHarnessTools(options) {
 /**
 * A lease is owned from the moment it is created. Until the caller receives the
 * returned handle, any publication failure closes the listening bridge and
-* restores the child presentation before the original error is reported.
+* releases the executor adapter before the original error is reported.
 */
-async function adoptNativeHarnessLease(lease, resetPresentation, publish) {
+async function adoptNativeHarnessLease(lease, disposeExecutor, publish) {
 	const release = async () => {
 		try {
 			await lease.close();
 		} finally {
-			resetPresentation();
+			disposeExecutor();
 		}
 	};
 	try {
@@ -17503,11 +19931,80 @@ async function adoptNativeHarnessLease(lease, resetPresentation, publish) {
 	};
 }
 //#endregion
+//#region lib/types/host/native-harness-executor.js
+function isLegacyTools(tools) {
+	return typeof tools === "object" && tools !== null && "presentAs" in tools && typeof tools.presentAs === "function" && "execute" in tools && typeof tools.execute === "function";
+}
+/**
+* Use the same native scheduler/policy pipeline as NativeToolExecutor without
+* registering an executor (a child may already select PTC). Load the new
+* subpath only on new hosts; rc.5 keeps its scoped presentation and disposer.
+*/
+async function createNativeHarnessExecutor(ctx) {
+	const tools = ctx.tools;
+	if (isLegacyTools(tools)) return {
+		execute: (input) => tools.execute(input),
+		dispose: tools.presentAs("native")
+	};
+	const { ToolExecutionPipeline, executeToolBatch } = await import("@deepseek-ai/dsh-tools/pipeline");
+	const pipeline = new ToolExecutionPipeline(ctx);
+	return {
+		async execute(input) {
+			const argumentsJson = JSON.stringify(input.arguments);
+			if (argumentsJson === void 0) throw new Error("DSH 工具参数不是有效 JSON");
+			const settled = (await executeToolBatch({
+				calls: [{
+					type: "tool-call",
+					id: input.callId,
+					name: input.name,
+					arguments: argumentsJson
+				}],
+				agent: input.agent,
+				signal: input.signal
+			}, pipeline, () => 1)).results.find((result) => result.callId === input.callId);
+			if (settled) return settled.result;
+			input.signal.throwIfAborted();
+			throw new Error(`DSH 工具调用未返回结果：${input.callId}；未自动重试`);
+		},
+		dispose() {}
+	};
+}
+//#endregion
+//#region lib/types/host/native-cold-session-state.js
+const inboxSchema = z.object({
+	"next-turn": z.array(z.unknown()),
+	"next-step": z.array(z.unknown())
+});
+const turnSchema = z.object({ openTurnStartSeq: z.number().int().nonnegative().transform(SessionSeq).nullable() });
+const planSchema = z.object({
+	active: z.boolean(),
+	wanted: z.boolean().nullable(),
+	running: z.object({ wanted: z.boolean() }).nullable()
+});
+/** Fail closed before changing a cold session if a host projection is missing or incompatible. */
+function readNativeColdSessionState(inbox, turn, plan) {
+	const parsedInbox = inboxSchema.safeParse(inbox);
+	const parsedTurn = turnSchema.safeParse(turn);
+	const parsedPlan = planSchema.safeParse(plan);
+	if (!parsedInbox.success || !parsedTurn.success || !parsedPlan.success) throw new Error("原生历史会话投影尚未就绪或格式不兼容，未修改权限");
+	return {
+		inbox: parsedInbox.data,
+		turn: parsedTurn.data,
+		plan: parsedPlan.data
+	};
+}
+//#endregion
 //#region lib/types/host/harness-model-guard.js
 const executions = new AsyncLocalStorage();
 /** Retains attribution for model-powered tools that omit sessionId and purpose. */
 function withinCliTool(runId, execute) {
 	return executions.run(runId, execute);
+}
+/** Only the authorized sibling job publisher uses this boundary. Its background
+* native conversation is a new run, not an auxiliary model call of the source tool.
+* The calling tool keeps its attribution; each new run's tools enter their own guard. */
+function publishSiblingOutsideTool(publish) {
+	return executions.exit(publish);
 }
 function installHarnessModelGuard(ctx) {
 	return ctx.on("llm/stream", async function* (_options, next) {
@@ -17644,10 +20141,165 @@ function spawnWindowsHidden(backend, spec, options = {}) {
 	};
 }
 //#endregion
+//#region lib/types/host/windows-system-proxy.js
+const SETTINGS = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
+const PROXY_NAMES = /* @__PURE__ */ new Set([
+	"HTTP_PROXY",
+	"HTTPS_PROXY",
+	"ALL_PROXY"
+]);
+const LOCAL = [
+	"localhost",
+	"127.0.0.1",
+	"::1"
+];
+const OUTPUT_LIMIT = 64 * 1024;
+/** `reg query` output to a proxy, or undefined when the switch is off or the value is not one HTTP proxy. */
+function parseInternetSettings(output) {
+	const values = /* @__PURE__ */ new Map();
+	for (const line of output.split(/\r?\n/)) {
+		const match = /^\s+(ProxyEnable|ProxyServer|ProxyOverride)\s+REG_\w+\s+(.*?)\s*$/i.exec(line);
+		if (match) values.set(match[1].toLowerCase(), match[2]);
+	}
+	if (!/^0x0*1$/i.test(values.get("proxyenable") ?? "")) return void 0;
+	const entries = (values.get("proxyserver") ?? "").split(";").map((entry) => entry.trim()).filter(Boolean);
+	const scheme = (name) => entries.find((entry) => entry.toLowerCase().startsWith(`${name}=`))?.slice(name.length + 1);
+	const address = entries.length === 1 && !entries[0].includes("=") ? entries[0] : scheme("https") ?? scheme("http");
+	const match = /^(?:https?:\/\/)?(\[[0-9a-f:.]+\]|[a-z0-9.-]+):(\d{1,5})\/?$/i.exec(address ?? "");
+	if (!match || Number(match[2]) < 1 || Number(match[2]) > 65535) return void 0;
+	const bypass = (values.get("proxyoverride") ?? "").split(";").map((entry) => entry.trim().toLowerCase()).filter((entry) => /^(?:\*\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*$/.test(entry)).map((entry) => entry.replace(/^\*\./, "."));
+	return {
+		url: `http://${match[1]}:${match[2]}`,
+		bypass
+	};
+}
+/** Whether the inherited or explicit environment already decides proxying, including an explicit removal. */
+function decidesProxy(...envs) {
+	return envs.some((env) => Object.entries(env ?? {}).some(([key, value]) => PROXY_NAMES.has(key.toUpperCase()) && (value === void 0 || !!value.trim())));
+}
+/** The variables a CLI reads on macOS from launchd; Windows keys are case-insensitive, so one spelling each. */
+function proxyEnvironment(proxy, inherited = {}) {
+	const existing = Object.entries(inherited).flatMap(([key, value]) => key.toUpperCase() === "NO_PROXY" && value ? value.split(",").map((entry) => entry.trim()) : []);
+	const noProxy = [.../* @__PURE__ */ new Set([
+		...existing.filter(Boolean),
+		...LOCAL,
+		...proxy.bypass
+	])].join(",");
+	return {
+		HTTP_PROXY: proxy.url,
+		HTTPS_PROXY: proxy.url,
+		NO_PROXY: noProxy
+	};
+}
+/** The proxy URL for one Host request, under the same rules as a CLI the Host starts. */
+function hostProxyLookup(source) {
+	return async (target) => {
+		if (decidesProxy(process.env)) return environmentProxy(target);
+		const proxy = await source.fresh();
+		if (!proxy) return void 0;
+		const bypass = proxyEnvironment(proxy, process.env).NO_PROXY.split(",");
+		return bypassesProxy(new URL(target).hostname, bypass) ? void 0 : proxy.url;
+	};
+}
+/** Reads the switch on demand; a proxy turned off or changed applies to CLIs started afterwards. */
+var WindowsSystemProxySource = class {
+	spawn;
+	ttlMs;
+	now;
+	value;
+	readAt = Number.NEGATIVE_INFINITY;
+	pending;
+	constructor(spawn, ttlMs = 15e3, now = () => Date.now()) {
+		this.spawn = spawn;
+		this.ttlMs = ttlMs;
+		this.now = now;
+	}
+	/** The last reading, refreshing in the background when stale; for spawns that cannot wait. */
+	current() {
+		if (this.stale()) this.refresh();
+		return this.value;
+	}
+	/** A reading no older than the TTL. */
+	async fresh() {
+		if (this.stale()) await this.refresh();
+		return this.value;
+	}
+	refresh() {
+		this.pending ??= this.read().then((value) => {
+			this.value = value;
+		}, () => {
+			this.value = void 0;
+		}).finally(() => {
+			this.readAt = this.now();
+			this.pending = void 0;
+		});
+		return this.pending;
+	}
+	stale() {
+		return this.now() - this.readAt >= this.ttlMs;
+	}
+	async read() {
+		const system = process.env.SystemRoot ?? "C:\\Windows";
+		const child = this.spawn({
+			argv: [
+				join(system, "System32", "reg.exe"),
+				"query",
+				SETTINGS
+			],
+			cwd: system,
+			stdio: {
+				stdin: "ignore",
+				stdout: "pipe",
+				stderr: "pipe"
+			},
+			graceMs: 500,
+			signal: AbortSignal.timeout(5e3)
+		});
+		child.done.catch(() => void 0);
+		try {
+			child.stderr?.resume();
+			const decoder = new StringDecoder("latin1");
+			let output = "";
+			for await (const chunk of child.stdout ?? []) {
+				output += decoder.write(chunk);
+				if (output.length > OUTPUT_LIMIT) throw new Error("Internet Settings output too large");
+			}
+			return (await child.done).exitCode === 0 ? parseInternetSettings(output + decoder.end()) : void 0;
+		} finally {
+			child.terminate();
+			await child.waitForExit();
+			await child.done.catch(() => void 0);
+		}
+	}
+};
+//#endregion
 //#region lib/types/host/native-process.js
 const privateLauncher = fileURLToPath(new URL("./private-launch.mjs", import.meta.url));
 /** One normalization boundary for tasks, metadata and interactive account menus. */
 function nativeProcessBackend(backend, platform = process.platform, options = {}) {
+	const native = normalizedBackend(backend, platform, options);
+	const proxy = options.systemProxy;
+	if (!proxy) return native;
+	const withProxy = (spec, value) => {
+		if (!value || decidesProxy(process.env, spec.env)) return spec;
+		const own = Object.entries(spec.env ?? {}).filter(([key]) => key.toUpperCase() === "NO_PROXY");
+		const rest = Object.entries(spec.env ?? {}).filter(([key]) => key.toUpperCase() !== "NO_PROXY");
+		const inherited = own.length ? Object.fromEntries(own) : process.env;
+		return {
+			...spec,
+			env: {
+				...Object.fromEntries(rest),
+				...proxyEnvironment(value, inherited)
+			}
+		};
+	};
+	return {
+		resolveExecutable: (name) => native.resolveExecutable(name),
+		spawn: (spec) => native.spawn(withProxy(spec, proxy.current())),
+		...native.spawnTerminal ? { spawnTerminal: async (spec) => native.spawnTerminal(withProxy(spec, await proxy.fresh())) } : {}
+	};
+}
+function normalizedBackend(backend, platform, options) {
 	const normalize = (spec, background = false) => {
 		const requested = nativeLaunchArgv(spec.argv, platform);
 		const launch = background && platform === "win32" ? windowsCodexBackgroundLaunch(requested, spec.env, { platform }) : void 0;
@@ -17894,6 +20546,15 @@ var CliExecutablePathStore = class {
 const ACCOUNT_CHANGED = "账号已变更，请重新选择或新建任务";
 /** Private authorization state: never spread this object into a Remote response. */
 async function authorizedCatalog(cli, backend, config, project, signal, expected) {
+	try {
+		return await authorizedCatalogOnce(cli, backend, config, project, signal, expected);
+	} catch (error) {
+		if (expected || !(error instanceof Error) || error.message !== "账号已变更，请重新选择或新建任务") throw error;
+		signal.throwIfAborted();
+		return authorizedCatalogOnce(cli, backend, config, project, signal);
+	}
+}
+async function authorizedCatalogOnce(cli, backend, config, project, signal, expected) {
 	const discover = async () => {
 		const binding = await readCliAccountBinding(cli, backend, config, project, signal);
 		if (expected && binding !== expected) throw new Error(ACCOUNT_CHANGED);
@@ -18037,6 +20698,35 @@ async function spawnManagedAgent(backend, spec) {
 			}
 		}
 	};
+}
+//#endregion
+//#region lib/types/host/task-time-limit.js
+/** Bridge result errors for a reached limit (`native-time-limit.mjs`). */
+const BRIDGE_TIME_LIMIT_ERRORS = {
+	total: "Native task timed out",
+	idle: "Native task idle timed out"
+};
+function taskTimeLimit(totalMs, idleMs, now = Date.now()) {
+	return {
+		deadlineAt: now + totalMs,
+		totalMs,
+		idleMs
+	};
+}
+const remainingMs = (limit, now = Date.now()) => Math.max(0, limit.deadlineAt - now);
+function duration$1(ms) {
+	if (ms % 36e5 === 0) return `${ms / 36e5} 小时`;
+	if (ms % 6e4 === 0) return `${ms / 6e4} 分钟`;
+	return `${Math.ceil(ms / 1e3)} 秒`;
+}
+/** The stop reason names which limit ended the task. */
+function timeLimitMessage(kind, limit) {
+	return kind === "total" ? `任务超时：已达到总时限 ${duration$1(limit.totalMs)}` : `任务超时：连续 ${duration$1(limit.idleMs)}没有收到 CLI 事件（空闲时限）`;
+}
+/** A bridge run that ended on its own timer: its result error, or the error raised before any session. */
+function bridgeTimeLimit(error) {
+	const text = error instanceof Error ? error.message : error;
+	return Object.keys(BRIDGE_TIME_LIMIT_ERRORS).find((kind) => text === BRIDGE_TIME_LIMIT_ERRORS[kind]);
 }
 //#endregion
 //#region lib/types/host/agy-context.js
@@ -18521,6 +21211,19 @@ function metricRecords(v) {
 			"qodercn.native-runtime-config",
 			"qodercn.native-session-log"
 		].includes(v.contextCapacitySource) ? v.contextCapacitySource : void 0
+	});
+	else if (v.type === "cliworker.agy_prompt_usage") entries.push({
+		type: v.type,
+		sessionId: textId(v.sessionId),
+		model: textId(v.model),
+		usage: metricCounts(v.usage, [
+			"inputTokens",
+			"outputTokens",
+			"totalTokens",
+			"cachedReadTokens",
+			"cachedWriteTokens",
+			"thoughtTokens"
+		])
 	});
 	else if (v.type === "cliworker.grok_prompt_usage") entries.push({
 		type: v.type,
@@ -19126,6 +21829,23 @@ function extractTelemetry(cli, records, identity = {}) {
 				}
 			}
 			if (duration(v.providerCredits) !== void 0) result.providerCredits = v.providerCredits;
+		} else if (cli === "antigravity" && v.type === "cliworker.agy_prompt_usage" && textId(v.sessionId) && ownSession(v.sessionId) && (!model || v.model === model)) {
+			const u = obj(v.usage);
+			delete result.runUsage;
+			delete result.usage;
+			if ([
+				"inputTokens",
+				"outputTokens",
+				"totalTokens"
+			].every((key) => count$4(u[key]) !== void 0) && u.totalTokens > 0) result.runUsage = result.usage = {
+				input: u.inputTokens,
+				output: u.outputTokens,
+				total: u.totalTokens,
+				...count$4(u.cachedReadTokens) !== void 0 ? { cacheRead: u.cachedReadTokens } : {},
+				...count$4(u.cachedWriteTokens) !== void 0 ? { cacheWrite: u.cachedWriteTokens } : {},
+				...count$4(u.thoughtTokens) !== void 0 ? { reasoning: u.thoughtTokens } : {},
+				scope: "run"
+			};
 		} else if (cli === "grok" && v.type === "cliworker.grok_prompt_usage" && textId(v.sessionId) && ownSession(v.sessionId)) {
 			const raw = grokPromptUsage({
 				...obj(v.usage),
@@ -19993,7 +22713,7 @@ const amount = (value) => typeof value === "number" && Number.isFinite(value) &&
 const count$1 = (value) => Number.isSafeInteger(value) && value > 0;
 const time = (value) => typeof value === "string" && /^\d{4}-\d\d-\d\dT/.test(value) && Number.isFinite(Date.parse(value)) ? Date.parse(value) : void 0;
 const maxBytes$1 = 16 * 1024 * 1024;
-const same = (a, b) => a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs && a.mode === b.mode && a.uid === b.uid && a.nlink === b.nlink;
+const same$1 = (a, b) => a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs && a.mode === b.mode && a.uid === b.uid && a.nlink === b.nlink;
 /** Qoder 1.1.73 QI(): exact project bucket, including its long-path hash. */
 function qoderProjectKey(project) {
 	const key = project.replace(/[^a-zA-Z0-9]/g, "-");
@@ -20096,7 +22816,7 @@ function readPrivateQoderContext(config, options = {}) {
 			if (!safe(entry)) return;
 			fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
 			const before = fstatSync(fd);
-			if (!safe(before) || !same(entry, before)) return;
+			if (!safe(before) || !same$1(entry, before)) return;
 			const bytes = Buffer.alloc(before.size);
 			let offset = 0;
 			while (offset < bytes.length) {
@@ -20104,10 +22824,10 @@ function readPrivateQoderContext(config, options = {}) {
 				if (!n) return;
 				offset += n;
 			}
-			if (!safe(fstatSync(fd)) || !same(before, fstatSync(fd)) || !same(before, lstatSync(file))) return;
+			if (!safe(fstatSync(fd)) || !same$1(before, fstatSync(fd)) || !same$1(before, lstatSync(file))) return;
 			if (directories.some(({ path, info }) => {
 				const now = lstatSync(path);
-				return now.isSymbolicLink() || !same(info, now);
+				return now.isSymbolicLink() || !same$1(info, now);
 			})) return;
 			if (bytes.length && bytes.at(-1) !== 10) return;
 			const lines = new TextDecoder("utf8", { fatal: true }).decode(bytes).trimEnd().split("\n").filter(Boolean);
@@ -20218,7 +22938,7 @@ function supplementWindow(config, observed, options = {}) {
 				const file = paths[index + 1], before = lstatSync(file);
 				if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || !privacy.allows(file, before) || before.size > 32 * 1024 * 1024) continue;
 				fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
-				if (!same(before, fstatSync(fd))) continue;
+				if (!same$1(before, fstatSync(fd))) continue;
 				const size = Math.min(before.size, 256 * 1024), bytes = Buffer.alloc(size);
 				let offset = 0;
 				while (offset < size) {
@@ -20226,7 +22946,7 @@ function supplementWindow(config, observed, options = {}) {
 					if (!n) break;
 					offset += n;
 				}
-				if (offset !== size || !same(before, fstatSync(fd)) || !same(before, lstatSync(file)) || directories.some((v) => !same(v.info, lstatSync(v.path)))) continue;
+				if (offset !== size || !same$1(before, fstatSync(fd)) || !same$1(before, lstatSync(file)) || directories.some((v) => !same$1(v.info, lstatSync(v.path)))) continue;
 				const text = bytes.toString("utf8"), complete = before.size > size ? text.slice(text.indexOf("\n") + 1) : text;
 				const window = inspectQoderLogWindow(complete.slice(0, complete.lastIndexOf("\n") + 1), config, observed);
 				if (window !== void 0) {
@@ -20780,6 +23500,88 @@ var NativeTimelineReprojector = class {
 	}
 };
 //#endregion
+//#region lib/types/host/cross-account-resume.js
+const CROSS_ACCOUNT_RESUME = Object.fromEntries(CLI_IDS.map((cli) => [cli, "try"]));
+const crossAccountResume = (cli) => CROSS_ACCOUNT_RESUME[cli];
+/**
+* Local presence check without reading session content or calling a model.
+* `false` means the native session is certainly absent from the store the
+* next launch uses; `undefined` means unknown, so native resume is attempted.
+*/
+function nativeSessionReachable(input) {
+	if (input.cli === "hermes" && input.transport !== "hermes-http-v1" && input.hermesHome) return existsSync(join(input.hermesHome, "state.db")) ? void 0 : false;
+}
+//#endregion
+//#region lib/types/host/carryover-context.js
+const CARRYOVER_BUDGET = 24e3;
+const ENTRY_LIMIT = 4e3;
+const OPEN = "【CLI Worker 历史记录】";
+const CLOSE = "【历史记录结束】";
+/** CLI output is untrusted: it must not close or reopen the history block. */
+function neutralize(text) {
+	return text.replaceAll(OPEN, "［CLI Worker 历史记录］").replaceAll(CLOSE, "［历史记录结束］");
+}
+function entry(row) {
+	const raw = row.kind === "user" ? `[用户] ${row.text}` : row.kind === "assistant" ? row.text.trim() && `[助手] ${row.text}` : row.kind === "tool" ? `[工具] ${[row.toolCall?.name ?? row.text, row.toolCall?.command].filter(Boolean).join("：")}` : void 0;
+	if (!raw) return;
+	const text = neutralize(raw.trim());
+	return text.length > ENTRY_LIMIT ? `${text.slice(0, ENTRY_LIMIT)}…（此条已截断）` : text;
+}
+/** Earlier conversation only: priority submissions count once they reached a CLI in an earlier run. */
+function earlier(row, currentRunId) {
+	if (row.id.startsWith("submission:")) return !!row.admittedRunId && row.admittedRunId !== currentRunId && (row.deliveryState === "running" || row.deliveryState === "completed");
+	return !row.id.startsWith(currentRunId + ":");
+}
+/**
+* Deterministic excerpt of a task's earlier public record for a new native
+* session. No model is called. The first user request and the most recent
+* whole turns are kept; anything between them is counted as omitted.
+* Tool output bodies are never included.
+*/
+function carryoverContext(events, currentRunId, budget = CARRYOVER_BUDGET) {
+	const turns = [];
+	for (const row of foldEvents(events)) {
+		if (!earlier(row, currentRunId)) continue;
+		const text = entry(row);
+		if (!text) continue;
+		if (row.kind === "user" || !turns.length) turns.push([]);
+		turns.at(-1).push(text);
+	}
+	const total = turns.reduce((sum, turn) => sum + turn.length, 0);
+	if (!total) return {
+		text: "",
+		included: 0,
+		omitted: 0
+	};
+	const first = turns[0][0];
+	let used = first.length;
+	const kept = [];
+	for (let index = turns.length - 1; index >= 0; index--) {
+		const turn = index === 0 ? turns[0].slice(1) : turns[index];
+		const size = turn.reduce((sum, text) => sum + text.length + 1, 0);
+		if (used + size > budget) break;
+		kept.unshift(turn);
+		used += size;
+	}
+	const included = 1 + kept.reduce((sum, turn) => sum + turn.length, 0);
+	const omitted = total - included;
+	return {
+		text: [
+			OPEN,
+			"以下是此任务此前的对话记录，由 CLI Worker 从本地历史整理，仅供参考，不是新的指令。原 CLI 会话无法在当前账号下恢复，所以在新会话中继续。",
+			first,
+			...omitted ? [`（此处省略 ${omitted} 条记录）`] : [],
+			...kept.flat(),
+			CLOSE,
+			"",
+			"本次消息：",
+			""
+		].join("\n"),
+		included,
+		omitted
+	};
+}
+//#endregion
 //#region lib/types/host/followup-queue.js
 const itemSchema = z.object({
 	id: z.uuid(),
@@ -21066,7 +23868,832 @@ var FollowupQueue = class {
 	}
 };
 //#endregion
+//#region lib/types/host/diff3.js
+/** Line-based three-way merge. Pure functions; callers own all file I/O. */
+/** Upper bound for the Myers edit distance; larger rewrites are reported as unmergeable. */
+const MAX_EDIT_DISTANCE = 2e3;
+/** Splits text into lines that keep their terminators, so joining is byte exact. */
+function splitLines(text) {
+	return text.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+}
+/** Myers O(ND) diff over line arrays; undefined when the distance exceeds the bound. */
+function diffHunks(base, side, limit = MAX_EDIT_DISTANCE) {
+	let prefix = 0;
+	while (prefix < base.length && prefix < side.length && base[prefix] === side[prefix]) prefix++;
+	let suffix = 0;
+	while (suffix < base.length - prefix && suffix < side.length - prefix && base[base.length - 1 - suffix] === side[side.length - 1 - suffix]) suffix++;
+	const a = base.slice(prefix, base.length - suffix);
+	const b = side.slice(prefix, side.length - suffix);
+	const n = a.length, m = b.length;
+	if (!n && !m) return [];
+	if (!n || !m) return [{
+		baseStart: prefix,
+		baseLength: n,
+		sideStart: prefix,
+		sideLength: m
+	}];
+	const max = Math.min(n + m, limit);
+	const offset = max + 1;
+	let v = new Int32Array(2 * max + 3);
+	const trace = [];
+	let found = -1;
+	for (let d = 0; d <= max && found < 0; d++) {
+		trace.push(v.slice());
+		for (let k = -d; k <= d; k += 2) {
+			let x = k === -d || k !== d && v[offset + k - 1] < v[offset + k + 1] ? v[offset + k + 1] : v[offset + k - 1] + 1;
+			let y = x - k;
+			while (x < n && y < m && a[x] === b[y]) {
+				x++;
+				y++;
+			}
+			v[offset + k] = x;
+			if (x >= n && y >= m) {
+				found = d;
+				break;
+			}
+		}
+	}
+	if (found < 0) return void 0;
+	const matches = [];
+	let x = n, y = m;
+	for (let d = found; d > 0; d--) {
+		v = trace[d];
+		const k = x - y;
+		const previous = k === -d || k !== d && v[offset + k - 1] < v[offset + k + 1] ? k + 1 : k - 1;
+		const startX = v[offset + previous];
+		const startY = startX - previous;
+		while (x > startX && y > startY) {
+			x--;
+			y--;
+			matches.push([x, y]);
+		}
+		x = startX;
+		y = startY;
+	}
+	while (x > 0 && y > 0) {
+		x--;
+		y--;
+		matches.push([x, y]);
+	}
+	matches.reverse();
+	const hunks = [];
+	let baseCursor = 0, sideCursor = 0;
+	for (const [i, j] of [...matches, [n, m]]) {
+		if (i > baseCursor || j > sideCursor) hunks.push({
+			baseStart: prefix + baseCursor,
+			baseLength: i - baseCursor,
+			sideStart: prefix + sideCursor,
+			sideLength: j - sideCursor
+		});
+		baseCursor = i + 1;
+		sideCursor = j + 1;
+	}
+	return hunks;
+}
+/**
+* Merges two descendants of `base`. Changes from both sides that touch or
+* overlap the same base region conflict unless they are identical.
+*/
+function diff3Merge(base, ours, theirs) {
+	if (ours === theirs) return {
+		clean: true,
+		text: ours
+	};
+	if (base === ours) return {
+		clean: true,
+		text: theirs
+	};
+	if (base === theirs) return {
+		clean: true,
+		text: ours
+	};
+	const o = splitLines(base), a = splitLines(ours), b = splitLines(theirs);
+	const left = diffHunks(o, a), right = diffHunks(o, b);
+	if (!left || !right) return {
+		clean: false,
+		reason: "too-large"
+	};
+	const sides = [a, b];
+	const hunks = [...left.map((hunk) => ({
+		...hunk,
+		side: 0
+	})), ...right.map((hunk) => ({
+		...hunk,
+		side: 1
+	}))].sort((x, y) => x.baseStart - y.baseStart || x.side - y.side);
+	const output = [];
+	let cursor = 0;
+	while (hunks.length) {
+		const first = hunks.shift();
+		const regionStart = first.baseStart;
+		let regionEnd = first.baseStart + first.baseLength;
+		const region = [first];
+		while (hunks.length && hunks[0].baseStart <= regionEnd) {
+			const next = hunks.shift();
+			regionEnd = Math.max(regionEnd, next.baseStart + next.baseLength);
+			region.push(next);
+		}
+		output.push(...o.slice(cursor, regionStart));
+		const content = sides.map((lines, side) => {
+			const own = region.filter((hunk) => hunk.side === side);
+			if (!own.length) return o.slice(regionStart, regionEnd);
+			const start = own[0].sideStart - (own[0].baseStart - regionStart);
+			const last = own.at(-1);
+			const end = last.sideStart + last.sideLength + (regionEnd - (last.baseStart + last.baseLength));
+			return lines.slice(start, end);
+		});
+		if (new Set(region.map((hunk) => hunk.side)).size === 1) output.push(...content[region[0].side]);
+		else if (content[0].join("") === content[1].join("")) output.push(...content[0]);
+		else return {
+			clean: false,
+			reason: "overlap"
+		};
+		cursor = regionEnd;
+	}
+	output.push(...o.slice(cursor));
+	return {
+		clean: true,
+		text: output.join("")
+	};
+}
+//#endregion
+//#region lib/types/host/isolated-workspace.js
+/**
+* Plugin-owned project copies for parallel writers. No Git repository is read,
+* created or committed; the copy never contains `.git`.
+*/
+const ISOLATION_LIMITS = {
+	/** Files plus symbolic links copied from the project. */
+	maxEntries: 2e4,
+	/** Total size of copied regular files. */
+	maxBytes: 1024 ** 3,
+	/** Text files up to this size keep a baseline for three-way merge. */
+	maxBaseBytes: 2 * 1024 ** 2,
+	/** Bound for scanning a copy before merge; agents may create build output. */
+	maxScanEntries: 2e5
+};
+/** Never copied and never merged, at any depth. */
+const EXCLUDED_NAMES = /* @__PURE__ */ new Set([
+	".git",
+	"node_modules",
+	".venv",
+	"__pycache__",
+	".pytest_cache",
+	".mypy_cache",
+	".ruff_cache",
+	".next",
+	".nuxt",
+	".turbo",
+	".parcel-cache",
+	".gradle"
+]);
+/** The copy cannot be created; the task falls back to the serial queue. */
+var IsolationUnavailableError = class extends Error {
+	constructor(message) {
+		super(message);
+		this.name = "IsolationUnavailableError";
+	}
+};
+const fileEntrySchema = z.object({
+	type: z.literal("file"),
+	hash: z.string().regex(/^[a-f\d]{64}$/),
+	size: z.number().int().min(0),
+	exec: z.boolean(),
+	mode: z.number().int().min(0),
+	base: z.boolean(),
+	mtime: z.string(),
+	ctime: z.string()
+}).strict();
+const linkEntrySchema = z.object({
+	type: z.literal("link"),
+	target: z.string().min(1)
+}).strict();
+const dirEntrySchema = z.object({ type: z.literal("dir") }).strict();
+const entrySchema = z.discriminatedUnion("type", [
+	fileEntrySchema,
+	linkEntrySchema,
+	dirEntrySchema
+]);
+const manifestSchema = z.object({
+	version: z.literal(1),
+	workerId: z.uuid(),
+	project: z.string().min(1),
+	copy: z.string().min(1),
+	createdAt: z.string(),
+	entries: z.record(z.string(), entrySchema),
+	skippedLinks: z.array(z.string())
+}).strict();
+const windows = process.platform === "win32";
+const key = (value) => windows ? value.toLowerCase() : value;
+function isolationRoot(stateDirectory) {
+	return join(stateDirectory, "isolated");
+}
+function workspacePaths(root, workerId, project) {
+	const id = z.uuid().parse(workerId);
+	const name = basename(project);
+	const directory = join(root, id);
+	return {
+		directory,
+		copy: join(directory, "copy", !name || name === "." || name === ".." ? "project" : name),
+		base: join(directory, "base"),
+		manifest: join(directory, "workspace.json")
+	};
+}
+/**
+* The copy is never validated as a user project: projectDirectory() still
+* rejects the plugin state directory. Only the exact scheduler-owned path for
+* this Worker is accepted, and it must be a real directory.
+*/
+function assertIsolatedCopy(root, workerId, project) {
+	const expected = workspacePaths(realpathSync(root), workerId, project).copy;
+	const status = lstatSync(expected, { throwIfNoEntry: false });
+	if (!status) throw new Error("隔离副本目录不存在");
+	if (status.isSymbolicLink() || !status.isDirectory()) throw new Error("隔离副本目录无效");
+	if (key(realpathSync(expected)) !== key(expected)) throw new Error("隔离副本目录无效");
+	return expected;
+}
+function isolatedCopyExists(root, workerId, project) {
+	try {
+		assertIsolatedCopy(root, workerId, project);
+		return true;
+	} catch {
+		return false;
+	}
+}
+/** Shown to the CLI before the task text; the user prompt itself is unchanged. */
+function isolationPromptNotice(copy, project) {
+	return [
+		"【隔离副本】",
+		`本轮在项目的隔离副本中运行，当前工作目录：${copy}`,
+		`原项目路径：${project}。不要写入原项目路径；用户消息中提到原项目的路径时，请改用当前工作目录中的对应路径。`,
+		"副本不包含 .git 与依赖目录（如 node_modules），不要执行 git 提交。改动由用户确认后合并回原项目。",
+		"【隔离副本说明结束】",
+		"",
+		""
+	].join("\n");
+}
+async function ensurePrivateDirectory(path) {
+	await mkdir(path, {
+		recursive: true,
+		mode: 448
+	});
+	if (!windows) await chmod(path, 448);
+}
+/** Relative POSIX path of a link target, or undefined when it can leave the project. */
+function insideTarget(path, target) {
+	const normalized = target.replaceAll("\\", "/");
+	if (isAbsolute(target) || posix.isAbsolute(normalized) || /^[a-z]:/i.test(normalized)) return void 0;
+	const resolved = posix.normalize(posix.join(posix.dirname(path), normalized));
+	if (resolved === ".." || resolved.startsWith("../") || posix.isAbsolute(resolved)) return void 0;
+	return resolved;
+}
+/** Pre-order walk that never follows links and never enters excluded names. */
+async function scanTree(root, options) {
+	const entries = /* @__PURE__ */ new Map();
+	let count = 0, bytes = 0;
+	const pending = [""];
+	while (pending.length) {
+		options.signal?.throwIfAborted();
+		const directory = pending.pop();
+		const names = (await readdir(join(root, ...directory.split("/").filter(Boolean)))).sort();
+		const children = [];
+		for (const name of names) {
+			if (EXCLUDED_NAMES.has(name)) continue;
+			const path = directory ? `${directory}/${name}` : name;
+			const status = await lstat(join(root, ...path.split("/")), { bigint: true });
+			const common = {
+				size: Number(status.size),
+				mode: Number(status.mode) & 4095,
+				mtime: String(status.mtimeNs),
+				ctime: String(status.ctimeNs)
+			};
+			if (status.isDirectory()) {
+				entries.set(path, {
+					kind: "dir",
+					...common
+				});
+				children.push(path);
+				continue;
+			}
+			if (status.isSymbolicLink()) entries.set(path, {
+				kind: "link",
+				...common,
+				target: await readlink(join(root, ...path.split("/")))
+			});
+			else if (status.isFile()) {
+				entries.set(path, {
+					kind: "file",
+					...common
+				});
+				bytes += common.size;
+			} else entries.set(path, {
+				kind: "special",
+				...common
+			});
+			count++;
+			if (count > options.maxEntries) throw new IsolationUnavailableError(`项目文件数超过隔离副本上限（${options.maxEntries} 个）`);
+			if (options.maxBytes !== void 0 && bytes > options.maxBytes) throw new IsolationUnavailableError(`项目文件总大小超过隔离副本上限（${Math.round(options.maxBytes / 1024 ** 2)} MiB）`);
+		}
+		pending.push(...children.reverse());
+	}
+	return entries;
+}
+async function digest(path, size, inspectText) {
+	if (size <= 8 * 1024 ** 2) {
+		const data = await readFile(path);
+		return {
+			hash: createHash("sha256").update(data).digest("hex"),
+			text: inspectText && size <= ISOLATION_LIMITS.maxBaseBytes && !data.includes(0)
+		};
+	}
+	const hash = createHash("sha256");
+	for await (const chunk of createReadStream(path)) hash.update(chunk);
+	return {
+		hash: hash.digest("hex"),
+		text: false
+	};
+}
+const executable = (mode) => !windows && (mode & 73) !== 0;
+const nativePath = (root, path) => join(root, ...path.split("/"));
+async function writeManifest(paths, manifest) {
+	const temporary = `${paths.manifest}.${randomUUID()}.tmp`;
+	try {
+		await writeFile(temporary, JSON.stringify(manifestSchema.parse(manifest)), {
+			mode: 384,
+			flag: "wx"
+		});
+		await rename(temporary, paths.manifest);
+	} finally {
+		await rm(temporary, { force: true });
+	}
+}
+async function readManifest(paths) {
+	return manifestSchema.parse(JSON.parse(await readFile(paths.manifest, "utf8")));
+}
+/**
+* Copies `project` into this Worker's private workspace and records the
+* baseline. Any failure, limit or cancellation removes the partial copy.
+*/
+async function createIsolatedWorkspace(input) {
+	const limits = {
+		...ISOLATION_LIMITS,
+		...input.limits
+	};
+	await ensurePrivateDirectory(input.root);
+	const paths = workspacePaths(realpathSync(input.root), input.workerId, input.project);
+	await rm(paths.directory, {
+		recursive: true,
+		force: true
+	});
+	try {
+		const scanned = await scanTree(input.project, {
+			signal: input.signal,
+			maxEntries: limits.maxEntries,
+			maxBytes: limits.maxBytes
+		});
+		await mkdir(paths.directory, { mode: 448 });
+		if (!windows) await chmod(paths.directory, 448);
+		await mkdir(paths.copy, {
+			recursive: true,
+			mode: 448
+		});
+		await mkdir(paths.base, { mode: 448 });
+		const entries = {};
+		const skippedLinks = [];
+		for (const [path, entry] of scanned) {
+			input.signal?.throwIfAborted();
+			const target = nativePath(paths.copy, path);
+			if (entry.kind === "dir") {
+				await mkdir(target);
+				entries[path] = { type: "dir" };
+			} else if (entry.kind === "link") {
+				if (!insideTarget(path, entry.target)) {
+					skippedLinks.push(path);
+					continue;
+				}
+				try {
+					await symlink(entry.target, target);
+					entries[path] = {
+						type: "link",
+						target: entry.target
+					};
+				} catch {
+					skippedLinks.push(path);
+				}
+			} else if (entry.kind === "file") {
+				await copyFile(nativePath(input.project, path), target, constants.COPYFILE_FICLONE);
+				const status = await lstat(target, { bigint: true });
+				const size = Number(status.size);
+				const { hash, text } = await digest(target, size, true);
+				if (text) {
+					const base = nativePath(paths.base, path);
+					await mkdir(dirname(base), {
+						recursive: true,
+						mode: 448
+					});
+					await copyFile(target, base, constants.COPYFILE_FICLONE);
+					if (!windows) await chmod(base, 384);
+				}
+				const mode = Number(status.mode) & 4095;
+				entries[path] = {
+					type: "file",
+					hash,
+					size,
+					mode,
+					exec: executable(mode),
+					base: text,
+					mtime: String(status.mtimeNs),
+					ctime: String(status.ctimeNs)
+				};
+			}
+		}
+		input.signal?.throwIfAborted();
+		await writeManifest(paths, {
+			version: 1,
+			workerId: input.workerId,
+			project: input.project,
+			copy: paths.copy,
+			createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+			entries,
+			skippedLinks
+		});
+		return {
+			path: paths.copy,
+			skippedLinks: skippedLinks.length
+		};
+	} catch (error) {
+		await removeIsolatedWorkspace(input.root, input.workerId);
+		throw error;
+	}
+}
+/** Removes the whole Worker workspace and confirms it is gone. */
+async function removeIsolatedWorkspace(root, workerId) {
+	const directory = join(root, z.uuid().parse(workerId));
+	await rm(directory, {
+		recursive: true,
+		force: true,
+		maxRetries: 3
+	});
+	if (existsSync(directory)) throw new Error("隔离副本未能完全删除，请稍后重试");
+}
+function same(left, right) {
+	if (!left || !right) return !left && !right;
+	if (left.type !== right.type) return false;
+	if (left.type === "file" && right.type === "file") return left.hash === right.hash && left.exec === right.exec;
+	if (left.type === "link" && right.type === "link") return left.target === right.target;
+	return left.type === "dir";
+}
+/** Exact-case, link-free view of one main-directory path. */
+var MainView = class {
+	project;
+	listings = /* @__PURE__ */ new Map();
+	constructor(project) {
+		this.project = project;
+	}
+	async names(directory) {
+		if (!this.listings.has(directory)) this.listings.set(directory, await readdir(nativePath(this.project, directory)).then((names) => new Set(names), () => void 0));
+		return this.listings.get(directory);
+	}
+	/** Every existing parent must be a real directory named with the exact case. */
+	async parentsSafe(path) {
+		const parts = path.split("/");
+		for (let index = 1; index < parts.length; index++) {
+			const parent = parts.slice(0, index).join("/");
+			const status = await lstat(nativePath(this.project, parent)).catch(() => void 0);
+			if (!status) return "missing";
+			if (status.isSymbolicLink() || !status.isDirectory()) return false;
+			if (!(await this.names(parts.slice(0, index - 1).join("/")))?.has(parts[index - 1])) return false;
+		}
+		return true;
+	}
+	async entry(path) {
+		const parents = await this.parentsSafe(path);
+		if (parents === "missing") return void 0;
+		if (!parents) return { type: "unsafe" };
+		const full = nativePath(this.project, path);
+		const status = await lstat(full).catch(() => void 0);
+		if (!status) return void 0;
+		if (!(await this.names(posix.dirname(path) === "." ? "" : posix.dirname(path)))?.has(posix.basename(path))) return { type: "unsafe" };
+		if (status.isSymbolicLink()) return {
+			type: "link",
+			target: await readlink(full)
+		};
+		if (status.isDirectory()) return { type: "dir" };
+		if (!status.isFile()) return { type: "special" };
+		const mode = status.mode & 4095;
+		return {
+			type: "file",
+			...await digest(full, status.size, false),
+			exec: executable(mode),
+			mode,
+			size: status.size,
+			path: full
+		};
+	}
+};
+async function readText(path, size) {
+	if (size > ISOLATION_LIMITS.maxBaseBytes) return void 0;
+	const data = await readFile(path);
+	return data.includes(0) ? void 0 : data.toString("latin1");
+}
+function finalMode(main, copy, baseExec) {
+	if (main?.type !== "file") return copy.mode & 511;
+	const exec = baseExec !== void 0 && copy.exec !== baseExec ? copy.exec : main.exec;
+	if (exec === main.exec) return main.mode;
+	return exec ? main.mode | (main.mode & 292) >> 2 : main.mode & -74;
+}
+/**
+* Three-way merge of the copy into the project. Nothing is written to the
+* project unless every changed path merges cleanly; the result is a plain
+* uncommitted working-tree change.
+*/
+async function mergeIsolatedWorkspace(input) {
+	const copy = assertIsolatedCopy(input.root, input.workerId, input.project);
+	const paths = workspacePaths(realpathSync(input.root), input.workerId, input.project);
+	const manifest = await readManifest(paths);
+	if (manifest.project !== input.project || manifest.copy !== copy || manifest.workerId !== input.workerId) throw new Error("隔离副本元数据与当前任务不一致");
+	const scanned = await scanTree(copy, {
+		signal: input.signal,
+		maxEntries: ISOLATION_LIMITS.maxScanEntries
+	}).catch((error) => {
+		if (error instanceof IsolationUnavailableError) throw new Error("副本中的文件过多，无法合并");
+		throw error;
+	});
+	const changed = [];
+	for (const path of /* @__PURE__ */ new Set([...Object.keys(manifest.entries), ...scanned.keys()])) {
+		input.signal?.throwIfAborted();
+		const base = manifest.entries[path];
+		const current = scanned.get(path);
+		let side;
+		if (current?.kind === "file") {
+			const unchanged = base?.type === "file" && base.size === current.size && base.mtime === current.mtime && base.ctime === current.ctime;
+			const full = nativePath(copy, path);
+			side = {
+				type: "file",
+				hash: unchanged ? base.hash : (await digest(full, current.size, false)).hash,
+				exec: executable(current.mode),
+				mode: current.mode,
+				size: current.size,
+				path: full
+			};
+		} else if (current?.kind === "link") side = {
+			type: "link",
+			target: current.target
+		};
+		else if (current) side = { type: current.kind };
+		if (!same(base?.type === "file" ? {
+			type: "file",
+			hash: base.hash,
+			exec: base.exec,
+			mode: base.mode,
+			size: base.size,
+			path: ""
+		} : base, side)) changed.push({
+			path,
+			base,
+			copy: side
+		});
+	}
+	const conflicts = [];
+	const kept = [];
+	const conflict = (path, reason, settle = {}) => {
+		const decision = input.resolutions?.[path];
+		if (decision === "project") kept.push(path);
+		else if (decision === "copy" && settle.take) settle.take();
+		else if (typeof decision === "object" && settle.write) settle.write(decision.content);
+		else conflicts.push({
+			path,
+			reason,
+			choices: [
+				"project",
+				...settle.take ? ["copy"] : [],
+				...settle.write ? ["content"] : []
+			],
+			versions: settle.versions
+		});
+	};
+	const byCase = /* @__PURE__ */ new Map();
+	for (const { path } of changed) byCase.set(path.toLowerCase(), [...byCase.get(path.toLowerCase()) ?? [], path]);
+	const caseRenames = new Set([...byCase.values()].filter((group) => group.length > 1).flat());
+	const main = new MainView(input.project);
+	const actions = [];
+	for (const change of changed) {
+		input.signal?.throwIfAborted();
+		const { path, base, copy: side } = change;
+		if (caseRenames.has(path)) {
+			conflict(path, "仅大小写不同的改名，只能保留项目版本");
+			continue;
+		}
+		const current = await main.entry(path);
+		if (current?.type === "unsafe") {
+			conflict(path, "主目录中该路径经过符号链接、不是目录或大小写不一致");
+			continue;
+		}
+		const baseSide = base?.type === "file" ? {
+			type: "file",
+			hash: base.hash,
+			exec: base.exec,
+			mode: base.mode,
+			size: base.size,
+			path: ""
+		} : base;
+		if (same(current, side)) continue;
+		if (side?.type === "special") {
+			conflict(path, "副本中出现了特殊文件");
+			continue;
+		}
+		if (side?.type === "link" && !insideTarget(path, side.target)) {
+			conflict(path, "副本中的符号链接指向项目外");
+			continue;
+		}
+		if (base && side && base.type !== side.type) {
+			conflict(path, "副本改变了文件类型（文件、目录或链接），只能保留项目版本");
+			continue;
+		}
+		const takeCopy = () => {
+			if (!side) actions.push(current?.type === "dir" ? {
+				kind: "rmdir",
+				path
+			} : {
+				kind: "delete",
+				path,
+				expected: current
+			});
+			else if (side.type === "dir") actions.push({
+				kind: "mkdir",
+				path
+			});
+			else if (side.type === "link") actions.push({
+				kind: "link",
+				path,
+				target: side.target,
+				expected: current
+			});
+			else if (side.type === "file") actions.push({
+				kind: "write",
+				path,
+				source: side.path,
+				mode: finalMode(current, side, base?.type === "file" ? base.exec : void 0),
+				expected: current
+			});
+		};
+		if (same(baseSide, current)) {
+			takeCopy();
+			continue;
+		}
+		const settle = {
+			take: takeCopy,
+			write: (!current || current.type === "file") && (!side || side.type === "file") ? (text) => actions.push({
+				kind: "write",
+				path,
+				source: Buffer.from(text, "utf8"),
+				mode: side?.type === "file" ? finalMode(current, side, base?.type === "file" ? base.exec : void 0) : current?.type === "file" ? current.mode : void 0,
+				expected: current
+			}) : void 0,
+			versions: {
+				base: base?.type === "file" && base.base ? nativePath(paths.base, path) : void 0,
+				project: current?.type === "file" ? current.path : void 0,
+				copy: side?.type === "file" ? side.path : void 0
+			}
+		};
+		if (base?.type === "file" && side?.type === "file" && current?.type === "file") {
+			const texts = base.base ? await Promise.all([
+				readText(nativePath(paths.base, path), base.size),
+				readText(current.path, current.size),
+				readText(side.path, side.size)
+			]) : [];
+			if (texts.length && texts.every((text) => text !== void 0)) {
+				const merged = diff3Merge(texts[0], texts[1], texts[2]);
+				if (merged.clean) {
+					actions.push({
+						kind: "write",
+						path,
+						source: Buffer.from(merged.text, "latin1"),
+						mode: finalMode(current, side, base.exec),
+						expected: current
+					});
+					continue;
+				}
+				conflict(path, merged.reason === "too-large" ? "改动过大，无法逐行合并" : "两边改动了相同或相邻的行", settle);
+				continue;
+			}
+			conflict(path, "二进制或超大文件两边都有改动", settle);
+			continue;
+		}
+		if (!side) conflict(path, "副本删除了主目录中已修改的内容", settle);
+		else if (!base) conflict(path, "两边都新增了同名内容且不一致", settle);
+		else if (!current) conflict(path, "主目录已删除副本中修改过的内容", settle);
+		else conflict(path, "两边的文件类型或内容不一致", settle);
+	}
+	if (conflicts.length) return {
+		status: "conflict",
+		conflicts: conflicts.sort((a, b) => a.path < b.path ? -1 : 1),
+		copy
+	};
+	await applyActions(input.project, actions, input.signal);
+	return {
+		status: "merged",
+		written: actions.filter((action) => action.kind === "write" || action.kind === "link").map((action) => action.path).sort(),
+		deleted: actions.filter((action) => action.kind === "delete").map((action) => action.path).sort(),
+		kept: kept.sort()
+	};
+}
+/** Stage every write first, then delete, then rename into place. */
+async function applyActions(project, actions, signal) {
+	const staged = [];
+	const created = [];
+	const ensureParents = async (path) => {
+		const parts = path.split("/").slice(0, -1);
+		for (let index = 1; index <= parts.length; index++) {
+			const directory = parts.slice(0, index).join("/");
+			const full = nativePath(project, directory);
+			const status = await lstat(full).catch(() => void 0);
+			if (status && (status.isSymbolicLink() || !status.isDirectory())) throw new Error(`主目录中的 ${directory} 不是目录，已停止合并`);
+			if (!status) {
+				await mkdir(full);
+				created.push(full);
+			}
+		}
+	};
+	const unchanged = async (path, expected) => {
+		if (!same(await new MainView(project).entry(path), expected)) throw new Error(`合并期间主目录中的 ${path} 发生变化，请重新合并`);
+	};
+	try {
+		for (const action of actions) {
+			signal?.throwIfAborted();
+			if (action.kind !== "write") continue;
+			await ensureParents(action.path);
+			const target = nativePath(project, action.path);
+			const temporary = join(dirname(target), `.${basename(target)}.cwn-merge-${randomUUID().slice(0, 8)}`);
+			await writeFile(temporary, typeof action.source === "string" ? await readFile(action.source) : action.source, {
+				flag: "wx",
+				mode: 384
+			});
+			staged.push({
+				action,
+				temporary
+			});
+		}
+	} catch (error) {
+		await Promise.all(staged.map(({ temporary }) => rm(temporary, { force: true })));
+		for (const directory of created.reverse()) await rmdir(directory).catch(() => void 0);
+		throw error;
+	}
+	try {
+		for (const action of actions) {
+			if (action.kind !== "delete") continue;
+			await unchanged(action.path, action.expected);
+			await unlink(nativePath(project, action.path));
+		}
+		for (const { action, temporary } of staged) {
+			await unchanged(action.path, action.expected);
+			const target = nativePath(project, action.path);
+			if (!windows && action.mode !== void 0) await chmod(temporary, action.mode);
+			await rename(temporary, target);
+		}
+		for (const action of actions) if (action.kind === "link") {
+			await unchanged(action.path, action.expected);
+			await ensureParents(action.path);
+			const target = nativePath(project, action.path);
+			if (action.expected) await unlink(target);
+			await symlink(action.target, target);
+		} else if (action.kind === "mkdir") await ensureParents(`${action.path}/.`);
+		for (const action of actions.filter((item) => item.kind === "rmdir").sort((a, b) => b.path.length - a.path.length)) await rmdir(nativePath(project, action.path)).catch(() => void 0);
+	} catch (error) {
+		await Promise.all(staged.map(({ temporary }) => rm(temporary, { force: true })));
+		throw new Error(`合并写回中途失败，主目录可能已部分更新，可再次合并：${error instanceof Error ? error.message : String(error)}`, { cause: error });
+	}
+}
+//#endregion
 //#region lib/types/host/runtime.js
+/** A message for a run whose account has since changed is queued instead of steered. */
+var AccountChangedDuringRunError = class extends Error {
+	constructor() {
+		super("本轮结束后发送");
+	}
+};
+/** Older records read like current ones: no account-change note survives in a timeline. */
+function legacyAccountNotes(events) {
+	return events.flatMap((event) => {
+		if (event.kind !== "diagnostic" || !event.text || !Object.hasOwn(LEGACY_ACCOUNT_NOTICES, event.text)) return [event];
+		const text = LEGACY_ACCOUNT_NOTICES[event.text];
+		return text ? [{
+			...event,
+			text
+		}] : [];
+	});
+}
+/** Raised before launch when the original session cannot be resumed under the current account. */
+var CarryoverRequiredError = class extends Error {
+	constructor() {
+		super("原生会话无法在当前账号续接");
+	}
+};
+function withGoal(goal, prompt) {
+	return goal ? `【当前目标】\n${goal}\n【目标结束】\n\n${prompt}` : prompt;
+}
+/** Retry for an account held outside this Host's runs, such as a catalog read. */
+const ACCOUNT_RETRY_MS = 2e3;
 /** Internal identity distinguishes deliberate cancellation from timeouts and failures. */
 var UserStoppedError = class extends Error {
 	constructor() {
@@ -21079,6 +24706,55 @@ const deliveryTerminal = (state) => [
 	"failed",
 	"completed"
 ].includes(state);
+/**
+* Record one authorization request on the running turn, wait visibly for its
+* decision and record that. A stop, a newer run or a failure is a denial.
+* Shared by native CLI requests and DSH tool requests from the tool bridge.
+*/
+async function trackApproval(runtime, task, request, decide, asker) {
+	const { worker, controller } = task;
+	const runId = worker.runId;
+	const approvals = task.approvals ?? new AbortController();
+	const signal = AbortSignal.any([
+		controller.signal,
+		approvals.signal,
+		...asker ? [asker] : []
+	]);
+	const withdrawn = () => signal.aborted || !!task.nativeStopRequested;
+	runtime.storage.append(worker, {
+		kind: "status",
+		text: `CLI 请求授权：${request.summary}`,
+		...request.detail ? { detail: request.detail } : {}
+	});
+	worker.approvalWaiting = (worker.approvalWaiting ?? 0) + 1;
+	runtime.changed();
+	let decided;
+	if (withdrawn()) decided = {
+		decision: "deny",
+		source: "stopped"
+	};
+	else try {
+		decided = await decide(signal, task.launchMode ?? worker.mode);
+	} catch {
+		decided = {
+			decision: "deny",
+			source: withdrawn() ? "stopped" : "unavailable"
+		};
+	}
+	const current = worker.runId === runId;
+	const decision = withdrawn() || !current ? {
+		decision: "deny",
+		source: "stopped"
+	} : decided;
+	if (worker.approvalWaiting) worker.approvalWaiting -= 1;
+	if (!worker.approvalWaiting) delete worker.approvalWaiting;
+	if (current) runtime.storage.append(worker, {
+		kind: "status",
+		text: approvalDecisionText(decision)
+	});
+	runtime.changed();
+	return decision;
+}
 var WorkerRuntime = class {
 	storage;
 	backend;
@@ -21089,6 +24765,60 @@ var WorkerRuntime = class {
 		return () => {
 			if (this.harnessPreparation === prepare) this.harnessPreparation = void 0;
 		};
+	}
+	approvalHandler;
+	/** Host decision for each native authorization request; absent denies. */
+	setApprovalHandler(handler) {
+		this.approvalHandler = handler;
+		return () => {
+			if (this.approvalHandler === handler) this.approvalHandler = void 0;
+		};
+	}
+	accessSnapshot;
+	/** The run's tier (Worker level capped by the parent) and its timeline label, read once at launch. */
+	setAccessSnapshot(read) {
+		this.accessSnapshot = read;
+		return () => {
+			if (this.accessSnapshot === read) this.accessSnapshot = void 0;
+		};
+	}
+	/**
+	* Relay one native authorization request to the Host decision and answer the
+	* runner. Every path answers: a missing handler, failure or stop is a denial.
+	*/
+	relayApproval(task, request, answer) {
+		const { worker } = task;
+		const runId = worker.runId;
+		const withdrawn = () => task.controller.signal.aborted || !!task.approvals?.signal.aborted || !!task.nativeStopRequested;
+		const handler = this.approvalHandler;
+		trackApproval(this, task, request, (signal, mode) => handler ? handler(worker, request, signal, mode) : Promise.resolve({
+			decision: "deny",
+			source: "unavailable"
+		})).then(async (decision) => {
+			await answer(decision).catch(() => {
+				if (worker.runId === runId && !withdrawn()) this.storage.append(worker, {
+					kind: "diagnostic",
+					text: "授权决定未送达 CLI，CLI 按拒绝处理"
+				});
+			});
+		});
+	}
+	/**
+	* Record and decide one DSH tool authorization raised through this Worker's
+	* tool bridge during run `runId`, like a native request. Without that
+	* running turn it is a denial.
+	*/
+	harnessApproval(worker, runId, request, signal, decide) {
+		const task = this.tasks.get(worker.id);
+		if (!task || task.worker.runId !== runId || !this.running.has(task)) return Promise.resolve({
+			decision: "deny",
+			source: "stopped"
+		});
+		const release = task.holdIdle?.() ?? (() => {});
+		return trackApproval(this, task, request, decide, signal).then((decision) => {
+			if (decision.decision === "deny" && decision.source !== "stopped") task.harnessDeniedRunId = runId;
+			return decision;
+		}).finally(release);
 	}
 	agyContextReader = new AgyContextReader();
 	hermesSessionReader = new HermesSessionTelemetryReader();
@@ -21101,6 +24831,7 @@ var WorkerRuntime = class {
 	tasks = /* @__PURE__ */ new Map();
 	queue = [];
 	running = /* @__PURE__ */ new Set();
+	accountRetry;
 	listeners = /* @__PURE__ */ new Set();
 	disposed = false;
 	blocked;
@@ -21116,6 +24847,11 @@ var WorkerRuntime = class {
 	priorityRunners = /* @__PURE__ */ new Map();
 	reservations = /* @__PURE__ */ new Map();
 	stopOperations = /* @__PURE__ */ new Map();
+	/** Merge or discard of a Worker's copy; excludes sends and management. */
+	isolationOperations = /* @__PURE__ */ new Map();
+	/** Projects whose main directory a merge is writing. */
+	mainWrites = /* @__PURE__ */ new Set();
+	admissions = 0;
 	revision = 0;
 	constructor(storage, backend, config) {
 		this.storage = storage;
@@ -21157,6 +24893,35 @@ var WorkerRuntime = class {
 			const state = storage.cleanupBlockState(cli);
 			if (state !== "none") this.catalogBlocked.set(cli, state === "invalid" ? `${CLI_LABELS[cli]} 元数据清理记录无法核验，已暂停此 CLI` : `${CLI_LABELS[cli]} 元数据进程清理尚未确认，已暂停此 CLI`);
 		}
+		for (const worker of storage.workers.values()) this.recoverIsolation(worker);
+	}
+	/** Settles copies left by an earlier Host process; never deletes a ready copy. */
+	recoverIsolation(worker) {
+		const isolation = worker.isolation;
+		if (!isolation) return;
+		const root = isolationRoot(this.storage.directory);
+		let next = isolation;
+		if (isolation.state === "preparing") {
+			rmSync(join(root, worker.id), {
+				recursive: true,
+				force: true
+			});
+			next = worker.conversationId ? {
+				state: "released",
+				path: isolation.path
+			} : void 0;
+		} else if (isolation.state === "merging") next = {
+			...isolation,
+			state: "ready",
+			message: "上次合并在 Host 关闭时中断，可重新合并；已写回的文件会被跳过"
+		};
+		if (next && next.state !== "released" && !isolatedCopyExists(root, worker.id, worker.project)) next = {
+			...next,
+			message: "隔离副本目录已缺失，只能丢弃"
+		};
+		if (next === isolation) return;
+		worker.isolation = next;
+		this.storage.save(worker);
 	}
 	/** Explicit construction policy is overridable by legacy protocol regression fixtures. */
 	initialTransport(cli) {
@@ -21271,12 +25036,11 @@ var WorkerRuntime = class {
 		const priorSteer = this.tasks.get(id)?.steering.get(requestId);
 		if (priorSteer) {
 			if (priorSteer.prompt !== prompt) throw new Error("重复提交标识对应的消息不同");
-			await priorSteer.done;
-			return;
+			return this.steerOrQueue(priorSteer.done, parent, id, prompt, expectedRunId, requestId);
 		}
 		const receipt = this.followups.receipt(id, prompt, requestId);
 		if (receipt) {
-			if (requestedMode === "steer" && receipt.delivery !== "steer") throw new Error("这条消息已经以其他方式提交，请刷新会话");
+			if (requestedMode === "steer" && receipt.delivery !== "steer" && !(receipt.delivery === "queue" && receipt.item)) throw new Error("这条消息已经以其他方式提交，请刷新会话");
 			if (receipt.delivery === "steer") {
 				if (receipt.acknowledged) return;
 				throw Object.assign(/* @__PURE__ */ new Error("该引导请求已提交，接收状态尚未确认，请核查本轮记录"), { code: "STEER_UNKNOWN" });
@@ -21285,7 +25049,7 @@ var WorkerRuntime = class {
 			return receipt.item;
 		}
 		if (mode === "queue") return this.queueFollowup(parent, id, prompt, expectedRunId, requestId, !!requestedMode);
-		await this.steerMessage(parent, id, prompt, expectedRunId, requestId, signal);
+		return this.steerMessage(parent, id, prompt, expectedRunId, requestId, signal);
 	}
 	/** Current-run native input only. Queue state and queue generations never admit or order steering. */
 	async steerMessage(parent, id, prompt, expectedRunId, requestId, signal) {
@@ -21298,16 +25062,25 @@ var WorkerRuntime = class {
 		const prior = this.tasks.get(id)?.steering.get(requestId);
 		if (prior) {
 			if (prior.prompt !== prompt) throw new Error("重复提交标识对应的消息不同");
-			await prior.done;
-			return;
+			return this.steerOrQueue(prior.done, parent, id, prompt, expectedRunId, requestId);
 		}
 		const receipt = this.followups.receipt(id, prompt, requestId);
 		if (receipt) {
+			if (receipt.delivery === "queue" && receipt.item) return receipt.item;
 			if (receipt.delivery !== "steer") throw new Error("这条消息已经以其他方式提交，请刷新会话");
 			if (receipt.acknowledged) return;
 			throw Object.assign(/* @__PURE__ */ new Error("该引导请求已提交，接收状态尚未确认，请核查本轮记录"), { code: "STEER_UNKNOWN" });
 		}
-		await this.steerRunningMessage(worker, prompt, requestId, signal);
+		return this.steerOrQueue(this.steerRunningMessage(worker, prompt, requestId, signal), parent, id, prompt, expectedRunId, requestId);
+	}
+	/** Every caller of one steer request gets the same queue item once the run's account changed. */
+	async steerOrQueue(steering, parent, id, prompt, expectedRunId, requestId) {
+		try {
+			await steering;
+		} catch (error) {
+			if (!(error instanceof AccountChangedDuringRunError)) throw error;
+			return this.queueFollowup(parent, id, prompt, expectedRunId, requestId);
+		}
 	}
 	async steerRunningMessage(worker, prompt, requestId, signal) {
 		z.uuid().parse(requestId);
@@ -21330,15 +25103,15 @@ var WorkerRuntime = class {
 		const done = (async () => {
 			this.queuedExecutionGuard?.(worker);
 			const binding = this.storage.accountBinding(worker.id);
-			if (!binding) throw new Error(LEGACY_ACCOUNT_RECORD_NOTICE);
-			const current = await readCliAccountBinding(cliOf(worker.preference), this.backend, this.config, worker.project, control);
+			const current = await readCliAccountBinding(cliOf(worker.preference), this.backend, this.config, this.executionDirectory(worker), control);
 			control.throwIfAborted();
-			if (binding !== current) throw new Error(ACCOUNT_CHANGED);
+			if (!binding || binding !== current) throw new AccountChangedDuringRunError();
 			if (this.tasks.get(worker.id) !== task || worker.runId !== snapshot.runId || worker.status !== "running") throw new Error("本轮状态已变化，请保留消息稍后重试");
 			this.assertCliEnabled(cliOf(worker.preference));
 			this.queuedExecutionGuard?.(worker);
 			this.followups.recordSteering(worker.id, prompt, requestId, false);
 			submitted = true;
+			task.steerSubmitted = true;
 			await task.steer(prompt, requestId, control);
 			this.storage.append(snapshot, {
 				kind: "user",
@@ -21388,7 +25161,6 @@ var WorkerRuntime = class {
 				state: duplicate.state
 			};
 		}
-		if (!this.tasks.has(id) && !this.storage.accountBinding(id) && !(!worker.conversationId && isUserInterrupted(worker))) throw new Error(LEGACY_ACCOUNT_RECORD_NOTICE);
 		this.queuedExecutionGuard?.(worker);
 		const receipt = this.followups.receipt(id, prompt, requestId);
 		if (receipt?.delivery === "steer" || receipt && !receipt.item) throw new Error("这条消息已经处理，请刷新会话");
@@ -21516,7 +25288,6 @@ var WorkerRuntime = class {
 				state: "sending"
 			};
 		}
-		if (!this.tasks.has(id) && !this.storage.accountBinding(id)) throw new Error(LEGACY_ACCOUNT_RECORD_NOTICE);
 		if (!workerBound && worker.runId !== expectedRunId) throw new Error("本轮状态已变化，请刷新后重新发送");
 		const receipt = this.followups.receipt(id, prompt, requestId);
 		if (receipt) {
@@ -21615,9 +25386,13 @@ var WorkerRuntime = class {
 		this.revision++;
 		for (const callback of this.listeners) callback();
 	}
-	assertCliEnabled(cli) {
+	/** Shutdown and the unattributed global quarantine refuse every CLI. */
+	assertHostOpen() {
 		if (this.disposed) throw new Error("插件正在关闭");
 		if (this.blocked) throw new Error(this.blocked);
+	}
+	assertCliEnabled(cli) {
+		this.assertHostOpen();
 		if (this.catalogBlocked.has(cli)) throw new Error(this.catalogBlocked.get(cli));
 		if (isRetiredCli(cli)) throw new Error(RETIRED_HARNESS_NOTICE);
 		if (!this.storage.cliSettings().enabled[cli]) throw new Error(`${CLI_LABELS[cli]} 已关闭，请先在 CLI Worker 设置中开启`);
@@ -21628,7 +25403,7 @@ var WorkerRuntime = class {
 	}
 	/** Read-only metadata owns one CLI's account/cache, never another CLI's admission. */
 	blockCatalogOnCleanup(cli, error) {
-		let message = `${CLI_LABELS[cli]} 元数据进程清理尚未确认，已暂停此 CLI：${error.message}`;
+		let message = `${CLI_LABELS[cli]} 元数据进程清理尚未确认，已暂停此 CLI：${cleanupCauseText(error) ?? error.message}`;
 		this.catalogBlocked.set(cli, message);
 		try {
 			this.storage.blockCleanup(cli);
@@ -21636,6 +25411,22 @@ var WorkerRuntime = class {
 			message += "；清理隔离记录保存失败";
 			this.catalogBlocked.set(cli, message);
 		}
+		this.drain();
+		this.changed();
+	}
+	/** The CLI's own metadata quarantine, if any; the unattributed global one is reported by assertCliEnabled. */
+	catalogCleanupMessage(cli) {
+		return this.catalogBlocked.get(cli);
+	}
+	/**
+	* The user confirmed no process of this CLI is left. Only a CLI-scoped
+	* quarantine is released, and never while this CLI still has work here.
+	*/
+	recoverCatalogCleanup(cli) {
+		this.assertHostOpen();
+		if ([...this.storage.workers.values()].some((worker) => !!this.busyReason(worker) && cliOf(worker.preference) === cli)) throw new Error("此 CLI 还有运行或排队中的任务，请等待结束后再解除暂停");
+		this.storage.clearCleanupBlock(cli);
+		this.catalogBlocked.delete(cli);
 		this.drain();
 		this.changed();
 	}
@@ -21654,6 +25445,30 @@ var WorkerRuntime = class {
 		const settings = this.storage.setCliEnabled(cli, enabled);
 		this.changed();
 		return settings;
+	}
+	/** A saved user choice overrides the deployment config; lowering never stops running work. */
+	get maxConcurrent() {
+		return this.storage.generalSettings().maxConcurrent ?? this.config.maxConcurrent;
+	}
+	generalSettings() {
+		return {
+			maxConcurrent: this.maxConcurrent,
+			defaultMaxConcurrent: this.config.maxConcurrent,
+			language: this.storage.generalSettings().language ?? "follow",
+			isolatedParallelWrites: this.storage.generalSettings().isolatedParallelWrites ?? false,
+			askBeforeDispatch: this.storage.generalSettings().askBeforeDispatch ?? true,
+			showDshSubagents: this.storage.generalSettings().showDshSubagents ?? true,
+			taskTimeLimitMs: this.storage.generalSettings().taskTimeLimitMs ?? this.config.timeoutMs,
+			defaultTaskTimeLimitMs: this.config.timeoutMs,
+			idleTimeLimitMs: this.storage.generalSettings().idleTimeLimitMs ?? 0
+		};
+	}
+	setGeneralSettings(patch) {
+		if (this.disposed) throw new Error("插件正在关闭");
+		this.storage.setGeneralSettings(patch);
+		this.drain();
+		this.changed();
+		return this.generalSettings();
 	}
 	/** Account mutation must also respect a prior unconfirmed process cleanup. */
 	assertAccountIdle(cli) {
@@ -21686,6 +25501,7 @@ var WorkerRuntime = class {
 	}
 	checkAgentName(parent, name, excludingId) {
 		const clean = agentNameSchema.parse(name);
+		if (DSH_AGENT_NAME.test(clean)) throw new Error("“dsh-数字”保留给 DSH 子 Agent，请换一个名称");
 		if ([...this.storage.workers.values()].some((worker) => worker.parentSessionId === parent && worker.id !== excludingId && [workerName(worker), ...worker.nameAliases ?? []].some((name) => name.toLocaleLowerCase() === clean.toLocaleLowerCase()))) throw new Error("当前对话已有同名智能体，请换一个名称或续用已有智能体");
 		return clean;
 	}
@@ -21775,6 +25591,7 @@ var WorkerRuntime = class {
 		const blocked = this.catalogBlocked.get(cliOf(worker.preference));
 		if (blocked) throw new Error(blocked);
 		if (active(worker.status) || this.tasks.has(worker.id) || this.preparations.has(worker.id) || this.latestPriority.has(worker.id) && this.latestPriority.get(worker.id).id !== priorityId) throw new Error("请等待任务结束并完成进程清理后再管理此任务");
+		if (this.isolationOperations.has(worker.id)) throw new Error("正在合并或丢弃隔离副本，请稍后再试");
 	}
 	assertLegacyRestart(parent, id) {
 		const worker = this.get(parent, id);
@@ -21807,6 +25624,7 @@ var WorkerRuntime = class {
 		return join(this.storage.directory, "native", state?.nativeStateWorkerId ?? worker.id);
 	}
 	forkRunSource(worker, runId) {
+		this.assertAfterCarryover(worker, runId);
 		let current = worker.id, conversationId = worker.conversationId;
 		const visited = /* @__PURE__ */ new Set();
 		while (!existsSync(join(this.storage.directory, `${current}.${runId}.raw.jsonl`))) {
@@ -21817,10 +25635,19 @@ var WorkerRuntime = class {
 			current = state.historySourceWorkerId;
 			conversationId = state.historySourceConversationId;
 		}
+		const owner = this.storage.workers.get(current);
+		if (owner && owner.conversationId === conversationId) this.assertAfterCarryover(owner, runId);
 		return {
 			workerId: current,
 			conversationId
 		};
+	}
+	assertAfterCarryover(worker, runId) {
+		if (!worker.carryoverRunId || worker.carryoverRunId === runId) return;
+		const events = this.storage.history(worker.id);
+		const at = events.findIndex((event) => event.runId === runId);
+		const carried = events.findIndex((event) => event.runId === worker.carryoverRunId);
+		if (at >= 0 && carried >= 0 && at < carried) throw new Error(CARRYOVER_FORK_REFUSED);
 	}
 	/** Metadata only, through the same admitted account, argv builder and owned process backend. */
 	async forkNative(worker, cut, signal) {
@@ -21834,6 +25661,7 @@ var WorkerRuntime = class {
 				mode: 448
 			});
 			const prompt = "分支元数据操作（不发送模型任务）";
+			const relayEnv = cli === "codex" ? await codexRouteEnvironment(worker.project, ownSignal) : {};
 			const launch = isExtendedCli(cli) ? await extendedLaunch(cli, executable, worker.project, worker.preference, worker.mode, prompt, nativeState, this.config, conversationId, (argv, env) => captureCatalogMetadata(this.backend, this.config, argv, worker.project, ownSignal, env), {
 				backend: this.backend,
 				signal: ownSignal,
@@ -21842,6 +25670,7 @@ var WorkerRuntime = class {
 				argv: workerArguments(executable, worker.project, worker.preference, worker.mode, prompt, this.config.timeoutMs, conversationId, true),
 				env: {
 					...firstPartyEnvironment(cli),
+					...relayEnv,
 					...["qoder", "qodercn"].includes(cli) ? qoderEnvironment(cli) : {}
 				}
 			}, {
@@ -21937,8 +25766,7 @@ var WorkerRuntime = class {
 			if (notes.length) throw new Error(notes.map((frame) => frame.record.note).join("；"));
 			return createdId;
 		};
-		const binding = this.storage.accountBinding(worker.id);
-		if (!binding || binding !== await readCliAccountBinding(cli, this.backend, this.config, worker.project, signal)) throw new Error(ACCOUNT_CHANGED);
+		await readCliAccountBinding(cli, this.backend, this.config, worker.project, signal);
 		const conversationId = await operation(sourceId, "fork", signal);
 		return {
 			conversationId,
@@ -21953,6 +25781,7 @@ var WorkerRuntime = class {
 	}
 	async forkWorker(parent, id, atMessageId, bridge, signal) {
 		const source = this.get(parent.id, id);
+		if (source.isolation) throw new Error("隔离副本中的对话暂不支持分支，请先合并或丢弃后新建对话");
 		if (this.busyReason(source) || this.followups.list(id).length) throw new Error("请等待当前运行结束后再分支");
 		return this.prepareFollowup(parent.id, id, signal, async (ownSignal) => {
 			const created = [];
@@ -22028,14 +25857,15 @@ var WorkerRuntime = class {
 			queuedFollowups: worker ? this.followups.list(worker.id) : [],
 			runningMessageMode: worker ? this.storage.runningMessageSettings(worker.project, cliOf(worker.preference)).mode === "steer" && !supportsWorkerNativeSteering(worker) ? "queue" : this.storage.runningMessageSettings(worker.project, cliOf(worker.preference)).mode : void 0,
 			runningMessageModeReason: worker && this.storage.runningMessageSettings(worker.project, cliOf(worker.preference)).mode === "steer" && !supportsWorkerNativeSteering(worker) ? "此历史会话使用的通信通路不支持原生引导，当前使用排队；不会更换原生会话协议" : void 0,
-			resumeBlockedReason: worker?.conversationId && !this.storage.accountBinding(worker.id) ? LEGACY_ACCOUNT_RECORD_NOTICE : void 0,
 			timeline: timeline.slice(-this.config.maxTimelineItems),
 			revision: this.revision,
-			truncated: timeline.length > this.config.maxTimelineItems
+			truncated: timeline.length > this.config.maxTimelineItems,
+			showDshSubagents: this.storage.generalSettings().showDshSubagents ?? true,
+			...this.storage.generalSettings().language ? { language: this.storage.generalSettings().language } : {}
 		};
 	}
 	timeline(worker) {
-		const rows = foldEvents(this.nativeTimelineReprojector.project(worker, this.storage.history(worker.id), (runId) => join(this.storage.directory, `${worker.id}.${runId}.raw.jsonl`)).map((event) => ({
+		const rows = foldEvents(this.nativeTimelineReprojector.project(worker, legacyAccountNotes(this.storage.history(worker.id)), (runId) => join(this.storage.directory, `${worker.id}.${runId}.raw.jsonl`)).map((event) => ({
 			...event,
 			...projectPublicToolCall(cliOf(worker.preference), event)
 		})), active(worker.status) ? void 0 : {
@@ -22045,7 +25875,11 @@ var WorkerRuntime = class {
 		for (const runId of new Set(rows.map((row) => row.id.split(":")[0]))) attachTelemetry(rows, runId, this.runTelemetry(worker, runId));
 		return rows;
 	}
-	runTelemetry(worker, runId) {
+	runTelemetry(bound, runId) {
+		const worker = bound.isolation ? {
+			...bound,
+			project: bound.isolation.path
+		} : bound;
 		const rawPath = join(this.storage.directory, `${worker.id}.${runId}.raw.jsonl`);
 		const observed = {
 			...this.telemetryReader.read(rawPath, cliOf(worker.preference), runId === worker.runId ? {
@@ -22142,11 +25976,13 @@ var WorkerRuntime = class {
 		this.changed();
 		return updated;
 	}
-	configureWorkerPermission(parent, id, mode, preparationId) {
+	/** @param setting - The plan switch (`plan`/`accept-edits`) or a level; the caller enforces the parent cap. */
+	configureWorkerPermission(parent, id, setting, preparationId) {
 		if (this.disposed) throw new Error("CLI Worker is shutting down");
 		const worker = this.get(parent, id);
 		if (isRetiredCli(cliOf(worker.preference))) throw new Error(RETIRED_HARNESS_NOTICE);
-		if (!workerPermissionOptions(worker).some((option) => option.value === mode)) throw new Error("当前 CLI 通路不支持此权限模式");
+		const plan = setting === "plan" || setting === "accept-edits";
+		if (plan ? setting === "plan" && !workerPlanSupported(worker) : !cliLevelOptions(cliOf(worker.preference)).some((option) => option.value === setting)) throw new Error("当前 CLI 通路不支持此权限模式");
 		if (preparationId) {
 			const preparation = this.preparations.get(id);
 			if (preparation?.id !== preparationId) throw new Error("权限修改准备已失效，请重试");
@@ -22155,9 +25991,12 @@ var WorkerRuntime = class {
 		if (this.busyReason(worker, preparationId)) throw new Error("请等待本轮结束后再修改权限");
 		if (this.followups.list(id).length) throw new Error("请先发送或取消待发送消息（包含已暂停消息），再修改权限");
 		this.assertCliEnabled(cliOf(worker.preference));
-		const updated = {
+		const updated = plan ? {
 			...worker,
-			mode
+			mode: setting
+		} : {
+			...worker,
+			level: setting
 		};
 		this.storage.save(updated);
 		this.changed();
@@ -22170,12 +26009,17 @@ var WorkerRuntime = class {
 		const task = this.tasks.get(id);
 		return task?.steer && !task.controller.signal.aborted && worker.status === "running" ? "ready" : "pending";
 	}
+	/** Synchronous admission: concurrent selections cannot overbook the sibling cap. */
+	assertSiblingCapacity(parent) {
+		if ([...this.storage.workers.values()].filter((worker) => worker.parentSessionId === parent && worker.initiator && active(worker.status)).length >= 6) throw new Error("子 Agent 发起的任务已达上限（同一主对话最多 6 个未结束任务）");
+	}
 	submit(parent, project, title, prompt, preference, mode, previousId, identity, authorizedBinding, queuedAdmission, preparationId, submissionId, attachments) {
 		if (this.disposed) throw new Error("CLI Worker is shutting down");
 		if (this.blocked) throw new Error(this.blocked);
 		if (!prompt.trim() || prompt.length > 1e5) throw new Error("Task must contain 1–100000 characters");
 		const canonical = projectDirectory(project);
 		const previous = previousId ? this.get(parent, previousId) : void 0;
+		if (previous?.initiator || !previous && identity?.initiator) this.assertSiblingCapacity(parent);
 		if (attachments?.length && previous?.transport === "legacy") throw new Error("旧协议会话尚未接通附件，请使用原生 CLI 会话");
 		if (previous && submissionId) {
 			z.uuid().parse(submissionId);
@@ -22187,9 +26031,9 @@ var WorkerRuntime = class {
 		this.assertCliEnabled(cliOf(effective));
 		if (previous && this.preparations.has(previous.id) && this.preparations.get(previous.id).id !== preparationId) throw new Error("此会话正在准备发送，请稍后再试");
 		if (previous && (active(previous.status) || this.tasks.has(previous.id))) throw new Error("This CLI conversation already has a running or queued turn");
+		if (previous && this.isolationOperations.has(previous.id)) throw new Error("正在合并或丢弃隔离副本，请稍后再发送");
 		const freshAfterStop = previous && !previous.conversationId && isUserInterrupted(previous);
 		if (previous && !previous.conversationId && !readWorkerForkState(this.storage.directory, previous.id)?.sourceConversationId && !freshAfterStop) throw new Error("No CLI conversation_id was received; start a new worker");
-		if (previous && !this.storage.accountBinding(previous.id) && !freshAfterStop) throw new Error(LEGACY_ACCOUNT_RECORD_NOTICE);
 		if (previous && previous.project !== canonical) throw new Error("Cannot resume a worker in another workspace");
 		const nativeAdmission = previous ? usesNativeBridge(previous) : usesNativeBridge({
 			preference: effective,
@@ -22213,6 +26057,7 @@ var WorkerRuntime = class {
 		const worker = previous ?? {
 			id: randomUUID(),
 			parentSessionId: parent,
+			...identity?.initiator ? { initiator: structuredClone(identity.initiator) } : {},
 			project: canonical,
 			title: title.slice(0, 160),
 			agentName: identity?.agentName ? this.checkAgentName(parent, identity.agentName) : availableAgentName(this.storage.workers.values(), parent, CLI_SHORT_NAMES[cliOf(preference)]),
@@ -22241,6 +26086,8 @@ var WorkerRuntime = class {
 		worker.observedModel = void 0;
 		worker.updatedAt = now;
 		worker.jobId = void 0;
+		worker.isolationNotice = void 0;
+		worker.resultNotice = void 0;
 		this.storage.save(worker);
 		if (!queuedAdmission || queuedAdmission.priority) {
 			this.storage.append(worker, {
@@ -22269,10 +26116,12 @@ var WorkerRuntime = class {
 			...worker,
 			conversationId: forkSource
 		} : worker, prompt);
+		const goal = worker.goal?.status === "active" ? worker.goal.objective : void 0;
 		const task = {
 			worker,
 			...attachments?.length ? { attachments: structuredClone(attachments) } : {},
-			prompt: worker.goal?.status === "active" ? `【当前目标】\n${worker.goal.objective}\n【目标结束】\n\n${cliPrompt}` : cliPrompt,
+			prompt: withGoal(goal, cliPrompt),
+			goal,
 			userPrompt: prompt,
 			controller,
 			done,
@@ -22283,7 +26132,8 @@ var WorkerRuntime = class {
 			generation: queuedAdmission?.priority ? this.latestPriority.get(worker.id).generation : queuedAdmission ? this.followupDispatches.get(worker.id).generation : this.followups.generation(worker.id),
 			submissionId,
 			steering: /* @__PURE__ */ new Map(),
-			steeringController: new AbortController()
+			steeringController: new AbortController(),
+			order: this.admissions++
 		};
 		admission.catch((error) => {
 			if (!controller.signal.aborted) task.admissionFailure = { error };
@@ -22368,6 +26218,7 @@ var WorkerRuntime = class {
 			worker.status = "stopping";
 			if (task.nativeStop && this.running.has(task)) {
 				task.nativeStopRequested = true;
+				task.approvals?.abort(new UserStoppedError());
 				Promise.resolve().then(() => task.nativeStop?.()).catch(() => void 0).finally(() => task.controller.abort(new UserStoppedError()));
 			} else task.controller.abort(new UserStoppedError());
 			try {
@@ -22428,9 +26279,22 @@ var WorkerRuntime = class {
 				this.finishQueued(task, "failed", blocked);
 				continue;
 			}
-			if (this.running.size >= this.config.maxConcurrent) break;
-			const conflicts = (other) => other.worker.project === task.worker.project && (other.worker.mode === "accept-edits" || task.worker.mode === "accept-edits");
-			if ([...this.running].some(conflicts) || this.queue.slice(0, this.queue.indexOf(task)).some(conflicts)) continue;
+			if (this.running.size >= this.maxConcurrent) break;
+			if (task.accountWait) {
+				if ([...this.running].some((other) => other.accountKey === task.accountKey)) continue;
+				const remaining = task.accountWait.retryAt - Date.now();
+				if (remaining > 0) {
+					this.retryDrain(remaining);
+					continue;
+				}
+			}
+			if (!task.worker.isolation) {
+				const conflicts = (other) => other.worker.project === task.worker.project && !other.worker.isolation && !other.isolate && (other.worker.mode === "accept-edits" || task.worker.mode === "accept-edits");
+				if (this.mainWrites.has(task.worker.project) || [...this.running].some(conflicts) || this.queue.slice(0, this.queue.indexOf(task)).some(conflicts)) {
+					if (this.mainWrites.has(task.worker.project) || !this.canIsolate(task)) continue;
+					task.isolate = true;
+				}
+			}
 			this.queue.splice(this.queue.indexOf(task), 1);
 			this.running.add(task);
 			this.run(task).catch((error) => {
@@ -22438,8 +26302,105 @@ var WorkerRuntime = class {
 			});
 		}
 	}
+	/**
+	* Only a new writer with no native session may move into a copy: CLI
+	* sessions are tied to their working directory and cannot change it.
+	*/
+	canIsolate(task) {
+		const worker = task.worker;
+		return !!this.storage.generalSettings().isolatedParallelWrites && worker.mode === "accept-edits" && !task.isolationRefused && !worker.conversationId && !readWorkerForkState(this.storage.directory, worker.id)?.sourceConversationId;
+	}
+	/** The CLI's working directory: the bound copy, or the project itself. */
+	executionDirectory(worker) {
+		return worker.isolation?.path ?? worker.project;
+	}
+	/** Metadata processes need an existing directory; a released copy is recreated only for a turn. */
+	catalogDirectory(worker) {
+		return worker.isolation && isolatedCopyExists(isolationRoot(this.storage.directory), worker.id, worker.project) ? worker.isolation.path : worker.project;
+	}
+	/**
+	* Creates (or recreates at the bound path) this Worker's copy. Returns the
+	* copy path, or undefined when the task went back to the serial queue.
+	*/
+	async prepareIsolation(task) {
+		const { worker, controller } = task;
+		const root = isolationRoot(this.storage.directory);
+		const bound = worker.isolation;
+		if (bound && bound.state !== "released") {
+			if (!isolatedCopyExists(root, worker.id, worker.project)) throw new Error("隔离副本目录已缺失，请丢弃后新建对话");
+			return bound.path;
+		}
+		mkdirSync(root, {
+			recursive: true,
+			mode: 448
+		});
+		const path = workspacePaths(realpathSync(root), worker.id, worker.project).copy;
+		if (bound && bound.path !== path) throw new Error("隔离副本路径与会话记录不一致，请新建对话");
+		worker.isolation = {
+			state: "preparing",
+			path
+		};
+		this.storage.save(worker);
+		this.changed();
+		try {
+			const created = await createIsolatedWorkspace({
+				root,
+				workerId: worker.id,
+				project: worker.project,
+				signal: controller.signal
+			});
+			controller.signal.throwIfAborted();
+			worker.isolation = {
+				state: "ready",
+				path: created.path,
+				createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+				...created.skippedLinks ? { skippedLinks: created.skippedLinks } : {}
+			};
+			this.storage.save(worker);
+			this.storage.append(worker, {
+				kind: "diagnostic",
+				text: bound ? "已重新创建隔离副本" : "已创建隔离副本",
+				detail: `本轮在隔离副本中运行：${created.path}${created.skippedLinks ? `\n跳过 ${created.skippedLinks} 个指向项目外或无法重建的符号链接` : ""}`
+			});
+			this.changed();
+			task.admission = task.admission.then(() => readCliAccountBinding(cliOf(worker.preference), this.backend, this.config, created.path, controller.signal));
+			task.admission.catch((error) => {
+				if (!controller.signal.aborted) task.admissionFailure ??= { error };
+				if (error instanceof ProcessCleanupUnconfirmedError) {
+					task.admissionFailure ??= { error };
+					this.blockCatalogOnCleanup(cliOf(worker.preference), error);
+				}
+			});
+			return created.path;
+		} catch (error) {
+			await removeIsolatedWorkspace(root, worker.id).catch(() => void 0);
+			worker.isolation = bound ? {
+				state: "released",
+				path: bound.path
+			} : void 0;
+			if (bound || controller.signal.aborted) {
+				this.storage.save(worker);
+				this.changed();
+				throw error;
+			}
+			worker.isolationNotice = `${error instanceof IsolationUnavailableError ? error.message : `无法创建隔离副本：${String(error)}`}；已改为排队，等待主目录空闲`;
+			this.storage.save(worker);
+			this.storage.append(worker, {
+				kind: "diagnostic",
+				text: "未创建隔离副本",
+				detail: worker.isolationNotice
+			});
+			this.changed();
+			return;
+		}
+	}
 	finish(task, status, error, interruptionReason) {
 		const worker = task.worker;
+		if (task.carryover && !worker.conversationId) {
+			worker.conversationId = task.carryover.previousConversationId;
+			worker.previousSessionUsage = task.carryover.previousSessionUsage;
+			if (task.carryover.forkState) writeWorkerForkState(this.storage.directory, worker.id, task.carryover.forkState);
+		}
 		worker.status = status;
 		worker.error = error;
 		worker.interruptionReason = interruptionReason;
@@ -22476,18 +26437,93 @@ var WorkerRuntime = class {
 		}
 	}
 	async run(task) {
+		let directory = task.worker.project;
+		if (task.isolate || task.worker.isolation) {
+			let prepared;
+			try {
+				prepared = await this.prepareIsolation(task);
+			} catch (error) {
+				const stopped = task.controller.signal.aborted;
+				await this.finishQueued(task, stopped ? "interrupted" : "failed", stopped ? "用户已取消排队任务" : String(error instanceof Error ? error.message : error));
+				return;
+			}
+			if (!prepared) {
+				this.running.delete(task);
+				task.isolate = false;
+				task.isolationRefused = true;
+				const index = this.queue.findIndex((other) => other.order > task.order);
+				this.queue.splice(index < 0 ? this.queue.length : index, 0, task);
+				this.changed();
+				this.drain();
+				return;
+			}
+			directory = prepared;
+		}
+		await this.execute(task, directory);
+	}
+	async execute(task, directory) {
 		const { worker, controller } = task;
+		const isolated = directory !== worker.project;
+		const prompt = isolated ? isolationPromptNotice(directory, worker.project) + task.prompt : task.prompt;
 		let handle;
 		let readers = [];
 		let harnessLease;
 		let stderr = "";
 		let totalBytes = 0;
-		const timeout = setTimeout(() => controller.abort(/* @__PURE__ */ new Error("任务超时")), this.config.timeoutMs);
+		const settings = this.generalSettings();
+		const limit = task.timeLimit ??= taskTimeLimit(settings.taskTimeLimitMs, settings.idleTimeLimitMs);
+		const timeout = setTimeout(() => controller.abort(new Error(timeLimitMessage("total", limit))), remainingMs(limit));
+		let idleTimer;
 		const pendingFork = readWorkerForkState(this.storage.directory, worker.id);
 		const resumeConversation = worker.conversationId ?? pendingFork?.sourceConversationId;
 		const expectedConversation = worker.conversationId;
 		const nativeTransport = usesNativeBridge(worker);
-		const protocol = (nativeTransport ? (_cli, emit, identify, limit) => new BridgeProtocol(emit, identify, limit) : protocolFor)(cliOf(worker.preference), (event) => {
+		let idleHolds = 0;
+		const touchIdle = !nativeTransport && limit.idleMs > 0 ? () => {
+			clearTimeout(idleTimer);
+			if (idleHolds) return;
+			idleTimer = setTimeout(() => controller.abort(new Error(timeLimitMessage("idle", limit))), limit.idleMs);
+		} : void 0;
+		const holdHostIdle = () => {
+			idleHolds++;
+			clearTimeout(idleTimer);
+			let released = false;
+			return () => {
+				if (released) return;
+				released = true;
+				idleHolds--;
+				touchIdle?.();
+			};
+		};
+		task.approvals = new AbortController();
+		let answerApproval;
+		let holdRunnerIdle;
+		let runnerIdleHolds = 0;
+		task.holdIdle = () => {
+			if (!nativeTransport) return holdHostIdle();
+			const send = holdRunnerIdle;
+			if (!send || !(limit.idleMs > 0)) return () => {};
+			const id = `idle-${++runnerIdleHolds}`;
+			const held = send(id, "hold").catch(() => void 0);
+			let released = false;
+			return () => {
+				if (released) return;
+				released = true;
+				held.then(() => send(id, "release")).catch(() => void 0);
+			};
+		};
+		const relay = (id, request) => {
+			const release = holdHostIdle();
+			this.relayApproval(task, request, (decision) => {
+				release();
+				return answerApproval ? answerApproval(id, decision) : Promise.reject(/* @__PURE__ */ new Error("授权通路未就绪"));
+			});
+		};
+		const createProtocol = nativeTransport || cliOf(worker.preference) === "omp" || cliOf(worker.preference) === "pi" ? (_cli, emit, identify, limit) => new BridgeProtocol(emit, identify, limit, relay) : protocolFor;
+		let observed = false;
+		let spawned = false;
+		const protocol = createProtocol(cliOf(worker.preference), (event) => {
+			if (event.kind === "assistant" || event.kind === "reasoning" || event.kind === "tool" || event.kind === "result" && (event.state === "SUCCESS" || !!event.text.trim())) observed = true;
 			if (event.observedModel) {
 				worker.observedModel = event.observedModel;
 				this.storage.save(worker);
@@ -22497,6 +26533,12 @@ var WorkerRuntime = class {
 		}, (id) => {
 			if (expectedConversation && id !== expectedConversation) throw new Error("Resume conversation_id does not match the requested conversation");
 			if (pendingFork?.sourceConversationId === id) throw new Error("原生分支没有创建新的会话 ID");
+			const left = task.carryover?.previousConversationId;
+			if (task.carryover && left !== id && !worker.conversationId) {
+				if (left && !worker.previousConversationIds?.includes(left)) worker.previousConversationIds = [...worker.previousConversationIds ?? [], left].slice(-64);
+				worker.carryoverRunId = worker.runId;
+				worker.reboundConversationId = void 0;
+			}
 			worker.conversationId = id;
 			this.storage.save(worker);
 			if (pendingFork?.sourceConversationId) {
@@ -22511,41 +26553,83 @@ var WorkerRuntime = class {
 		let release;
 		let quiescent = false;
 		let metadataReady = false;
+		let busyAccount = false;
+		let accountRaced = false;
+		let rebound = false;
+		let reboundResume = false;
 		try {
-			const admitted = await task.admission;
+			let admitted = await task.admission;
+			task.accountKey = JSON.stringify([cliOf(worker.preference), admitted]);
 			controller.signal.throwIfAborted();
 			const previousBinding = this.storage.accountBinding(worker.id);
-			if (previousBinding && previousBinding !== admitted) throw new Error(ACCOUNT_CHANGED);
-			const { binding, preference: authorizedPreference } = await authorizeSelection(worker.preference, this.backend, this.config, worker.project, controller.signal, admitted);
+			const continuing = !!previousBinding || !!resumeConversation;
+			const authorize = () => authorizeSelection(worker.preference, this.backend, this.config, directory, controller.signal, admitted);
+			let authorized;
+			try {
+				authorized = await authorize();
+			} catch (error) {
+				if (!(error instanceof Error) || error.message !== "账号已变更，请重新选择或新建任务") throw error;
+				admitted = await readCliAccountBinding(cliOf(worker.preference), this.backend, this.config, directory, controller.signal);
+				task.accountKey = JSON.stringify([cliOf(worker.preference), admitted]);
+				authorized = await authorize();
+			}
+			const { binding, preference: authorizedPreference } = authorized;
 			if (authorizedPreference.model !== worker.preference.model) throw new Error("模型与思考强度不匹配，请重新选择");
 			controller.signal.throwIfAborted();
+			rebound = continuing && previousBinding !== binding;
+			if (rebound && resumeConversation) worker.reboundConversationId = resumeConversation;
+			reboundResume = !!resumeConversation && worker.reboundConversationId === resumeConversation;
+			if (reboundResume && !task.carryover && (crossAccountResume(cliOf(worker.preference)) === "carryover" || nativeSessionReachable({
+				cli: cliOf(worker.preference),
+				transport: worker.transport,
+				hermesHome: cliOf(worker.preference) === "hermes" ? effectiveHermesHome({
+					...this.config,
+					stateDirectory: this.storage.directory
+				}) : void 0
+			}) === false)) throw new CarryoverRequiredError();
 			this.assertCliEnabled(cliOf(worker.preference));
 			const executable = await resolveCliExecutable(cliOf(worker.preference), this.backend, this.config, controller.signal);
 			controller.signal.throwIfAborted();
-			await assertFirstPartyConfiguration(cliOf(worker.preference), worker.project, controller.signal);
+			await assertFirstPartyConfiguration(cliOf(worker.preference), directory, controller.signal);
 			metadataReady = true;
-			harnessLease = await this.harnessPreparation?.(worker, controller.signal, { submissionId: task.submissionId });
+			const snapshot = this.accessSnapshot?.(worker);
+			const access = snapshot?.access;
+			harnessLease = await this.harnessPreparation?.(worker, controller.signal, {
+				submissionId: task.submissionId,
+				isolated,
+				access
+			});
+			if (snapshot) this.storage.append(worker, {
+				kind: "status",
+				text: `本轮权限：${snapshot.label}`
+			});
+			const launchMode = access === "read-only" && askRunsAsPlan(cliOf(worker.preference)) ? "plan" : worker.mode;
+			task.launchMode = launchMode;
 			const executionConfig = {
 				...this.config,
+				timeLimit: limit,
+				...access ? { access } : {},
 				...task.attachments?.length ? { attachments: task.attachments } : {},
 				...harnessLease?.connection ? { harnessTools: harnessLease.connection } : {}
 			};
 			worker.status = "running";
 			this.storage.save(worker);
 			this.changed();
-			const selectedClaudeRoute = cliOf(worker.preference) === "claude" ? await readClaudeOwnRoute(worker.project, controller.signal) : void 0;
-			if (selectedClaudeRoute && binding !== await readCliAccountBinding("claude", this.backend, executionConfig, worker.project, controller.signal, selectedClaudeRoute)) throw new Error(ACCOUNT_CHANGED);
-			const launch = isExtendedCli(cliOf(worker.preference)) ? await extendedLaunch(cliOf(worker.preference), executable, worker.project, worker.preference, worker.mode, task.prompt, this.nativeStateDirectory(worker), executionConfig, resumeConversation, (argv, env) => captureCatalogMetadata(this.backend, this.config, argv, worker.project, controller.signal, env), {
+			const selectedClaudeRoute = cliOf(worker.preference) === "claude" ? await readClaudeOwnRoute(directory, controller.signal) : void 0;
+			if (selectedClaudeRoute && binding !== await readCliAccountBinding("claude", this.backend, executionConfig, directory, controller.signal, selectedClaudeRoute)) throw new Error(ACCOUNT_CHANGED);
+			const relayEnv = cliOf(worker.preference) === "codex" ? await codexRouteEnvironment(directory, controller.signal) : {};
+			const launch = isExtendedCli(cliOf(worker.preference)) ? await extendedLaunch(cliOf(worker.preference), executable, directory, worker.preference, launchMode, prompt, this.nativeStateDirectory(worker), executionConfig, resumeConversation, (argv, env) => captureCatalogMetadata(this.backend, this.config, argv, directory, controller.signal, env), {
 				backend: this.backend,
 				signal: controller.signal,
 				graceMs: this.config.graceMs
-			}, nativeTransport) : cliOf(worker.preference) === "claude" ? await prepareClaudeWorkerLaunch(selectedClaudeRoute, workerArguments(executable, worker.project, worker.preference, worker.mode, task.prompt, this.config.timeoutMs, resumeConversation, nativeTransport), this.storage.directory, controller.signal) : {
+			}, nativeTransport) : cliOf(worker.preference) === "claude" ? await prepareClaudeWorkerLaunch(selectedClaudeRoute, workerArguments(executable, directory, worker.preference, launchMode, prompt, Math.max(1e3, remainingMs(limit)), resumeConversation, nativeTransport, access), this.storage.directory, controller.signal) : {
 				env: {
 					...firstPartyEnvironment(cliOf(worker.preference)),
+					...relayEnv,
 					...agyBackgroundEnvironment(cliOf(worker.preference)),
 					...["qoder", "qodercn"].includes(cliOf(worker.preference)) ? qoderEnvironment(cliOf(worker.preference)) : {}
 				},
-				argv: workerArguments(executable, worker.project, worker.preference, worker.mode, task.prompt, this.config.timeoutMs, resumeConversation, nativeTransport)
+				argv: workerArguments(executable, directory, worker.preference, launchMode, prompt, Math.max(1e3, remainingMs(limit)), resumeConversation, nativeTransport, access)
 			};
 			release = "cleanup" in launch ? launch.cleanup : void 0;
 			const nativeState = this.nativeStateDirectory(worker);
@@ -22555,10 +26639,11 @@ var WorkerRuntime = class {
 			});
 			const execution = nativeTransport && !isExtendedCli(cliOf(worker.preference)) ? await prepareNativeWorker(launch, {
 				cli: cliOf(worker.preference),
-				project: worker.project,
+				project: directory,
 				preference: worker.preference,
-				mode: worker.mode,
-				prompt: task.prompt,
+				mode: launchMode,
+				...access ? { access } : {},
+				prompt,
 				conversationId: expectedConversation,
 				...pendingFork?.sourceConversationId ? { forkSource: {
 					conversationId: pendingFork.sourceConversationId,
@@ -22573,26 +26658,29 @@ var WorkerRuntime = class {
 				})) } : {}
 			}, executionConfig) : launch;
 			release = "cleanup" in execution ? execution.cleanup : void 0;
+			if ("answerApproval" in execution && typeof execution.answerApproval === "function") answerApproval = execution.answerApproval;
+			if ("holdIdle" in execution && typeof execution.holdIdle === "function") holdRunnerIdle = execution.holdIdle;
 			controller.signal.throwIfAborted();
-			if (binding !== await readCliAccountBinding(cliOf(worker.preference), this.backend, this.config, worker.project, controller.signal)) throw new Error(ACCOUNT_CHANGED);
+			if (binding !== await readCliAccountBinding(cliOf(worker.preference), this.backend, this.config, directory, controller.signal)) throw new Error(ACCOUNT_CHANGED);
 			controller.signal.throwIfAborted();
 			if ("activate" in execution && typeof execution.activate === "function") await execution.activate();
 			controller.signal.throwIfAborted();
 			if (task.queuedFollowupId) this.queuedExecutionGuard?.(worker);
 			this.storage.bindAccount(worker.id, binding);
-			if (task.queuedFollowupId && !task.priority) {
+			if (task.queuedFollowupId && !task.priority && !task.delivered) {
 				if (this.tasks.get(worker.id) !== task || this.followups.list(worker.id).find((item) => item.id === task.queuedFollowupId)?.state !== "sending") throw new UserStoppedError();
 			}
-			if (task.priority) {
+			if (task.priority && !task.delivered) {
 				const message = this.latestPriority.get(worker.id);
 				if (!message || message.id !== task.queuedFollowupId || message.controller.signal.aborted) throw new UserStoppedError();
 				message.spawnAttempted = true;
 			}
 			task.spawnAttempted = true;
+			spawned = true;
 			handle = await spawnManagedAgent(this.backend, {
 				argv: execution.argv,
 				env: "env" in execution ? execution.env : void 0,
-				cwd: worker.project,
+				cwd: directory,
 				stdio: {
 					stdin: "ignore",
 					stdout: "pipe",
@@ -22601,7 +26689,7 @@ var WorkerRuntime = class {
 				graceMs: this.config.graceMs,
 				signal: controller.signal
 			});
-			if (task.queuedFollowupId && !task.priority) {
+			if (task.queuedFollowupId && !task.priority && !task.delivered) {
 				this.storage.append(worker, {
 					kind: "user",
 					text: task.userPrompt,
@@ -22611,11 +26699,13 @@ var WorkerRuntime = class {
 				this.followups.remove(worker.id, task.queuedFollowupId);
 				this.changed();
 			}
-			if (task.priority) {
+			if (task.priority && !task.delivered) {
 				const message = this.priorityHistory.get(worker.id).get(task.queuedFollowupId);
 				this.updatePriority(worker, message, "running");
 			}
+			task.delivered = true;
 			handle.done.catch(() => void 0);
+			touchIdle?.();
 			controller.signal.throwIfAborted();
 			if ("steer" in execution && typeof execution.steer === "function") {
 				task.steer = execution.steer;
@@ -22626,8 +26716,9 @@ var WorkerRuntime = class {
 				if (!stream) throw new Error("CLI pipe unavailable");
 				const decoder = new StringDecoder("utf8");
 				for await (const chunk of stream) {
+					touchIdle?.();
 					totalBytes += Buffer.byteLength(chunk);
-					if (totalBytes > this.config.maxRunBytes) throw new Error("CLI output exceeded the configured per-run limit");
+					if (!nativeTransport && totalBytes > this.config.maxRunBytes) throw new Error("CLI output exceeded the configured per-run limit");
 					appendFileSync(this.storage.rawPath(worker) + (isError ? ".stderr" : ""), chunk, { mode: 384 });
 					if (isError) stderr = (stderr + decoder.write(chunk)).slice(-8192);
 					else protocol.feed(chunk);
@@ -22639,19 +26730,43 @@ var WorkerRuntime = class {
 			const outcome = await handle.done;
 			controller.signal.throwIfAborted();
 			protocol.end();
+			const expired = protocol instanceof BridgeProtocol && protocol.result?.status === "ERROR" ? bridgeTimeLimit(protocol.result.error) : void 0;
+			if (expired) controller.abort(new Error(timeLimitMessage(expired, limit)));
+			controller.signal.throwIfAborted();
 			if (task.nativeStopRequested && protocol.result?.status === "ERROR" && protocol.result.error === "任务已停止") throw new UserStoppedError();
 			if (outcome.exitCode !== 0) throw new Error(`CLI exited with ${outcome.exitCode}: ${stderr || protocol.result?.response || "no diagnostic"}`);
 			if (!protocol.result) throw new Error("CLI exited without a final result");
+			const harnessDenied = task.harnessDeniedRunId === worker.runId;
 			if (protocol instanceof AgyProtocol && expectedConversation && protocol.result.conversationId === expectedConversation && protocol.result.status === "ERROR" && protocol.result.completedStepResponse) summaryConflict = `CLI 汇总状态冲突，结果待核实：本轮回复及已观察步骤均为 DONE，但 CLI 最终报告 ERROR。请核查本轮输出和实际产物，不要自动重试。原始汇总错误：${protocol.result.error || "未提供错误详情"}`;
-			else if (nativeTransport && protocol.result.status === "UNCERTAIN") summaryConflict = protocol.result.error || "CLI 汇总状态冲突，结果待核实，请先核查实际产物，不要自动重试";
-			else if (protocol.result.status !== "SUCCESS") throw new Error(`CLI ${protocol.result.status}: ${protocol.result.error || protocol.result.response || stderr || "请检查 CLI 认证及模型/强度兼容性"}`);
+			else if (protocol instanceof BridgeProtocol && protocol.result.status === "UNCERTAIN") {
+				if (!harnessDenied || protocol.result.error !== "本轮最后的工具步骤失败后 CLI 直接结束；结果待核实，请先核查实际产物，不要自动重试") summaryConflict = protocol.result.error || "CLI 汇总状态冲突，结果待核实，请先核查实际产物，不要自动重试";
+			} else if (protocol.result.status !== "SUCCESS") throw new Error(`CLI ${protocol.result.status}: ${protocol.result.error || protocol.result.response || stderr || "请检查 CLI 认证及模型/强度兼容性"}`);
+			else if (!harnessDenied && protocol instanceof BridgeProtocol && protocol.result.notice) {
+				worker.resultNotice = protocol.result.notice;
+				this.storage.append(worker, {
+					kind: "diagnostic",
+					text: "本轮结果说明",
+					detail: protocol.result.notice
+				});
+			}
 		} catch (error) {
 			failure = error;
+			const expired = nativeTransport && !controller.signal.aborted ? bridgeTimeLimit(error) : void 0;
+			if (expired) controller.abort(new Error(timeLimitMessage(expired, limit)));
+			busyAccount = ownAccountBusy(error) && !spawned;
+			accountRaced = !spawned && error instanceof Error && error.message === "账号已变更，请重新选择或新建任务";
 			failureBeforeStop = !!task.admissionFailure || !controller.signal.aborted && !(task.nativeStopRequested && (error instanceof UserStoppedError || String(error).includes("任务已停止")));
 			if (error instanceof ProcessCleanupUnconfirmedError) if (!metadataReady) this.blockCatalogOnCleanup(cliOf(worker.preference), error);
 			else this.markCleanupBlocked(error);
 		} finally {
 			clearTimeout(timeout);
+			clearTimeout(idleTimer);
+			task.approvals?.abort(/* @__PURE__ */ new Error("当前运行已结束，授权请求已撤回"));
+			task.holdIdle = void 0;
+			if (worker.approvalWaiting) {
+				delete worker.approvalWaiting;
+				this.changed();
+			}
 			task.steer = void 0;
 			task.nativeStop = void 0;
 			task.steeringController.abort(/* @__PURE__ */ new Error("当前运行已结束，引导通路已关闭"));
@@ -22708,11 +26823,187 @@ var WorkerRuntime = class {
 			status = "failed";
 			error = String(failure);
 		}
+		if (busyAccount && failureBeforeStop && !task.admissionFailure && !releaseFailed && !this.blocked && !this.disposed) return this.waitForAccount(task);
+		if (accountRaced && !task.accountRaceRetried && failureBeforeStop && !task.admissionFailure && !releaseFailed && !this.blocked && !this.disposed) {
+			task.accountRaceRetried = true;
+			return this.waitForAccount(task, 0);
+		}
+		const unreachable = failure instanceof CarryoverRequiredError;
+		if (!task.carryover && !this.blocked && !this.disposed && !releaseFailed && failureBeforeStop && !task.admissionFailure && !controller.signal.aborted && !task.nativeStopRequested && (unreachable || reboundResume && spawned && quiescent && !observed && !task.steerSubmitted && !(failure instanceof ProcessCleanupUnconfirmedError))) return this.carryOver(task, directory, unreachable);
+		if (!task.carryover && reboundResume && (observed || status === "completed")) {
+			worker.reboundConversationId = void 0;
+			this.storage.save(worker);
+		}
 		this.finish(task, status, error, interruptionReason);
+	}
+	/** Continue this turn in a new native session with the task's own earlier record. */
+	async carryOver(task, directory, unreachable) {
+		const { worker } = task;
+		const context = carryoverContext(this.storage.history(worker.id), worker.runId);
+		const fork = readWorkerForkState(this.storage.directory, worker.id);
+		task.carryover = {
+			previousConversationId: worker.conversationId,
+			previousSessionUsage: worker.previousSessionUsage,
+			...fork?.sourceConversationId ? { forkState: fork } : {}
+		};
+		if (fork?.sourceConversationId) {
+			const { sourceConversationId: _source, sourceMessageId: _cut, ...settled } = fork;
+			writeWorkerForkState(this.storage.directory, worker.id, settled);
+		}
+		const left = captureConversationTelemetry(worker, this.runTelemetry(worker, worker.runId));
+		if (left) worker.previousSessionUsage = addSessionUsage(worker.previousSessionUsage, left.usage);
+		worker.conversationId = void 0;
+		this.storage.save(worker);
+		this.storage.append(worker, {
+			kind: "diagnostic",
+			text: unreachable ? CARRYOVER_UNREACHABLE_NOTICE : CARRYOVER_FAILED_NOTICE,
+			detail: context.omitted ? `已附带此前 ${context.included} 条记录，省略 ${context.omitted} 条` : `已附带此前 ${context.included} 条记录`
+		});
+		task.prompt = withGoal(task.goal, promptForWorker(worker, context.text + task.userPrompt));
+		task.steeringController = new AbortController();
+		this.changed();
+		return this.execute(task, directory);
+	}
+	/**
+	* A Pi/OMP OAuth account serves one run at a time. Its process never started,
+	* so the turn returns to its queue position without holding a slot.
+	*/
+	waitForAccount(task, delay = ACCOUNT_RETRY_MS) {
+		const { worker } = task;
+		this.running.delete(task);
+		if (!task.accountWait && delay > 0) this.storage.append(worker, {
+			kind: "diagnostic",
+			text: "账号正被另一个任务使用，排队等待"
+		});
+		task.accountWait = { retryAt: Date.now() + delay };
+		task.steeringController = new AbortController();
+		task.timeLimit = void 0;
+		worker.status = "queued";
+		worker.error = void 0;
+		this.storage.save(worker);
+		const index = this.queue.findIndex((other) => other.order > task.order);
+		this.queue.splice(index < 0 ? this.queue.length : index, 0, task);
+		this.changed();
+		this.drain();
+	}
+	retryDrain(delay) {
+		if (this.accountRetry || this.disposed) return;
+		this.accountRetry = setTimeout(() => {
+			this.accountRetry = void 0;
+			this.drain();
+		}, delay);
+	}
+	/** Idle, unbound-from-operations Worker with an existing copy. */
+	isolationTarget(parent, id) {
+		const worker = this.get(parent, id);
+		if (this.disposed) throw new Error("CLI Worker is shutting down");
+		const isolation = worker.isolation;
+		if (!isolation || isolation.state === "released" || isolation.state === "preparing") throw new Error("此任务没有待合并的隔离副本");
+		if (this.isolationOperations.has(id)) throw new Error("正在合并或丢弃隔离副本，请稍后再试");
+		if (this.busyReason(worker) || this.tasks.has(id)) throw new Error("请等待本轮结束后再合并或丢弃隔离副本");
+		return worker;
+	}
+	/** Ends the copy binding after its directory is confirmed gone. */
+	releaseIsolation(worker, text) {
+		const path = worker.isolation.path;
+		worker.isolation = worker.conversationId ? {
+			state: "released",
+			path
+		} : void 0;
+		this.storage.save(worker);
+		this.storage.append(worker, {
+			kind: "diagnostic",
+			text
+		});
+	}
+	/**
+	* Three-way merge of the copy into the project as uncommitted changes.
+	* Nothing is written while any undecided path conflicts; the copy is then kept.
+	*/
+	async mergeIsolation(parent, id, signal, resolutions) {
+		const worker = this.isolationTarget(parent, id);
+		const project = worker.project;
+		if (this.mainWrites.has(project)) throw new Error("该项目正在写回另一个隔离副本，请稍后再试");
+		if ([...this.running].find((task) => task.worker.project === project && !task.worker.isolation && !task.isolate && task.worker.mode === "accept-edits")) throw new Error("主目录中有写任务正在运行，请等它结束后再合并");
+		const previous = worker.isolation;
+		const root = isolationRoot(this.storage.directory);
+		const done = (async () => {
+			worker.isolation = {
+				...previous,
+				state: "merging",
+				message: void 0
+			};
+			this.storage.save(worker);
+			this.changed();
+			try {
+				const result = await mergeIsolatedWorkspace({
+					root,
+					workerId: id,
+					project,
+					signal,
+					resolutions
+				});
+				if (result.status === "conflict") {
+					worker.isolation = {
+						...previous,
+						state: "conflict",
+						conflicts: result.conflicts.slice(0, 200),
+						message: void 0
+					};
+					this.storage.save(worker);
+					this.storage.append(worker, {
+						kind: "diagnostic",
+						text: `${result.conflicts.length} 个文件两边都改过，等待主 Agent 整合，主目录未改动`,
+						detail: result.conflicts.map((item) => `${item.path}：${item.reason}`).join("\n")
+					});
+					return result;
+				}
+				await removeIsolatedWorkspace(root, id);
+				this.releaseIsolation(worker, `已合并隔离副本：写回 ${result.written.length} 个、删除 ${result.deleted.length} 个文件（未提交）`);
+				return result;
+			} catch (error) {
+				worker.isolation = {
+					...previous,
+					state: previous.state,
+					message: `合并失败：${error instanceof Error ? error.message : String(error)}`
+				};
+				this.storage.save(worker);
+				throw error;
+			}
+		})();
+		return this.isolationOperation(id, "merging", done, project);
+	}
+	/** Deletes the copy; reports success only after the directory is gone. */
+	async discardIsolation(parent, id) {
+		const worker = this.isolationTarget(parent, id);
+		const root = isolationRoot(this.storage.directory);
+		const done = (async () => {
+			await removeIsolatedWorkspace(root, id);
+			this.releaseIsolation(worker, "已丢弃隔离副本，主目录未改动");
+		})();
+		return this.isolationOperation(id, "discarding", done);
+	}
+	async isolationOperation(id, kind, done, project) {
+		this.isolationOperations.set(id, {
+			kind,
+			done
+		});
+		if (project) this.mainWrites.add(project);
+		this.changed();
+		try {
+			return await done;
+		} finally {
+			this.isolationOperations.delete(id);
+			if (project) this.mainWrites.delete(project);
+			this.changed();
+			this.drain();
+		}
 	}
 	async close() {
 		if (this.disposed) return;
 		this.disposed = true;
+		clearTimeout(this.accountRetry);
+		this.accountRetry = void 0;
 		for (const worker of this.storage.workers.values()) this.pauseFollowups(worker.id, "Host 已关闭，请确认后继续发送");
 		const workers = /* @__PURE__ */ new Set([
 			...this.tasks.keys(),
@@ -22728,9 +27019,2275 @@ var WorkerRuntime = class {
 		})));
 		await Promise.allSettled(interruptions);
 		await Promise.allSettled([...this.followupRuns]);
+		await Promise.allSettled([...this.isolationOperations.values()].map((operation) => operation.done));
 		this.listeners.clear();
 		this.supplementalContextReader.clear();
 		this.storage.close();
+	}
+};
+/** Tells the parent agent that an isolated run's edits still wait in the copy. */
+function isolationGuidance(worker) {
+	const isolation = worker.isolation;
+	if (isolation?.state === "ready") return `本轮改动写在隔离副本 ${isolation.path}，项目主目录尚未改动。核查结果后调用 cliworker_merge 写回；两边都改过的文件由你整合。不要让 CLI 改到原目录重做。`;
+	if (isolation?.state === "conflict") return `改动仍在隔离副本 ${isolation.path}，有文件两边都改过、等待你整合，主目录未改动；再次调用 cliworker_merge，并为这些文件给出 resolutions。`;
+}
+const INTEGRATION_GUIDANCE = "以下文件在项目和该智能体的副本中都改过，这是并行写入的正常情况，不是错误。versions.base 是派遣时的项目版本，versions.project 是项目当前版本（可能已含其他智能体写回的改动），versions.copy 是该智能体的版本。读取这些文件，按各任务的目标把两边改动整合成最终内容，然后再次调用 cliworker_merge，在 resolutions 中为每个文件给出 use=\"content\"（附完整的最终内容）、use=\"copy\" 或 use=\"project\"；choices 只列出该文件允许的方式。只有两边任务的目标相互矛盾、无法同时满足时，才用 ask_user_question 请用户选择。给出全部文件的决定前，项目中的文件不会被改动，副本保留。";
+/** What the parent agent needs to integrate the files both sides changed. */
+function integrationReport(name, result, pending) {
+	return {
+		status: "needs_integration",
+		agentName: name,
+		copy: result.copy,
+		files: result.conflicts.map(({ path, reason, choices, versions }) => ({
+			path,
+			reason,
+			choices,
+			versions
+		})),
+		guidance: pending?.length ? `${INTEGRATION_GUIDANCE} 本次仍缺少这些文件的决定，或合并期间项目又有变化：${pending.join("、")}。` : INTEGRATION_GUIDANCE
+	};
+}
+/** Validates the tool's `resolutions` argument; paths repeat at most once. */
+function readResolutions(raw) {
+	if (raw === void 0 || raw === null) return void 0;
+	if (!Array.isArray(raw)) throw new Error("resolutions 须为数组");
+	const resolutions = {};
+	for (const item of raw) {
+		const { path, use, content } = item ?? {};
+		if (typeof path !== "string" || !path) throw new Error("resolutions 中每项须包含 path");
+		if (Object.hasOwn(resolutions, path)) throw new Error(`resolutions 中 ${path} 重复`);
+		if (use === "copy" || use === "project") resolutions[path] = use;
+		else if (use === "content") {
+			if (typeof content !== "string") throw new Error(`${path} 选择 content 时须提供完整内容`);
+			if (Buffer.byteLength(content, "utf8") > 2097152) throw new Error(`${path} 的整合内容超过 2 MiB`);
+			resolutions[path] = { content };
+		} else throw new Error(`${path} 的 use 须为 content、copy 或 project`);
+	}
+	return resolutions;
+}
+//#endregion
+//#region lib/types/host/account-guide/engine.js
+var GuideResponseError = class extends Error {
+	constructor() {
+		super("当前步骤不接受此操作，请按窗口提示继续");
+	}
+};
+const CONTROL = /\x1b\[[0-9;?<=>]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Za-z0-9]|\x1b[=>78]/g;
+const compact = (text) => text.replace(/\s+/g, "").toLowerCase();
+const URL_TEXT = /https:\/\/[^\s"'<>\x00-\x1f\x7f]+/g;
+const RAW_LIMIT = 16384;
+const MAX_ANSWER = 4096;
+const ANSWER = /^[^\x00-\x1f\x7f]+$/;
+/** Bounded text-only VT screen. OSC / APC payloads never become screen text or commands. */
+var GuideScreen = class {
+	cols;
+	rows;
+	lines = [[]];
+	wrapped = /* @__PURE__ */ new Set();
+	row = 0;
+	col = 0;
+	saved = [0, 0];
+	pending = "";
+	wrap = true;
+	endings = /* @__PURE__ */ new Map();
+	drawn = /* @__PURE__ */ new Map();
+	sequence = 0;
+	bracketed = false;
+	links = [];
+	constructor(cols, rows) {
+		this.cols = cols;
+		this.rows = rows;
+	}
+	resize(cols, rows) {
+		this.cols = Math.max(1, Math.min(500, cols));
+		this.rows = Math.max(1, Math.min(200, rows));
+		this.lines = this.lines.slice(0, this.rows).map((line) => line.slice(0, this.cols));
+		this.row = Math.min(this.row, this.rows - 1);
+		this.col = Math.min(this.col, this.cols - 1);
+	}
+	clear() {
+		this.lines = [[]];
+		this.wrapped.clear();
+		this.links = [];
+		this.endings.clear();
+		this.drawn.clear();
+	}
+	get plain() {
+		return this.lines.map((line) => line.join("").trimEnd()).join("\n");
+	}
+	get linkText() {
+		return this.lines.map((line, i) => (i && !this.wrapped.has(i) ? "\n" : "") + (this.wrapped.has(i + 1) ? line.join("") : line.join("").trimEnd())).join("");
+	}
+	get pickLines() {
+		return [...this.drawn].sort((a, b) => a[1] - b[1]).map(([row]) => (this.lines[row] ?? []).join("").trimEnd() + " ".repeat(Math.min(2, this.endings.get(row) ?? 0)));
+	}
+	nextLine(soft = false) {
+		this.row++;
+		if (this.row >= this.rows) {
+			this.lines.shift();
+			this.row = this.rows - 1;
+			this.wrapped = new Set([...this.wrapped].filter((row) => row > 0).map((row) => row - 1));
+			this.endings = new Map([...this.endings].filter(([row]) => row > 0).map(([row, count]) => [row - 1, count]));
+			this.drawn = new Map([...this.drawn].filter(([row]) => row > 0).map(([row, count]) => [row - 1, count]));
+		}
+		this.lines[this.row] ??= [];
+		if (soft) this.wrapped.add(this.row);
+		else this.wrapped.delete(this.row);
+	}
+	write(text) {
+		const input = this.pending + text;
+		this.pending = "";
+		for (let i = 0; i < input.length;) {
+			if (input[i] === "\x1B") {
+				const rest = input.slice(i);
+				const kind = input[i + 1];
+				if (!kind) {
+					this.pending = rest;
+					break;
+				}
+				if (kind === "[") {
+					const match = /^\x1b\[([0-?]*)([ -/]*)([@-~])/.exec(rest);
+					if (!match) {
+						if (/^\x1b\[[0-?]*[ -/]*$/.test(rest) && rest.length < RAW_LIMIT) this.pending = rest;
+						break;
+					}
+					this.csi(match[1], match[2], match[3]);
+					i += match[0].length;
+					continue;
+				}
+				if ("]P_^X".includes(kind)) {
+					const end = /\x07|\x1b\\/.exec(rest.slice(2));
+					if (!end) {
+						if (rest.length < RAW_LIMIT) this.pending = rest;
+						break;
+					}
+					const payload = rest.slice(2, 2 + end.index);
+					if (kind === "]" && payload.startsWith("8;")) {
+						const link = payload.slice(payload.indexOf(";", 2) + 1);
+						if (link) this.links = [...this.links.slice(-15), link];
+						this.endings.set(this.row, (this.endings.get(this.row) ?? 0) + 1);
+					}
+					i += 2 + end.index + end[0].length;
+					continue;
+				}
+				if ("()*+".includes(kind)) {
+					if (rest.length < 3) {
+						this.pending = rest;
+						break;
+					}
+					i += 3;
+					continue;
+				}
+				if (kind === "7") this.saved = [this.row, this.col];
+				if (kind === "8") [this.row, this.col] = this.saved;
+				i += 2;
+				continue;
+			}
+			const point = input.codePointAt(i);
+			if (point >= 55296 && point <= 56319 && i === input.length - 1) {
+				this.pending = input[i];
+				break;
+			}
+			const char = String.fromCodePoint(point);
+			i += char.length;
+			if (char === "\r") {
+				this.col = 0;
+				continue;
+			}
+			if (char === "\n") {
+				this.endings.set(this.row, 2);
+				this.nextLine();
+				this.col = 0;
+				continue;
+			}
+			if (char === "\b") {
+				this.col = Math.max(0, this.col - 1);
+				continue;
+			}
+			if (char === "	") {
+				this.col = Math.min(this.cols - 1, (Math.floor(this.col / 8) + 1) * 8);
+				continue;
+			}
+			if (point < 32 || point >= 127 && point < 160) continue;
+			const combining = /[\p{Mark}\u200d\ufe0f]/u.test(char);
+			const wide = point >= 4352 && (point <= 4447 || point === 9001 || point === 9002 || point >= 11904 && point <= 42191 && point !== 12351 || point >= 44032 && point <= 55203 || point >= 63744 && point <= 64255 || point >= 65040 && point <= 65135 || point >= 65280 && point <= 65376 || point >= 65504 && point <= 65510 || point >= 127744);
+			const width = combining ? 0 : wide ? 2 : 1;
+			if (width && this.col + width > this.cols) if (this.wrap) {
+				this.nextLine(true);
+				this.col = 0;
+			} else this.col = Math.max(0, this.cols - width);
+			const line = this.lines[this.row] ??= [];
+			this.endings.delete(this.row);
+			this.drawn.set(this.row, ++this.sequence);
+			while (line.length < this.col) line.push(" ");
+			if (!width) {
+				if (this.col) line[this.col - 1] = (line[this.col - 1] ?? "") + char;
+				continue;
+			}
+			line[this.col] = char;
+			if (wide) line[this.col + 1] = "";
+			this.col += width;
+		}
+	}
+	csi(parameters, intermediate, final) {
+		if (intermediate) return;
+		if (/^[<=>]/.test(parameters)) return;
+		if (parameters.startsWith("?")) {
+			if (final === "h" || final === "l") {
+				const modes = parameters.slice(1).split(";");
+				if (modes.includes("2004")) this.bracketed = final === "h";
+				if (modes.includes("7")) this.wrap = final === "h";
+				if (modes.includes("1049")) {
+					this.clear();
+					this.row = this.col = 0;
+				}
+			}
+			return;
+		}
+		const values = parameters.split(";").map(Number), n = values[0] || 1;
+		if (final === "m") this.endings.set(this.row, (this.endings.get(this.row) ?? 0) + 1);
+		const oldRow = this.row, oldCol = this.col;
+		if (final === "H" || final === "f") {
+			this.row = n - 1;
+			this.col = (values[1] || 1) - 1;
+		}
+		if (final === "A") this.row -= n;
+		if (final === "B") this.row += n;
+		if (final === "C") this.col += n;
+		if (final === "D") this.col -= n;
+		if (final === "G" || final === "`") this.col = n - 1;
+		if (final === "d") this.row = n - 1;
+		if (final === "E" || final === "F") {
+			this.row += final === "E" ? n : -n;
+			this.col = 0;
+		}
+		if (final === "s") this.saved = [this.row, this.col];
+		if (final === "u") [this.row, this.col] = this.saved;
+		this.row = Math.max(0, Math.min(this.rows - 1, this.row));
+		if ("ABCDEFGH`dfu".includes(final)) this.col = Math.max(0, Math.min(this.cols - 1, this.col));
+		if (this.row === oldRow + 1 && this.col === 0 && (oldCol >= this.cols || (this.lines[oldRow]?.length ?? 0) >= this.cols)) this.wrapped.add(this.row);
+		if (final === "J") {
+			if (values[0] === 2) this.clear();
+			else if (!values[0]) {
+				this.lines = this.lines.slice(0, this.row + 1);
+				this.erase(0);
+			} else if (values[0] === 1) {
+				for (let r = 0; r < this.row; r++) this.lines[r] = [];
+				this.erase(1);
+			}
+		}
+		if (final === "K") this.erase(values[0] || 0);
+		if (final === "X") {
+			const line = this.lines[this.row] ??= [];
+			for (let c = this.col; c < Math.min(this.cols, this.col + n); c++) line[c] = " ";
+		}
+	}
+	erase(mode) {
+		this.endings.delete(this.row);
+		const line = this.lines[this.row] ??= [];
+		if (mode === 2) this.lines[this.row] = [];
+		else if (mode === 0) line.length = Math.min(line.length, this.col);
+		else for (let c = 0; c <= Math.min(this.col, this.cols - 1); c++) line[c] = " ";
+		this.wrapped.delete(this.row + 1);
+	}
+};
+const GUIDE_SIZE = {
+	cols: 200,
+	rows: 60
+};
+const DEVICE_CODE = /^[A-Z0-9]{3,12}(?:-[A-Z0-9]{3,12})?$/i;
+const PICK_LIMIT = 40;
+const DOWN$1 = "\x1B[B";
+/** Plugin texts shared by every CLI; a flow only adds its own steps. */
+function guideTexts(name) {
+	return {
+		starting: {
+			step: "starting",
+			tone: "info",
+			template: "starting",
+			text: `正在启动 ${name}…`
+		},
+		confirming: {
+			step: "confirming",
+			tone: "info",
+			template: "waiting",
+			text: "正在确认登录…"
+		},
+		signedIn: {
+			step: "signedIn",
+			tone: "success",
+			template: "result",
+			text: `已登录 ${name}`
+		},
+		unconfirmed: {
+			step: "unconfirmed",
+			tone: "warning",
+			template: "result",
+			text: "未能确认登录。请重新开始登录，或查看原生终端中的提示。"
+		},
+		loggingOut: {
+			step: "loggingOut",
+			tone: "info",
+			template: "waiting",
+			text: `正在退出 ${name}…`
+		},
+		loggedOut: {
+			step: "loggedOut",
+			tone: "success",
+			template: "result",
+			text: `已退出 ${name}`
+		},
+		notSignedIn: {
+			step: "notSignedIn",
+			tone: "info",
+			template: "result",
+			text: `当前未登录 ${name}，无需退出。`
+		},
+		logoutUnconfirmed: {
+			step: "logoutUnconfirmed",
+			tone: "warning",
+			template: "result",
+			text: "未能确认已退出，请查看原生终端中的提示。"
+		},
+		native: {
+			step: "native",
+			tone: "warning",
+			template: "native",
+			text: "无法识别当前步骤，请在原生终端中继续。"
+		}
+	};
+}
+/** A guide driven by one CLI's flow definition. It never stores what the user types. */
+var FlowGuide = class {
+	flow;
+	ctx;
+	size;
+	texts;
+	steps;
+	screen = "";
+	plain = "";
+	terminal;
+	link;
+	code;
+	index = -1;
+	shown;
+	autoDone = /* @__PURE__ */ new Set();
+	typed = false;
+	commandSent = false;
+	afterCommand = "";
+	identifying = false;
+	confirming = false;
+	done = false;
+	bracketed = false;
+	picked = /* @__PURE__ */ new Set();
+	lastPicked;
+	pickDone = false;
+	watching = false;
+	constructor(flow, ctx) {
+		this.flow = flow;
+		this.ctx = ctx;
+		this.size = flow.size ?? GUIDE_SIZE;
+		this.terminal = new GuideScreen(this.size.cols, this.size.rows);
+		this.texts = guideTexts(flow.name);
+		this.steps = (ctx.action === "login" ? flow.login?.steps : ctx.action === "logout" ? flow.logout?.steps : void 0) ?? [];
+	}
+	get context() {
+		return {
+			...this.ctx,
+			bracketedPaste: this.bracketed
+		};
+	}
+	view() {
+		const screen = this.screen;
+		return {
+			has: (...markers) => markers.every((marker) => screen.includes(compact(marker))),
+			plain: this.plain,
+			link: this.link,
+			code: this.code
+		};
+	}
+	output(text) {
+		if (this.ctx.action === "manage" || this.done) return [];
+		this.terminal.write(text);
+		this.bracketed = this.terminal.bracketed;
+		this.plain = this.terminal.plain;
+		this.screen = compact(this.plain);
+		this.readLinks();
+		if (this.commandSent) {
+			this.afterCommand = this.screen;
+			return [];
+		}
+		const command = this.ctx.action === "logout" ? this.flow.logout?.command : void 0;
+		if (command && this.index < 0) {
+			const screen = this.view();
+			if (command.signedOut?.length && screen.has(...command.signedOut)) return this.end(this.texts.notSignedIn);
+			if (command.ready?.length && screen.has(...command.ready)) return this.sendCommand(command.text);
+		}
+		return this.advance();
+	}
+	resize(cols, rows) {
+		this.terminal.resize(cols, rows);
+	}
+	advance() {
+		if (this.confirming) return [];
+		const screen = this.view();
+		const context = this.context;
+		for (let i = this.steps.length - 1; i >= Math.max(0, this.index); i--) {
+			const step = this.steps[i];
+			if (!(typeof step.when === "function" ? step.when(screen, context) : screen.has(...step.when))) continue;
+			const guide = step.guide(screen, context);
+			if (i === this.index && sameGuide(guide, this.shown)) return step.pick ? this.pick(step) : [];
+			if (i !== this.index) this.typed = false;
+			this.index = i;
+			if (step.ends) return this.end(guide);
+			const events = this.show(guide);
+			if (step.auto && !this.autoDone.has(step.id)) {
+				const keys = step.auto(screen, context);
+				if (keys) {
+					this.autoDone.add(step.id);
+					events.push({ write: keys });
+				}
+			}
+			if (step.confirms) events.push(...this.startConfirm(step.confirms));
+			if (step.watches && !this.watching) {
+				this.watching = true;
+				events.push({ watch: step.watches });
+			}
+			if (step.pick) events.push(...this.pick(step));
+			return events;
+		}
+		const current = this.steps[this.index];
+		if (current?.pick) return this.pick(current);
+		return [];
+	}
+	/** One key per drawn screen: Enter on the chosen row, the down arrow on any other. */
+	pick(step) {
+		if (this.pickDone || !step.pick) return [];
+		const lines = this.terminal.pickLines;
+		const found = step.pick(lines, this.context);
+		if (!found || found.row === this.lastPicked) return [];
+		if (found.target) {
+			this.pickDone = true;
+			return [{ write: "\r" }, ...this.startConfirm(step.pickConfirms ?? "logout")];
+		}
+		if (this.picked.has(found.row) || this.picked.size >= PICK_LIMIT) {
+			this.pickDone = true;
+			return this.show(this.texts.native);
+		}
+		this.picked.add(found.row);
+		this.lastPicked = found.row;
+		return [{ write: DOWN$1 }];
+	}
+	input(data) {
+		const step = this.steps[this.index];
+		if (!step?.typedConfirms || this.confirming) return [];
+		if (data.replace(/\x1b\[20[01]~/g, "").replace(/[\r\n]/g, "").length) this.typed = true;
+		return /[\r\n]/.test(data) && this.typed ? this.startConfirm(step.typedConfirms) : [];
+	}
+	respond(response) {
+		const step = this.steps[this.index];
+		if (!step?.respond || this.confirming || this.done) throw new GuideResponseError();
+		if ("code" in response || "secret" in response) {
+			const value = ("code" in response ? response.code : response.secret).trim();
+			if (!value || value.length > MAX_ANSWER || !ANSWER.test(value)) throw new GuideResponseError();
+		}
+		const answer = step.respond(response, this.context);
+		if (!answer) throw new GuideResponseError();
+		const events = [{
+			write: answer.keys,
+			enter: answer.enter
+		}];
+		if (answer.resets) {
+			this.screen = "";
+			this.plain = "";
+			this.terminal.clear();
+			this.link = this.code = void 0;
+			this.index = -1;
+			this.shown = void 0;
+		}
+		if (answer.confirm) events.push(...this.startConfirm(answer.confirm));
+		return events;
+	}
+	/** The user's own answer as keys: bracketed when the CLI asked for it, as typed otherwise. */
+	static paste(value, ctx) {
+		return ctx.bracketedPaste ? `\x1b[200~${value}\x1b[201~` : value;
+	}
+	settled() {
+		if (this.ctx.action === "manage" || this.done || this.confirming || this.commandSent || this.identifying) return [];
+		if (!this.plain.trim()) return [];
+		if (this.steps[this.index]?.pick && !this.pickDone) {
+			this.pickDone = true;
+			return this.show(this.texts.native);
+		}
+		if (this.index >= 0) return [];
+		if (this.ctx.action === "logout" && this.flow.logout?.command) {
+			this.identifying = true;
+			return [{ identify: true }];
+		}
+		return sameGuide(this.texts.native, this.shown) ? [] : this.show(this.texts.native);
+	}
+	identified(state) {
+		this.identifying = false;
+		if (this.done || this.commandSent || this.index >= 0) return [];
+		const command = this.flow.logout?.command;
+		if (this.ctx.action !== "logout" || !command) return [];
+		if (state?.state === "authenticated") return this.sendCommand(command.text);
+		if (state?.state === "unconfigured" || state?.state === "unauthenticated") return this.end(this.texts.notSignedIn);
+		return this.show(this.texts.native);
+	}
+	exited() {
+		if (this.done || this.ctx.action === "manage") return [];
+		const change = this.ctx.action === "logout" ? "logout" : "login";
+		this.confirming = false;
+		return this.startConfirm(change);
+	}
+	confirmed(change) {
+		if (this.done) return [];
+		return this.end(change === "login" ? this.texts.signedIn : this.texts.loggedOut);
+	}
+	unconfirmed(change) {
+		if (this.done) return [];
+		this.confirming = false;
+		this.typed = false;
+		if (change === "logout") return this.show(this.texts.logoutUnconfirmed);
+		const step = this.steps[this.index];
+		if (step?.respond) {
+			const guide = {
+				...this.texts.unconfirmed,
+				template: this.shown?.template,
+				plan: this.shown?.plan,
+				stage: this.shown?.stage
+			};
+			return this.show({
+				...guide,
+				step: step.id,
+				options: this.shown?.options,
+				link: this.shown?.link,
+				code: this.shown?.code
+			});
+		}
+		return this.show(this.texts.unconfirmed);
+	}
+	retryEnter() {
+		const menu = this.flow.logout?.command?.menu;
+		return !menu?.length || !menu.every((marker) => this.afterCommand.includes(compact(marker)));
+	}
+	proves(change, before, after, exitCode) {
+		if (this.flow.proves) return this.flow.proves(change, before, after, exitCode);
+		const { login, provider } = this.ctx;
+		if (change === "logout" && login) return !!after && after.state !== "unavailable" && after.state !== "unknown" && !after.logins?.some((item) => item.id === login);
+		if (change === "login" && provider && this.flow.targets) {
+			const stored = this.ctx.stores ?? provider;
+			const held = (evidence) => new Set((evidence?.logins ?? []).flatMap((item) => item.id && parseAccountLoginId(item.id)?.provider === stored ? [item.id] : []));
+			const now = held(after), was = held(before);
+			return [...now].some((id) => !was.has(id)) || now.size > 0 && exitCode === 0;
+		}
+		if (change === "logout") return !!after && after.state !== "authenticated";
+		if (after?.state !== "authenticated") return false;
+		return before?.state !== "authenticated" || exitCode === 0 || signature(before) !== signature(after);
+	}
+	startConfirm(change) {
+		if (this.confirming || this.done) return [];
+		this.confirming = true;
+		const plan = change === "login" ? this.flow.login?.plan : void 0;
+		const guide = change === "login" ? this.texts.confirming : this.texts.loggingOut;
+		return [...this.show(plan?.length ? {
+			...guide,
+			plan: [...plan],
+			stage: plan.length - 1
+		} : guide), { confirm: change }];
+	}
+	sendCommand(text) {
+		this.commandSent = true;
+		this.terminal.clear();
+		return [...this.show(this.texts.loggingOut), { command: text }];
+	}
+	end(guide) {
+		this.done = true;
+		return [...this.show(guide), { finish: true }];
+	}
+	show(guide) {
+		this.shown = guide;
+		return [{ guide }];
+	}
+	readLinks() {
+		const hosts = this.flow.links;
+		this.link = void 0;
+		this.code = void 0;
+		if (hosts?.length) {
+			let found;
+			for (const match of this.terminal.linkText.matchAll(URL_TEXT)) found = allowedLink(match[0], hosts) ?? found;
+			for (const link of this.terminal.links) found = allowedLink(link, hosts) ?? found;
+			this.link = found;
+		}
+		const device = this.flow.deviceCode?.exec(this.plain);
+		if (device && DEVICE_CODE.test(device[1])) this.code = device[1];
+	}
+};
+function sameGuide(a, b) {
+	return !!b && a.step === b.step && a.link === b.link && a.code === b.code && a.text === b.text;
+}
+function signature(state) {
+	return JSON.stringify([state?.accountLabel, state?.logins]);
+}
+//#endregion
+//#region lib/types/host/agy-account-guide.js
+/**
+* Screen texts of agy 1.4.7 (checked on macOS 2026-10-26). Whitespace is
+* ignored when matching, since a TUI may draw spaces as cursor moves.
+* `signedOut` is drawn before every sign-in check, also for a signed-in
+* account. The login method menu does not prove a signed-out start either (a
+* signed-in macOS Desktop run drew it, 2026-10-31): a sign-out drawn with it
+* asks the Host's native account read, and only an unconfigured read ends it.
+* `scheme` and `terms` are agy's first-run setup screens (Windows, 2026-10-27): a color
+* scheme list with `[Next]`, then the terms with a data-sharing checkbox that starts
+* ticked and `[Previous] [Done]`. On the checkbox Enter toggles it; ↓ moves to
+* `[Previous]`, → to `[Done]`, which is drawn as `> Done` once selected.
+*/
+const MARKERS = {
+	trust: "Do you trust the contents of this project?",
+	scheme: "Choose your color scheme",
+	terms: "Terms of Service & Data Use",
+	next: "[Next]",
+	agree: "Yes, I agree to help improve",
+	done: "> Done",
+	nav: "↑/↓ Navigate",
+	signedOut: "You are currently not signed in.",
+	method: "Select login method",
+	code: "paste the authorization code",
+	ready: "? for shortcuts"
+};
+const login = { plan: [
+	"选择登录方式",
+	"在浏览器中授权",
+	"粘贴授权码，按回车登录"
+] };
+const AGY_GUIDES = {
+	trust: {
+		step: "trust",
+		tone: "action",
+		template: "trust",
+		...login,
+		stage: 0,
+		text: "Antigravity 首次在此项目文件夹运行，需要你确认是否信任该文件夹。"
+	},
+	setup: {
+		step: "setup",
+		tone: "action",
+		template: "native",
+		...login,
+		stage: 0,
+		text: "Antigravity 首次运行，需要你在下方原生终端中完成剩余的初始设置。用方向键选择、回车确认，完成后插件会继续。"
+	},
+	preparing: {
+		step: "preparing",
+		tone: "info",
+		template: "waiting",
+		text: "正在完成 Antigravity 首次运行设置…"
+	},
+	terms: {
+		step: "terms",
+		tone: "action",
+		template: "terms",
+		text: "Antigravity 首次运行，需要同意 Google Antigravity CLI 服务条款和 Google 隐私政策后才能继续。AI 编程智能体存在自主执行代码、数据外泄、提示注入和供应链等安全风险，请留意并核实它的每项操作。"
+	},
+	method: {
+		step: "method",
+		tone: "action",
+		template: "choice",
+		...login,
+		stage: 0,
+		text: "使用 Google 账号登录 Antigravity。",
+		options: [{
+			id: "google",
+			label: "使用 Google 账号登录",
+			detail: "如需使用 Google Cloud 项目登录，请打开原生终端操作。"
+		}]
+	},
+	code: {
+		step: "code",
+		tone: "action",
+		template: "browserCode",
+		...login,
+		stage: 1,
+		text: "浏览器已打开 Google 登录页面。登录并点击「允许」后，页面会显示一串授权码，把它复制下来。"
+	},
+	pasted: {
+		step: "pasted",
+		tone: "action",
+		template: "browserCode",
+		...login,
+		stage: 1,
+		text: "授权码已粘贴，请按回车完成登录。"
+	},
+	confirming: {
+		step: "confirming",
+		tone: "info",
+		template: "waiting",
+		...login,
+		stage: 2,
+		text: "正在确认登录…"
+	},
+	signedIn: {
+		step: "signedIn",
+		tone: "success",
+		template: "result",
+		text: "已登录 Antigravity"
+	},
+	unconfirmed: {
+		step: "unconfirmed",
+		tone: "warning",
+		template: "browserCode",
+		...login,
+		stage: 1,
+		text: "未能确认登录：授权码可能不完整或已过期。请重新开始登录，或查看原生终端中的提示。"
+	},
+	alreadySignedIn: {
+		step: "alreadySignedIn",
+		tone: "info",
+		template: "result",
+		text: "当前已登录 Antigravity。如需切换账号，请先退出登录。"
+	},
+	loggingOut: {
+		step: "loggingOut",
+		tone: "info",
+		template: "waiting",
+		text: "正在退出 Antigravity…"
+	},
+	loggedOut: {
+		step: "loggedOut",
+		tone: "success",
+		template: "result",
+		text: "已退出 Antigravity"
+	},
+	notSignedIn: {
+		step: "notSignedIn",
+		tone: "info",
+		template: "result",
+		text: "当前未登录 Antigravity，无需退出。"
+	},
+	logoutUnconfirmed: {
+		step: "logoutUnconfirmed",
+		tone: "warning",
+		template: "result",
+		text: "未能确认已退出，请查看原生终端中的提示。"
+	},
+	menuUnresolved: {
+		step: "menuUnresolved",
+		tone: "warning",
+		template: "result",
+		text: "Antigravity 显示了登录菜单，但未能确认当前未登录，插件没有自动退出，也不会在菜单中输入。请点击「显示原生终端」查看当前画面。"
+	}
+};
+const LINK = /\x1b\]8;[^;\x07\x1b]*;([^\x07\x1b]+)(?:\x07|\x1b\\)/g;
+const googleSignIn = (value) => {
+	try {
+		const url = new URL(value);
+		return url.protocol === "https:" && url.hostname === "accounts.google.com" && !url.username && !url.password ? url.href : void 0;
+	} catch {
+		return;
+	}
+};
+/** Questions only the user answers; the guide waits for their answer before reading on. */
+const GATES = /* @__PURE__ */ new Set([
+	"trust",
+	"setup",
+	"terms"
+]);
+const PATTERNS = Object.fromEntries(Object.entries(MARKERS).map(([key, value]) => [key, compact(value)]));
+/** Follows one Antigravity login or logout terminal; never stores what the user types. */
+var AgyAccountGuide = class {
+	action;
+	size = GUIDE_SIZE;
+	screen = "";
+	raw = "";
+	link;
+	step;
+	typed = false;
+	commandSent = false;
+	identifying = false;
+	/** A sign-out drew the login menu: the pending native account read decides it. */
+	menuDrawn = false;
+	afterCommand = "";
+	/** The trust or setup question on screen was answered with Enter; judge what agy draws next. */
+	gateAnswered = false;
+	/** A first-run setup screen was drawn: a quiet screen may still be one of its steps. */
+	firstRun = false;
+	schemeSkipped = false;
+	/** Whether the data-sharing box on the terms screen is ticked, as agy drew it. */
+	shared;
+	/** The user agreed to the terms; Enter waits until `[Done]` is selected. */
+	toDone = false;
+	constructor(action) {
+		this.action = action;
+	}
+	output(text) {
+		if (this.action === "manage") return [];
+		this.screen = (this.screen + compact(text.replace(CONTROL, ""))).slice(-4096);
+		const seen = (marker) => this.screen.includes(PATTERNS[marker]);
+		const linked = this.action === "login" ? this.readLink(text) : false;
+		if (this.action === "logout") {
+			if (this.commandSent) {
+				this.afterCommand = (this.afterCommand + compact(text.replace(CONTROL, ""))).slice(-4096);
+				return [];
+			}
+			const done = this.done(seen);
+			if (done) return done;
+			if (this.waiting()) return [];
+			const gate = this.gate(seen);
+			if (gate) return gate;
+			if (seen("method")) {
+				this.menuDrawn = true;
+				if (this.identifying) return [];
+				this.identifying = true;
+				return [{ identify: true }];
+			}
+			if (!seen("ready")) return [];
+			this.commandSent = true;
+			return [...this.show(AGY_GUIDES.loggingOut), { command: "/logout" }];
+		}
+		const done = this.done(seen);
+		if (done) return done;
+		if (seen("code") && this.order("code")) return this.show(AGY_GUIDES.code);
+		if (seen("method") && this.order("method")) return this.show(AGY_GUIDES.method);
+		if (!this.waiting()) {
+			const gate = this.gate(seen);
+			if (gate) return gate;
+		}
+		if (seen("ready") && !seen("method") && !this.waiting()) return this.show(AGY_GUIDES.alreadySignedIn);
+		if (linked && this.step === "code") return [{ guide: this.withLink(AGY_GUIDES.code) }];
+		return [];
+	}
+	/**
+	* The screen stopped changing before any known step: ask the Host to read the
+	* native account. The main screen's exact text is not relied on alone.
+	*/
+	settled() {
+		if (this.action === "manage" || this.waiting() || this.commandSent || this.identifying || !this.screen) return [];
+		const seen = (marker) => this.screen.includes(PATTERNS[marker]);
+		if (seen("scheme") && this.schemeSkipped && !seen("terms")) {
+			this.gateAnswered = false;
+			return this.show(AGY_GUIDES.setup);
+		}
+		if (seen("trust") || seen("scheme") || seen("terms") || seen("method") || seen("code")) return [];
+		if (this.firstRun && !seen("ready") && (this.toDone || this.wizard(seen))) {
+			this.toDone = false;
+			this.gateAnswered = false;
+			return this.show(AGY_GUIDES.setup);
+		}
+		this.identifying = true;
+		return [{ identify: true }];
+	}
+	/** agy redrew its login menu after `/logout`: a further Enter would start a sign-in. */
+	loginMenuAfterCommand() {
+		return this.afterCommand.includes(PATTERNS.method);
+	}
+	/** The native account state read after `settled`. */
+	identified(evidence) {
+		const state = typeof evidence === "string" ? evidence : evidence?.state;
+		this.identifying = false;
+		if (this.waiting() || this.commandSent) return [];
+		if (this.menuDrawn && this.action === "logout") return this.show(state === "unconfigured" ? AGY_GUIDES.notSignedIn : AGY_GUIDES.menuUnresolved);
+		if (state === "authenticated") {
+			if (this.action === "login") return this.show(AGY_GUIDES.alreadySignedIn);
+			this.commandSent = true;
+			return [...this.show(AGY_GUIDES.loggingOut), { command: "/logout" }];
+		}
+		if (state === "unconfigured" && this.action === "logout") return this.show(AGY_GUIDES.notSignedIn);
+		return [];
+	}
+	input(data) {
+		if (this.step && GATES.has(this.step) && /[\r\n]/.test(data)) {
+			this.screen = "";
+			this.gateAnswered = true;
+		}
+		if (this.action !== "login" || this.step !== "code" && this.step !== "pasted") return [];
+		const enter = /[\r\n]/.test(data);
+		const content = data.replace(/\x1b\[20[01]~/g, "").replace(/[\r\n]/g, "");
+		const pasted = data.includes("\x1B[200~") || content.length >= 16;
+		if (content.length) this.typed = true;
+		if (enter && this.typed) return [...this.show(AGY_GUIDES.confirming), { confirm: "login" }];
+		if (pasted && this.step === "code") return this.show(AGY_GUIDES.pasted);
+		return [];
+	}
+	/** The login could not be confirmed in time; the user may paste a fresh code. */
+	unconfirmed(change = "login") {
+		if (change === "logout") return [{ guide: AGY_GUIDES.logoutUnconfirmed }];
+		this.typed = false;
+		this.step = "code";
+		return [{ guide: this.withLink(AGY_GUIDES.unconfirmed) }];
+	}
+	/** An answer from the plugin window, turned into the keys agy expects. */
+	respond(response) {
+		if (this.action === "manage") throw new GuideResponseError();
+		if ("agree" in response && this.step === "terms" && !this.gateAnswered && this.shared !== void 0) {
+			this.screen = "";
+			this.toDone = true;
+			return [{ write: (response.share === this.shared ? "" : "\r") + "\x1B[B\x1B[C" }, ...this.show(AGY_GUIDES.preparing)];
+		}
+		if ("confirm" in response && this.step === "trust" && !this.gateAnswered) {
+			if (response.confirm === "decline") return [{ finish: true }];
+			this.screen = "";
+			this.gateAnswered = true;
+			return [{ write: "\r" }];
+		}
+		if (this.action !== "login") throw new GuideResponseError();
+		if ("option" in response && response.option === "google" && this.step === "method") return [{ write: "\r" }];
+		if ("code" in response && [
+			"code",
+			"pasted",
+			"unconfirmed"
+		].includes(this.step ?? "")) {
+			const value = response.code.trim();
+			if (!value || value.length > 2048 || /[\x00-\x1f\x7f]/.test(value)) throw new GuideResponseError();
+			return [
+				{
+					write: FlowGuide.paste(value, {
+						action: "login",
+						bracketedPaste: true
+					}),
+					enter: true
+				},
+				...this.show(AGY_GUIDES.confirming),
+				{ confirm: "login" }
+			];
+		}
+		throw new GuideResponseError();
+	}
+	exited() {
+		return [];
+	}
+	confirmed(change) {
+		return [...this.show(change === "login" ? AGY_GUIDES.signedIn : AGY_GUIDES.loggedOut), { finish: true }];
+	}
+	retryEnter() {
+		return !this.loginMenuAfterCommand();
+	}
+	proves(change, _before, after) {
+		return change === "login" ? after?.state === "authenticated" : after?.state === "unconfigured";
+	}
+	/** A step other than an answered trust or setup question is on screen: wait for it. */
+	waiting() {
+		return !!this.step && this.step !== "preparing" && (!GATES.has(this.step) || !this.gateAnswered);
+	}
+	/**
+	* A question on screen, shown before anything is typed. The color scheme is only a
+	* look, so its preselected default is taken; terms and folder trust are the user's.
+	*/
+	gate(seen) {
+		if (seen("terms")) {
+			this.firstRun = true;
+			const at = this.screen.lastIndexOf(PATTERNS.agree);
+			if (at < 0) return [];
+			const box = this.screen.slice(Math.max(0, at - 3), at);
+			this.shared = box === "[x]" ? true : box.endsWith("[]") ? false : void 0;
+			this.gateAnswered = false;
+			return this.show(this.shared === void 0 ? AGY_GUIDES.setup : AGY_GUIDES.terms);
+		}
+		if (seen("scheme")) {
+			this.firstRun = true;
+			if (this.schemeSkipped) return [];
+			if (!seen("next") || !seen("nav")) return [];
+			this.schemeSkipped = true;
+			this.screen = "";
+			return [...this.show(AGY_GUIDES.preparing), { write: "\r" }];
+		}
+		if (!seen("trust")) return void 0;
+		this.gateAnswered = false;
+		return this.show(AGY_GUIDES.trust);
+	}
+	/** The user agreed to the terms: press Enter once agy shows `[Done]` selected. */
+	done(seen) {
+		if (!this.toDone) return void 0;
+		if (!seen("done")) return [];
+		this.toDone = false;
+		this.screen = "";
+		return [{ write: "\r" }];
+	}
+	/** agy's setup wizard is drawn: its key hints or buttons. */
+	wizard(seen) {
+		return seen("nav") || seen("next") || this.screen.includes(compact("[Previous]")) || this.screen.includes(compact("[Done]"));
+	}
+	order(step) {
+		const rank = [
+			"trust",
+			"method",
+			"code",
+			"pasted",
+			"confirming",
+			"signedIn",
+			"unconfirmed"
+		];
+		return rank.indexOf(this.step ?? "trust") < rank.indexOf(step) || !this.step;
+	}
+	show(guide) {
+		this.step = guide.step;
+		return [{ guide: guide.step === "code" ? this.withLink(guide) : guide }];
+	}
+	withLink(guide) {
+		return this.link ? {
+			...guide,
+			link: this.link
+		} : guide;
+	}
+	/** Keeps the latest Google sign-in address; true when it changed. */
+	readLink(text) {
+		this.raw = (this.raw + text).slice(-8192);
+		let found;
+		for (const match of this.raw.matchAll(LINK)) found = googleSignIn(match[1]) ?? found;
+		if (!found || found === this.link) return false;
+		this.link = found;
+		return true;
+	}
+};
+//#endregion
+//#region lib/types/host/account-guide/multi-account.js
+const KEY_PLAN = ["填写 API Key", "确认登录"];
+/** A masked key prompt; the key goes to the CLI and nowhere else. */
+const apiKey = (when, text) => ({
+	id: "key",
+	when,
+	guide: () => ({
+		step: "key",
+		tone: "action",
+		template: "secret",
+		plan: KEY_PLAN,
+		stage: 0,
+		text
+	}),
+	respond: (response, ctx) => "secret" in response ? {
+		keys: FlowGuide.paste(response.secret.trim(), ctx),
+		enter: true,
+		confirm: "login"
+	} : void 0
+});
+const OPENCODE_FLOW = {
+	name: "OpenCode",
+	targets: true,
+	links: ACCOUNT_LOGIN_HOSTS.opencode,
+	deviceCode: /Enter\s+code:\s*([A-Z0-9]{3,12}(?:-[A-Z0-9]{3,12})?)(?=\s|$)/i,
+	login: {
+		plan: KEY_PLAN,
+		steps: [
+			{
+				id: "loading",
+				when: ["Add credential"],
+				guide: () => ({
+					step: "loading",
+					tone: "info",
+					template: "waiting",
+					plan: KEY_PLAN,
+					stage: 0,
+					text: "正在读取服务商信息…"
+				})
+			},
+			{
+				id: "native-method",
+				when: ["Login method", "└"],
+				guide: () => ({
+					step: "native-method",
+					tone: "action",
+					template: "native",
+					text: "请在原生终端中选择此服务商的登录方式。"
+				})
+			},
+			{
+				id: "openai-method",
+				when: (screen, ctx) => ctx.provider === "openai" && screen.has("Login method", "● ChatGPT Pro/Plus (browser)", "○ ChatGPT Pro/Plus (headless)", "○ Manually enter API Key"),
+				guide: () => ({
+					step: "openai-method",
+					tone: "action",
+					template: "choice",
+					text: "选择 OpenAI 登录方式。",
+					options: [
+						{
+							id: "browser",
+							label: "ChatGPT 浏览器登录"
+						},
+						{
+							id: "device",
+							label: "ChatGPT 设备码登录"
+						},
+						{
+							id: "api-key",
+							label: "使用 API Key"
+						}
+					]
+				}),
+				respond: (response) => {
+					if (!("option" in response)) return void 0;
+					if (response.option === "browser") return {
+						keys: "\r",
+						resets: true
+					};
+					if (response.option === "device") return {
+						keys: "\x1B[B",
+						enter: true,
+						resets: true
+					};
+					if (response.option === "api-key") return {
+						keys: "\x1B[B\x1B[B",
+						enter: true,
+						resets: true
+					};
+				}
+			},
+			{
+				...apiKey(["Enter your API key"], "粘贴该服务商控制台中的 API Key。同一服务商已有的凭据会被替换。"),
+				typedConfirms: "login"
+			},
+			{
+				id: "browser",
+				when: (screen) => screen.has("Go to:") && !!screen.link,
+				guide: (screen) => ({
+					step: "browser",
+					tone: "action",
+					template: "browser",
+					plan: ["在浏览器中授权", "确认登录"],
+					stage: 0,
+					text: "打开下方链接完成授权，随后会自动确认登录。",
+					link: screen.link
+				}),
+				watches: "login"
+			},
+			{
+				id: "device",
+				when: (screen) => screen.has("Enter code:") && !!screen.code && !!screen.link,
+				guide: (screen) => ({
+					step: "device",
+					tone: "action",
+					template: "deviceCode",
+					plan: ["在浏览器中确认验证码", "确认登录"],
+					stage: 0,
+					text: "打开下方链接，核对并填写本次登录的验证码，授权后会自动确认登录。",
+					link: screen.link,
+					code: screen.code
+				}),
+				watches: "login"
+			},
+			{
+				id: "saved",
+				when: ["Login successful"],
+				guide: () => ({
+					step: "saved",
+					tone: "info",
+					template: "waiting",
+					text: "正在确认登录…"
+				}),
+				confirms: "login"
+			},
+			{
+				id: "failed",
+				when: (screen) => screen.has("Failed to authorize") || screen.has("Unknown provider"),
+				guide: () => ({
+					step: "failed",
+					tone: "warning",
+					template: "native",
+					text: "OpenCode 未能完成登录，请查看原生终端中的提示。"
+				})
+			}
+		]
+	},
+	logout: { steps: [] }
+};
+const HERMES_FLOW = {
+	name: "Hermes",
+	targets: true,
+	login: {
+		plan: KEY_PLAN,
+		steps: [
+			{
+				id: "label",
+				when: ["Label / account name (optional)"],
+				guide: () => ({
+					step: "label",
+					tone: "info",
+					template: "waiting",
+					plan: KEY_PLAN,
+					stage: 0,
+					text: "正在准备凭据…"
+				}),
+				auto: () => "\r"
+			},
+			{
+				...apiKey(["Paste your API key"], "粘贴该服务商控制台中的 API Key，它会作为新的凭据加入 Hermes。"),
+				respond: (response, ctx) => "secret" in response ? {
+					keys: FlowGuide.paste(response.secret.trim(), ctx),
+					enter: true
+				} : void 0
+			},
+			{
+				id: "saving",
+				when: ["Label (optional, default:"],
+				guide: () => ({
+					step: "saving",
+					tone: "info",
+					template: "waiting",
+					plan: KEY_PLAN,
+					stage: 1,
+					text: "正在保存凭据…"
+				}),
+				auto: () => "\r"
+			},
+			{
+				id: "added",
+				when: (screen) => screen.has("Added") && screen.has("credential #"),
+				guide: () => ({
+					step: "added",
+					tone: "info",
+					template: "waiting",
+					plan: KEY_PLAN,
+					stage: 1,
+					text: "正在确认登录…"
+				}),
+				confirms: "login"
+			}
+		]
+	},
+	logout: { steps: [] }
+};
+const NOUS_PLAN = ["在浏览器中确认验证码", "确认登录"];
+const nousWaiting = (step, text) => ({
+	step,
+	tone: "info",
+	template: "waiting",
+	plan: NOUS_PLAN,
+	stage: 0,
+	text
+});
+/** `hermes auth add nous --type oauth` (auth_commands.py, auth_nous.py, auth_device_flow.py; Hermes
+* 2026-10-29): a login already saved in the home's shared Nous store is imported first, otherwise a
+* device code is shown. Choosing Nous in the window answers the import prompt (user request
+* 2026-10-29). Completion still requires the target's reread account evidence. */
+const HERMES_NOUS_FLOW = {
+	name: "Hermes",
+	targets: true,
+	links: ACCOUNT_LOGIN_HOSTS.hermes,
+	deviceCode: /enter code:\s*([A-Z0-9]{3,12}(?:-[A-Z0-9]{3,12})?)/i,
+	login: {
+		plan: NOUS_PLAN,
+		steps: [
+			{
+				id: "import",
+				when: ["Import these credentials? [Y/n]"],
+				guide: () => nousWaiting("import", "正在沿用已保存的 Nous 登录…"),
+				auto: () => "y\r"
+			},
+			{
+				id: "starting",
+				when: ["Starting Hermes login via"],
+				guide: () => nousWaiting("starting", "正在连接 Nous Portal…")
+			},
+			{
+				id: "device",
+				when: (screen) => screen.has("To continue", "enter code") && !!screen.code,
+				guide: (screen) => ({
+					step: "device",
+					tone: "action",
+					template: "deviceCode",
+					plan: NOUS_PLAN,
+					stage: 0,
+					text: screen.has("Opened browser for verification") ? "浏览器已打开 Nous Portal 授权页面。核对页面上的验证码与下方一致后再授权，只确认你自己发起的验证码。授权后会自动完成。" : "打开下方链接，在 Nous Portal 核对验证码与下方一致后再授权，只确认你自己发起的验证码。授权后会自动完成。",
+					link: screen.link,
+					code: screen.code
+				}),
+				watches: "login"
+			},
+			{
+				id: "saved",
+				when: (screen) => screen.has("Imported nous OAuth credentials") || screen.has("Saved nous OAuth device-code credentials"),
+				guide: () => nousWaiting("saved", "正在确认登录…"),
+				confirms: "login"
+			}
+		]
+	}
+};
+//#endregion
+//#region lib/types/host/account-guide/kimi-flow.js
+const NAME = "Kimi";
+const DEVICE_PLAN = ["在浏览器中确认验证码", "确认登录"];
+const LOGOUT_TITLE = "Select a provider to log out";
+/** The managed row of `/logout`: label PRODUCT_NAME, description "OAuth login". */
+const OAUTH_LABEL = "Kimi Code";
+const OAUTH_DESCRIPTION = "OAuth login";
+const POINTER = "❯";
+/** Kimi's CURRENT_MARK after the row of the current model's provider, often Kimi Code itself. */
+const CURRENT_MARK = /\s+← current$/;
+/** More than the list can hold; Kimi clamps the cursor at the first row. */
+const TO_TOP = "\x1B[A".repeat(40);
+const highlightedRow = /❯\s+(\S.*?)\s{2,}/;
+const completeLine = (line, text) => new RegExp(`^\\s*${text}\\s{2,}`).test(line);
+/** The highlighted row of Kimi's /logout list, when it is the managed Kimi Code login. */
+function kimiOAuthRow(lines) {
+	let at = lines.length - 1;
+	while (at >= 0 && !lines[at].includes(POINTER)) at--;
+	if (at < 0) return void 0;
+	const label = highlightedRow.exec(lines[at])?.[1]?.replace(CURRENT_MARK, "");
+	if (label !== OAUTH_LABEL) return void 0;
+	const next = lines.slice(at + 1).find((line) => line.trim());
+	return next !== void 0 && completeLine(next, OAUTH_DESCRIPTION) ? {
+		row: label,
+		target: true
+	} : void 0;
+}
+/** A whole first page of the list is drawn and has no Kimi Code row. */
+function oauthMissing(plain) {
+	const at = plain.lastIndexOf(LOGOUT_TITLE);
+	if (at < 0) return false;
+	const list = plain.slice(at);
+	return /Esc cancel[\s\S]*❯[\s\S]*─{8}/.test(list) && !list.includes(OAUTH_DESCRIPTION) && !/Page\s+(?:[2-9]|\d{2,})\//.test(list);
+}
+const trust$1 = {
+	id: "trust",
+	when: ["Trust this folder?"],
+	guide: () => ({
+		step: "trust",
+		tone: "action",
+		template: "trust",
+		text: "Kimi 需要你确认是否信任插件的空账号目录（不含项目文件），确认后插件会自动退出 Kimi Code 登录。"
+	}),
+	respond: (response) => "confirm" in response && response.confirm === "trust" ? {
+		keys: "\r",
+		resets: true
+	} : void 0
+};
+const waiting = (step, text) => ({
+	step,
+	tone: "info",
+	template: "waiting",
+	text
+});
+const KIMI_FLOW = {
+	name: NAME,
+	targets: true,
+	links: ACCOUNT_LOGIN_HOSTS.kimi,
+	deviceCode: /enter code:[ \t]*([A-Z0-9]{3,12}(?:-[A-Z0-9]{3,12})?)[ \t]*\n/i,
+	login: {
+		plan: DEVICE_PLAN,
+		steps: [{
+			id: "device",
+			when: (screen) => screen.has("Kimi device login", "enter code") && !!screen.code,
+			guide: (screen) => ({
+				step: "device",
+				tone: "action",
+				template: "deviceCode",
+				plan: DEVICE_PLAN,
+				stage: 0,
+				text: "浏览器已打开 Kimi Code 授权页面。核对页面上的验证码与下方一致后再授权，只确认你自己发起的验证码。授权后会自动完成。",
+				link: screen.link,
+				code: screen.code
+			})
+		}]
+	},
+	logout: { steps: [
+		trust$1,
+		{
+			id: "ready",
+			when: ["Welcome to Kimi Code", "context:"],
+			guide: () => waiting("ready", "正在打开 Kimi 的退出列表…"),
+			auto: () => "/logout\r"
+		},
+		{
+			id: "select",
+			when: [LOGOUT_TITLE],
+			guide: () => waiting("select", "正在选择 Kimi Code 登录…"),
+			auto: () => TO_TOP,
+			pick: (lines) => kimiOAuthRow(lines)
+		},
+		{
+			id: "missing",
+			when: (screen) => oauthMissing(screen.plain),
+			guide: () => ({
+				step: "missing",
+				tone: "warning",
+				template: "native",
+				text: "Kimi 的退出列表中没有 Kimi Code 登录，请在原生终端中查看。"
+			})
+		},
+		{
+			id: "nothing",
+			when: ["Nothing to logout"],
+			guide: () => guideTexts(NAME).loggingOut,
+			confirms: "logout"
+		},
+		{
+			id: "removed",
+			when: (screen, ctx) => ctx.login !== "kimi:kimi-code" && screen.has("Removed provider"),
+			guide: () => guideTexts(NAME).loggingOut,
+			confirms: "logout"
+		}
+	] }
+};
+//#endregion
+//#region lib/types/host/account-guide/omp-flow.js
+const LOGIN_PLAN = ["完成服务商授权", "确认登录"];
+const ready = (screen) => screen.has("for commands") || screen.has("to change thinking effort");
+function logoutTarget(ctx) {
+	const target = ctx.login ? parseAccountLoginId(ctx.login) : void 0;
+	const entry = target?.entry?.match(/^(?:native|plugin)\.([1-9]\d*)$/);
+	return target?.cli === "omp" && entry ? {
+		provider: target.provider,
+		row: entry[1]
+	} : void 0;
+}
+const OMP_FLOW = {
+	name: "OMP",
+	targets: true,
+	links: ACCOUNT_LOGIN_HOSTS.omp,
+	deviceCode: /Enter code:\s*([A-Z0-9]{3,12}(?:-[A-Z0-9]{3,12})?)/i,
+	login: {
+		plan: LOGIN_PLAN,
+		steps: [
+			{
+				id: "ready",
+				when: (screen, ctx) => ready(screen) && !!ctx.provider && ACCOUNT_NAME.test(ctx.provider),
+				guide: () => ({
+					step: "ready",
+					tone: "info",
+					template: "waiting",
+					text: "正在打开所选服务商的登录步骤…"
+				}),
+				auto: (_screen, ctx) => `/login ${ctx.provider}\r`
+			},
+			{
+				id: "githubDomain",
+				when: (screen, ctx) => ctx.provider === "github-copilot" && screen.has("GitHub Enterprise URL/domain (blank for github.com)"),
+				guide: () => ({
+					step: "githubDomain",
+					tone: "action",
+					template: "choice",
+					text: "选择 GitHub 账号所在站点。企业自建站点请在原生终端中继续。",
+					options: [{
+						id: "github.com",
+						label: "github.com"
+					}]
+				}),
+				respond: (response) => "option" in response && response.option === "github.com" ? { keys: "\r" } : void 0
+			},
+			{
+				id: "key",
+				when: (screen) => screen.has("Paste your", "API key"),
+				guide: () => ({
+					step: "key",
+					tone: "action",
+					template: "secret",
+					plan: ["填写 API Key", "确认登录"],
+					stage: 0,
+					text: "粘贴所选服务商的 API Key，它会作为新的凭据加入 OMP。"
+				}),
+				respond: (response, ctx) => "secret" in response ? {
+					keys: FlowGuide.paste(response.secret.trim(), ctx),
+					enter: true,
+					confirm: "login"
+				} : void 0,
+				typedConfirms: "login"
+			},
+			{
+				id: "browser",
+				when: (screen) => screen.has("Waiting for browser authentication") || screen.has("Tip: You can complete pairing with /login"),
+				guide: (screen) => ({
+					step: "browser",
+					tone: "action",
+					template: "browserCode",
+					plan: LOGIN_PLAN,
+					stage: 0,
+					text: "在浏览器中完成授权。如果授权后没有自动完成，请将完整的跳转地址粘贴到下方。",
+					link: screen.link
+				}),
+				respond: (response, ctx) => "code" in response ? {
+					keys: FlowGuide.paste(`/login ${response.code.trim()}`, ctx),
+					enter: true,
+					confirm: "login"
+				} : void 0,
+				watches: "login"
+			},
+			{
+				id: "browser-input",
+				when: (screen) => screen.has("Paste the authorization code (or full redirect URL)"),
+				guide: (screen) => ({
+					step: "browser-input",
+					tone: "action",
+					template: "browserCode",
+					plan: LOGIN_PLAN,
+					stage: 0,
+					text: "在浏览器中完成授权。如果授权后没有自动完成，请将授权码或完整的跳转地址粘贴到下方。",
+					link: screen.link
+				}),
+				respond: (response, ctx) => "code" in response ? {
+					keys: FlowGuide.paste(response.code.trim(), ctx),
+					enter: true,
+					confirm: "login"
+				} : void 0,
+				typedConfirms: "login",
+				watches: "login"
+			},
+			{
+				id: "device",
+				when: (screen) => screen.has("Enter code:") && !!screen.code,
+				guide: (screen) => ({
+					step: "device",
+					tone: "action",
+					template: "deviceCode",
+					plan: LOGIN_PLAN,
+					stage: 0,
+					text: "打开服务商的授权页面，输入下方设备码并完成授权。只确认你自己发起的设备码。",
+					link: screen.link,
+					code: screen.code
+				}),
+				watches: "login"
+			},
+			{
+				id: "loginResult",
+				when: ["Successfully logged in to"],
+				guide: () => guideTexts("OMP").confirming,
+				confirms: "login"
+			}
+		]
+	},
+	logout: { steps: [
+		{
+			id: "ready",
+			when: (screen, ctx) => ready(screen) && !!logoutTarget(ctx),
+			guide: () => guideTexts("OMP").loggingOut,
+			auto: (_screen, ctx) => `/logout ${logoutTarget(ctx).provider}\r`
+		},
+		{
+			id: "account",
+			when: ["account to log out"],
+			guide: () => ({
+				step: "account",
+				tone: "info",
+				template: "waiting",
+				text: "正在定位所选凭据并退出…"
+			}),
+			pick: (lines, ctx) => {
+				const target = logoutTarget(ctx);
+				if (!target) return void 0;
+				for (const line of [...lines].reverse()) {
+					const text = line.trim().replace(/^[│┃]\s*(.*?)\s*[│┃]$/u, "$1");
+					if (!/^[❯›>→]\s+/u.test(text)) continue;
+					const row = text.match(/(?:stored API key|oauth) #([1-9]\d*)\s*$/)?.[1];
+					if (row) return {
+						row,
+						target: row === target.row
+					};
+				}
+			}
+		},
+		{
+			id: "logoutResult",
+			when: (screen) => screen.has("Successfully logged out") || screen.has("Logout skipped:"),
+			guide: () => guideTexts("OMP").loggingOut,
+			confirms: "logout"
+		}
+	] }
+};
+//#endregion
+//#region lib/types/host/account-guide/pi-flow.js
+const DOWN = "\x1B[B";
+/** Both rows must have been drawn before offering either native choice. */
+const method = (id, second) => ({
+	id,
+	when: [
+		"login method:",
+		"Browser login (default)",
+		second === "copy" ? "Copy code login (headless)" : "Device code login (headless)"
+	],
+	guide: () => ({
+		step: id,
+		tone: "action",
+		template: "choice",
+		text: "选择登录方式。",
+		options: [{
+			id: "browser",
+			label: "浏览器登录"
+		}, second === "copy" ? {
+			id: "copy",
+			label: "复制授权码登录"
+		} : {
+			id: "device",
+			label: "设备码登录"
+		}]
+	}),
+	respond: (response) => {
+		if (!("option" in response)) return void 0;
+		if (response.option === "browser") return {
+			keys: "\r",
+			resets: true
+		};
+		if (response.option === second) return {
+			keys: DOWN,
+			enter: true,
+			resets: true
+		};
+	}
+});
+const PI_FLOW = {
+	name: "Pi",
+	targets: true,
+	links: ACCOUNT_LOGIN_HOSTS.pi,
+	deviceCode: /Enter\s+code:\s*([A-Z0-9]{3,12}(?:-[A-Z0-9]{3,12})?)(?=\s|$)/i,
+	login: { steps: [
+		{
+			id: "authentication",
+			when: (screen) => screen.has("Select authentication method for", "Sign in with an API key") && [
+				"Sign in with an account",
+				"Sign in with ChatGPT",
+				"Sign in with Kimi Code",
+				"Sign in with OpenRouter",
+				"Sign in with SuperGrok or X Premium"
+			].some((label) => screen.has(label)),
+			guide: () => ({
+				step: "authentication",
+				tone: "action",
+				template: "choice",
+				text: "选择此服务商的认证方式。",
+				options: [{
+					id: "account",
+					label: "使用账号登录"
+				}, {
+					id: "api-key",
+					label: "使用 API Key"
+				}]
+			}),
+			respond: (response) => {
+				if (!("option" in response)) return void 0;
+				if (response.option === "account") return {
+					keys: "\r",
+					resets: true
+				};
+				if (response.option === "api-key") return {
+					keys: DOWN,
+					enter: true,
+					resets: true
+				};
+			}
+		},
+		method("copy-method", "copy"),
+		method("device-method", "device"),
+		{
+			id: "github-domain",
+			when: ["GitHub Enterprise URL/domain (blank for github.com)"],
+			guide: () => ({
+				step: "github-domain",
+				tone: "action",
+				template: "choice",
+				text: "使用 github.com 账号登录。企业版域名请在原生终端中填写。",
+				options: [{
+					id: "github.com",
+					label: "github.com"
+				}]
+			}),
+			respond: (response) => "option" in response && response.option === "github.com" ? {
+				keys: "\r",
+				resets: true
+			} : void 0
+		},
+		{
+			id: "browser-code",
+			when: (screen) => [
+				"Complete login in your browser, or paste the authorization code / redirect URL here:",
+				"Complete login in your browser, or paste the final redirect URL here:",
+				"Complete sign-in in your browser, or paste the authorization code / redirect URL here:",
+				"Paste the code Anthropic shows after you sign in:"
+			].some((marker) => screen.has(marker)),
+			guide: (screen) => ({
+				step: "browser-code",
+				tone: "action",
+				template: "browserCode",
+				text: "打开登录页面并授权。如果页面显示授权码，或浏览器未自动完成登录，请将授权码或最终重定向地址粘贴到下方。",
+				link: screen.link
+			}),
+			watches: "login",
+			respond: (response, ctx) => "code" in response ? {
+				keys: FlowGuide.paste(response.code.trim(), ctx),
+				enter: true,
+				confirm: "login"
+			} : void 0,
+			typedConfirms: "login"
+		},
+		{
+			id: "device",
+			when: (screen) => screen.has("Enter code:") && !!screen.code,
+			guide: (screen) => ({
+				step: "device",
+				tone: "action",
+				template: "deviceCode",
+				text: "打开验证页面，输入下方设备码并完成授权。只使用你自己发起登录时显示的设备码。",
+				link: screen.link,
+				code: screen.code
+			}),
+			watches: "login"
+		},
+		{
+			id: "key",
+			when: (screen) => /Enter\s+[^\r\n]{1,100}?\s+API\s+key/i.test(screen.plain) && screen.has("to cancel,", "to submit"),
+			guide: () => ({
+				step: "key",
+				tone: "action",
+				template: "secret",
+				text: "粘贴此服务商的 API Key。提交后将由 Pi 保存，请勿分享原生终端中的密钥回显。"
+			}),
+			respond: (response, ctx) => "secret" in response ? {
+				keys: FlowGuide.paste(response.secret.trim(), ctx),
+				enter: true,
+				confirm: "login"
+			} : void 0,
+			typedConfirms: "login"
+		}
+	] },
+	logout: { steps: [] }
+};
+//#endregion
+//#region lib/types/host/account-guide/single-account.js
+const BROWSER_PLAN = ["在浏览器中授权", "确认登录"];
+const CODE_PLAN = ["在浏览器中授权", "粘贴授权码（如页面显示）"];
+const browser = (id, when, text) => ({
+	id,
+	when,
+	guide: (screen) => ({
+		step: id,
+		tone: "action",
+		template: "browser",
+		plan: BROWSER_PLAN,
+		stage: 0,
+		text,
+		link: screen.link
+	})
+});
+/** A browser sign-in that may show a code to paste back; Enter submits it. */
+const browserCode = (id, when, text) => ({
+	id,
+	when,
+	guide: (screen) => ({
+		step: id,
+		tone: "action",
+		template: "browserCode",
+		plan: CODE_PLAN,
+		stage: 0,
+		text,
+		link: screen.link
+	}),
+	respond: (response, ctx) => "code" in response ? {
+		keys: FlowGuide.paste(response.code.trim(), ctx),
+		enter: true,
+		confirm: "login"
+	} : void 0,
+	typedConfirms: "login"
+});
+const notSignedIn = (name, id, when) => ({
+	id,
+	when,
+	ends: true,
+	guide: () => guideTexts(name).notSignedIn
+});
+const trust = (text, keys) => ({
+	id: "trust",
+	when: [],
+	guide: () => ({
+		step: "trust",
+		tone: "action",
+		template: "trust",
+		text
+	}),
+	respond: (response) => "confirm" in response && response.confirm === "trust" ? {
+		keys,
+		resets: true
+	} : void 0
+});
+const CODEX_FLOW = {
+	name: "Codex",
+	links: ACCOUNT_LOGIN_HOSTS.codex,
+	login: {
+		plan: BROWSER_PLAN,
+		steps: [browser("browser", ["navigate to this URL to authenticate"], "浏览器已打开 ChatGPT 登录页面。登录并授权后会自动完成，无需回到这里操作。")]
+	},
+	logout: { steps: [notSignedIn("Codex", "notSignedIn", ["Not logged in"])] }
+};
+const CLAUDE_FLOW = {
+	name: "Claude Code",
+	links: ACCOUNT_LOGIN_HOSTS.claude,
+	login: {
+		plan: CODE_PLAN,
+		steps: [browserCode("code", ["Paste code here if prompted"], "浏览器已打开 Claude 登录页面。授权后通常会自动完成；如果页面显示授权码，把它复制下来粘贴到下方。")]
+	},
+	logout: { steps: [] }
+};
+const qoder = (name) => ({
+	name,
+	links: ACCOUNT_LOGIN_HOSTS[name === "Qoder" ? "qoder" : "qodercn"],
+	login: {
+		plan: BROWSER_PLAN,
+		steps: [browser("browser", ["open the following URL in your browser to sign in"], `浏览器已打开 ${name} 登录页面。选择账号并授权后会自动完成。`)]
+	},
+	logout: {
+		steps: [{
+			...trust(`${name} 首次在此项目文件夹运行，需要你确认是否信任该文件夹，确认后插件会自动退出登录。`, "\r"),
+			when: ["1. Trust folder"]
+		}],
+		command: {
+			text: "/logout",
+			signedOut: ["Sign in to continue"],
+			menu: ["Sign in to continue"]
+		}
+	}
+});
+const QODER_FLOW = qoder("Qoder");
+const QODERCN_FLOW = qoder("Qoder CN");
+const GROK_FLOW = {
+	name: "Grok",
+	links: ACCOUNT_LOGIN_HOSTS.grok,
+	deviceCode: /(?:Confirm this code in your browser|Then enter this code):\s*([A-Z0-9]{4,8}-[A-Z0-9]{4,8})/,
+	login: {
+		plan: ["在浏览器中确认验证码", "确认登录"],
+		steps: [
+			browser("browser", ["Open this URL to sign in"], "打开 xAI 登录页面完成授权；如果浏览器没有自动打开，请点击下方链接。"),
+			{
+				...browserCode("callback", ["Paste the URL here if it doesn't connect"], "在浏览器中完成 xAI 授权；如果未自动完成，请复制浏览器最后跳转的完整网址并粘贴到下方。"),
+				guide: (screen) => ({
+					step: "callback",
+					tone: "action",
+					template: "browserCode",
+					plan: [
+						"在浏览器中授权",
+						"粘贴回调网址（如未自动完成）",
+						"确认登录"
+					],
+					stage: 0,
+					text: "在浏览器中完成 xAI 授权；如果未自动完成，请复制浏览器最后跳转的完整网址并粘贴到下方。",
+					link: screen.link
+				})
+			},
+			{
+				id: "device",
+				when: (screen) => (screen.has("Confirm this code in your browser") || screen.has("Then enter this code")) && !!screen.code,
+				guide: (screen) => ({
+					step: "device",
+					tone: "action",
+					template: "deviceCode",
+					plan: ["在浏览器中确认验证码", "确认登录"],
+					stage: 0,
+					text: "在浏览器中打开 xAI 验证页面，核对页面上的验证码与下方一致后再授权。只确认你自己发起的验证码。",
+					link: screen.link,
+					code: screen.code
+				})
+			},
+			{
+				id: "networkError",
+				when: (screen) => screen.has("Error: error sending request for url") && (screen.has("operation timed out") || screen.has("tcp connect error")),
+				ends: true,
+				guide: () => ({
+					step: "networkError",
+					tone: "warning",
+					template: "result",
+					text: "Grok 无法连接登录服务。请检查网络或 Grok 的代理设置，然后重新登录。"
+				})
+			}
+		]
+	},
+	logout: { steps: [notSignedIn("Grok", "notSignedIn", ["No cached session to log out of"])] }
+};
+const ZCODE_FLOW = {
+	name: "ZCode",
+	links: ACCOUNT_LOGIN_HOSTS.zcode,
+	login: {
+		plan: BROWSER_PLAN,
+		steps: [browser("browser", [], "浏览器已打开授权页面。登录并授权后会自动完成，无需回到这里操作。")].map((step) => ({
+			...step,
+			when: (screen) => screen.has("Fallback URL") || screen.has("Open this URL to sign in")
+		}))
+	},
+	logout: { steps: [] }
+};
+const MIMO_FLOW = {
+	name: "MiMo",
+	links: ACCOUNT_LOGIN_HOSTS.mimo,
+	login: {
+		plan: ["选择服务商", ...CODE_PLAN],
+		steps: [{
+			id: "provider",
+			when: ["Add credential", "选择服务商"],
+			guide: () => ({
+				step: "provider",
+				tone: "action",
+				template: "choice",
+				plan: ["选择服务商", ...CODE_PLAN],
+				stage: 0,
+				text: "使用小米 MiMo 账号登录。",
+				options: [{
+					id: "mimo",
+					label: "使用 MiMo 账号登录",
+					detail: "其他服务商请打开原生终端操作。"
+				}]
+			}),
+			respond: (response) => "option" in response && response.option === "mimo" ? { keys: "\r" } : void 0
+		}, {
+			...browserCode("code", ["Paste code here if prompted"], "浏览器已打开 MiMo 登录页面。授权后通常会自动完成；如果页面显示授权码，把它复制下来粘贴到下方。"),
+			guide: (screen) => ({
+				step: "code",
+				tone: "action",
+				template: "browserCode",
+				plan: ["选择服务商", ...CODE_PLAN],
+				stage: 1,
+				text: "浏览器已打开 MiMo 登录页面。授权后通常会自动完成；如果页面显示授权码，把它复制下来粘贴到下方。",
+				link: screen.link
+			})
+		}]
+	},
+	logout: { steps: [
+		notSignedIn("MiMo", "notSignedIn", ["No credentials found"]),
+		{
+			id: "provider",
+			when: ["Remove credential", "Select provider"],
+			guide: () => guideTexts("MiMo").loggingOut,
+			pick: (lines) => mimoLogoutRow(lines)
+		},
+		{
+			id: "removed",
+			when: ["Logout successful"],
+			guide: () => guideTexts("MiMo").loggingOut,
+			confirms: "logout"
+		}
+	] }
+};
+/** The provider MiMo's own login stores (`auth.json` key `xiaomi`), listed as "Xiaomi (api)". */
+const MIMO_ROW = "Xiaomi";
+/** The highlighted row (●) of MiMo 0.1.15's "Remove credential" list, once drawn in full. */
+function mimoLogoutRow(lines) {
+	for (let at = lines.length - 1; at >= 0; at--) {
+		const found = /●\s+(\S.*?)\s+\((\w+)\)/.exec(lines[at]);
+		if (found) return {
+			row: `${found[1]} (${found[2]})`,
+			target: found[1] === MIMO_ROW
+		};
+	}
+}
+//#endregion
+//#region lib/types/host/account-guide/flows.js
+/** CLIs whose login/logout window the plugin draws; every other CLI keeps its native terminal. */
+const FLOWS = {
+	codex: CODEX_FLOW,
+	claude: CLAUDE_FLOW,
+	qoder: QODER_FLOW,
+	qodercn: QODERCN_FLOW,
+	grok: GROK_FLOW,
+	zcode: ZCODE_FLOW,
+	mimo: MIMO_FLOW
+};
+/** CLIs that keep several logins: guided only for a provider picked, or one login removed, in the account window. */
+const MULTI_FLOWS = {
+	opencode: OPENCODE_FLOW,
+	hermes: HERMES_FLOW,
+	pi: PI_FLOW,
+	omp: OMP_FLOW,
+	kimi: KIMI_FLOW
+};
+function createAccountGuide(cli, action, options = {}) {
+	if (action === "manage") return void 0;
+	if (cli === "antigravity") return new AgyAccountGuide(action);
+	if (cli === "hermes" && action === "login" && options.provider === "nous") return new FlowGuide(HERMES_NOUS_FLOW, {
+		action,
+		...options
+	});
+	const several = MULTI_FLOWS[cli];
+	if (several) {
+		if (action === "login" ? !options.provider : !options.login) return void 0;
+		return new FlowGuide(several, {
+			action,
+			...options
+		});
+	}
+	const flow = FLOWS[cli];
+	if (!flow || (action === "login" ? !flow.login : !flow.logout)) return void 0;
+	return new FlowGuide(flow, {
+		action,
+		...options
+	});
+}
+//#endregion
+//#region lib/types/host/account-guide/providers.js
+const TABLES = {
+	opencode: [
+		{
+			id: "deepseek",
+			label: "DeepSeek"
+		},
+		{
+			id: "anthropic",
+			label: "Anthropic"
+		},
+		{
+			id: "openai",
+			label: "OpenAI"
+		},
+		{
+			id: "google",
+			label: "Google"
+		},
+		{
+			id: "openrouter",
+			label: "OpenRouter"
+		},
+		{
+			id: "xai",
+			label: "xAI"
+		},
+		{
+			id: "zhipuai",
+			label: "智谱 AI"
+		},
+		{
+			id: "zhipuai-coding-plan",
+			label: "智谱 Coding Plan"
+		},
+		{
+			id: "zai",
+			label: "Z.AI"
+		},
+		{
+			id: "zai-coding-plan",
+			label: "Z.AI Coding Plan"
+		},
+		{
+			id: "moonshotai-cn",
+			label: "月之暗面（中国）"
+		},
+		{
+			id: "moonshotai",
+			label: "Moonshot AI"
+		},
+		{
+			id: "minimax-cn",
+			label: "MiniMax（中国）"
+		},
+		{
+			id: "minimax",
+			label: "MiniMax"
+		},
+		{
+			id: "alibaba-cn",
+			label: "阿里云百炼（中国）"
+		},
+		{
+			id: "alibaba",
+			label: "Alibaba Cloud"
+		},
+		{
+			id: "siliconflow",
+			label: "SiliconFlow"
+		},
+		{
+			id: "mistral",
+			label: "Mistral"
+		},
+		{
+			id: "groq",
+			label: "Groq"
+		}
+	],
+	hermes: [
+		{
+			id: "nous",
+			label: "Nous"
+		},
+		{
+			id: "openrouter",
+			label: "OpenRouter",
+			multi: true
+		},
+		{
+			id: "deepseek",
+			label: "DeepSeek",
+			multi: true
+		},
+		{
+			id: "anthropic",
+			label: "Anthropic",
+			multi: true
+		},
+		{
+			id: "openai-api",
+			label: "OpenAI",
+			multi: true
+		},
+		{
+			id: "gemini",
+			label: "Google Gemini",
+			multi: true
+		},
+		{
+			id: "xai",
+			label: "xAI",
+			multi: true
+		},
+		{
+			id: "zai",
+			label: "Z.AI",
+			multi: true
+		},
+		{
+			id: "kimi-coding-cn",
+			label: "Kimi Coding（中国）",
+			multi: true
+		},
+		{
+			id: "kimi-coding",
+			label: "Kimi Coding",
+			multi: true
+		},
+		{
+			id: "minimax-cn",
+			label: "MiniMax（中国）",
+			multi: true
+		},
+		{
+			id: "minimax",
+			label: "MiniMax",
+			multi: true
+		},
+		{
+			id: "xiaomi",
+			label: "小米 MiMo",
+			multi: true
+		},
+		{
+			id: "huggingface",
+			label: "Hugging Face",
+			multi: true
+		}
+	],
+	zcode: [{
+		id: "bigmodel",
+		label: "中国智谱 BigModel"
+	}, {
+		id: "zai",
+		label: "海外 Z.AI"
+	}],
+	pi: [],
+	omp: [],
+	kimi: [{
+		id: "kimi-code-cn",
+		label: "Kimi Code（kimi.com）",
+		stores: "kimi-code"
+	}, {
+		id: "kimi-code-global",
+		label: "Kimi Code（kimi.ai）",
+		stores: "kimi-code"
+	}]
+};
+/** The providers a login window may sign in to directly, marked when a removable login already holds one. */
+function loginProviders(cli, logins, native) {
+	const table = native ?? TABLES[cli];
+	if (!table) return void 0;
+	const held = new Set((logins ?? []).flatMap((login) => {
+		const parsed = login.id ? parseAccountLoginId(login.id) : void 0;
+		return parsed?.cli === cli ? [parsed.provider] : [];
+	}));
+	return table.map(({ stores, ...entry }) => held.has(stores ?? entry.id) ? {
+		...entry,
+		signedIn: true
+	} : entry);
+}
+function isLoginProvider(cli, provider, native) {
+	return !!(native ?? TABLES[cli])?.some((entry) => entry.id === provider);
+}
+/** The provider a login of this id is filed under. */
+function providerStores(cli, provider, native) {
+	return (native ?? TABLES[cli])?.find((entry) => entry.id === provider)?.stores;
+}
+//#endregion
+//#region lib/types/host/native-login-providers.js
+const labels = {
+	"zai-coding-cn": "智谱 BigModel Coding（中国）",
+	"zhipu-coding-plan": "智谱 BigModel Coding（中国）",
+	zai: "Z.AI（国际）"
+};
+function parseNativeLoginProviders(cli, raw) {
+	const rows = JSON.parse(raw)?.providers;
+	if (!Array.isArray(rows) || rows.length > 256) throw new Error("Invalid native login providers");
+	const seen = /* @__PURE__ */ new Set();
+	return rows.map((row) => {
+		if (!row || typeof row.id !== "string" || !ACCOUNT_NAME.test(row.id) || seen.has(row.id) || typeof row.name !== "string" || !row.name.trim() || row.name.length > 160 || /[\x00-\x1f\x7f]/u.test(row.name) || row.stores !== void 0 && (typeof row.stores !== "string" || !ACCOUNT_NAME.test(row.stores))) throw new Error("Invalid native login provider");
+		seen.add(row.id);
+		const stores = row.stores ?? (cli === "omp" && row.id === "openai-codex-device" ? "openai-codex" : void 0);
+		return {
+			id: row.id,
+			label: Object.hasOwn(labels, row.id) ? labels[row.id] : row.name.trim(),
+			...cli === "omp" ? { multi: true } : {},
+			...stores ? { stores } : {}
+		};
+	});
+}
+/** Successful metadata is cached only for the same installed native entry. */
+var NativeLoginProviders = class {
+	backend;
+	config;
+	cache = /* @__PURE__ */ new Map();
+	constructor(backend, config) {
+		this.backend = backend;
+		this.config = config;
+	}
+	async read(cli, executable, signal) {
+		signal.throwIfAborted();
+		const entry = cli === "pi" ? inspectPiInstallation(executable).executable : await realpath(executable);
+		const info = await stat(entry);
+		const key = JSON.stringify([
+			cli,
+			entry,
+			info.size,
+			info.mtimeMs,
+			info.ino
+		]);
+		const cached = this.cache.get(key);
+		if (cached) return cached;
+		const root = await realpath(await mkdtemp(join(tmpdir(), "cliworker-login-options-")));
+		let cleanup = true;
+		try {
+			await mkdir(join(root, "agent"), { mode: 448 });
+			await writeFile(join(root, "config.json"), JSON.stringify({
+				startup: {
+					setupWizard: false,
+					showSplash: false,
+					checkUpdate: false
+				},
+				disabledProviders: [
+					"native",
+					"claude",
+					"claude-plugins",
+					"codex",
+					"cursor",
+					"gemini",
+					"opencode",
+					"mcp-json",
+					"vscode",
+					"windsurf",
+					"omp-plugins"
+				],
+				mcp: { enableProjectConfig: false },
+				memory: { backend: "off" }
+			}), { mode: 384 });
+			const providers = parseNativeLoginProviders(cli, await captureCatalogMetadata(this.backend, this.config, [
+				process.execPath,
+				fileURLToPath(new URL("./native-login-providers.mjs", import.meta.url)),
+				cli,
+				executable
+			], root, signal, {
+				CLIWORKER_LOGIN_METADATA_HOME: root,
+				ELECTRON_RUN_AS_NODE: "1"
+			}));
+			signal.throwIfAborted();
+			for (const old of this.cache.keys()) if (old.startsWith(`["${cli}",`)) this.cache.delete(old);
+			this.cache.set(key, providers);
+			return providers;
+		} catch (error) {
+			if (error instanceof ProcessCleanupUnconfirmedError) cleanup = false;
+			throw error;
+		} finally {
+			if (cleanup) await rm(root, {
+				recursive: true,
+				force: true
+			});
+		}
 	}
 };
 //#endregion
@@ -22821,7 +29378,7 @@ function projectZCodeIdentity(raw, secret) {
 			state: "configured",
 			verification: "local",
 			...apiBinding ? { authMethod: "api" } : {},
-			summary: apiBinding ? "已配置 ZCode API" : "已配置 ZCode 账号"
+			summary: apiBinding ? "已配置 ZCode API" : "ZCode 账号绑定未确认，请重新登录"
 		};
 		if (!provider && Object.keys(raw).some((name) => {
 			const match = /^account-provider:(.+):identity$/.exec(name);
@@ -22858,11 +29415,30 @@ function projectZCodeIdentity(raw, secret) {
 			authMethod: "oauth",
 			verification: "local",
 			accountLabel: label(userInfo(provider)),
-			summary: access ? "已配置 ZCode OAuth" : "已保存 ZCode 续期凭据"
+			summary: access ? "ZCode 登录凭据已保存，账号绑定未确认，请重新登录" : "已保存 ZCode 续期凭据"
 		};
 	} finally {
 		key.fill(0);
 	}
+}
+/** Distinct, content-free reasons; none of them claims the user never logged in. */
+function grokReadFailure(error) {
+	if (error instanceof SyntaxError) return {
+		state: "unknown",
+		verification: "local",
+		summary: "Grok 凭据格式不受支持"
+	};
+	const message = error instanceof Error ? error.message : "";
+	if (/^(Invalid account (directory|file)|Account file (changed during read|too large))$/.test(message)) return {
+		state: "unavailable",
+		verification: "local",
+		summary: "Grok 凭据文件未通过安全检查"
+	};
+	return {
+		state: "unavailable",
+		verification: "local",
+		summary: "Grok 凭据读取失败，请刷新"
+	};
 }
 function projectGrokIdentity(raw, now = Date.now()) {
 	if (!record$1(raw)) throw new Error("Invalid account metadata");
@@ -22916,7 +29492,13 @@ async function zcodeGrokAccountStatus(cli, config, signal, options = {}) {
 		try {
 			username = userInfo().username;
 		} catch {}
-		const identity = cli === "grok" ? projectGrokIdentity(raw) : projectZCodeIdentity(raw, (options.credentialSecret ?? process.env.ZCODE_CREDENTIAL_SECRET?.trim()) || `zcode-credential-fallback:${platform()}:${homedir()}:${username}`);
+		const projected = cli === "grok" ? projectGrokIdentity(raw) : void 0;
+		const identity = projected ? projected.state === "authenticated" && grokRenewalRejected(createHash("sha256").update(buffer.subarray(0, offset)).digest("hex")) ? {
+			state: "unauthenticated",
+			authMethod: "oauth",
+			verification: "local",
+			summary: "Grok 登录已失效，请在账号终端重新登录"
+		} : projected : projectZCodeIdentity(raw, (options.credentialSecret ?? process.env.ZCODE_CREDENTIAL_SECRET?.trim()) || `zcode-credential-fallback:${platform()}:${homedir()}:${username}`);
 		return cli === "zcode" && identity.state === "unconfigured" ? readZCodePersonalIdentity(zcodeAuthDirectory(config.zcodeAuthDirectory, storageRoot(config, home)), options.home ? { nativeHome: home } : {}) : identity;
 	} catch (error) {
 		signal.throwIfAborted();
@@ -22924,7 +29506,7 @@ async function zcodeGrokAccountStatus(cli, config, signal, options = {}) {
 			state: "unconfigured",
 			verification: "local",
 			summary: "尚未登录"
-		} : {
+		} : cli === "grok" ? grokReadFailure(error) : {
 			state: "unavailable",
 			verification: "local",
 			summary: "登录配置读取失败，请重试"
@@ -23067,7 +29649,7 @@ async function readOpenCodeAccount(config, signal, options = {}) {
 	});
 }
 /** User-operated native terminal. No task prompt, slash command, login or logout is injected. */
-async function prepareOpenCodeAccount(executable, action, config, signal) {
+async function prepareOpenCodeAccount(executable, action, config, signal, target = {}) {
 	signal.throwIfAborted();
 	if (![
 		"login",
@@ -23106,7 +29688,27 @@ async function prepareOpenCodeAccount(executable, action, config, signal) {
 		await assertOpenCodeManagedAuth(data, signal);
 		const env = await openCodeEnvironment(state, { permission: { "*": "deny" } }, data, false);
 		signal.throwIfAborted();
-		const argv = [executable, ...action === "manage" ? [] : ["auth", action]];
+		const removed = target.login ? parseAccountLoginId(target.login) : void 0;
+		if (target.login && (action !== "logout" || removed?.cli !== "opencode" || removed.entry)) throw new Error("不支持单独退出该 OpenCode 账号");
+		if (action === "logout" && removed) {
+			const profile = await readOpenCodeProfile(data, { signal });
+			const directory = profile.removableAuth[removed.provider];
+			if (!directory && Object.hasOwn(profile.auth, removed.provider)) throw new Error("该 OpenCode 服务商存在多处凭据或配置凭据，请在原生配置中管理");
+			if (directory) {
+				await assertOpenCodeManagedAuth(directory, signal);
+				env.XDG_DATA_HOME = directory;
+			}
+		}
+		const argv = [executable, ...action === "manage" ? [] : action === "login" && target.provider ? [
+			"auth",
+			"login",
+			"-p",
+			target.provider
+		] : action === "logout" && removed?.cli === "opencode" ? [
+			"auth",
+			"logout",
+			removed.provider
+		] : ["auth", action]];
 		return {
 			argv: [
 				process.execPath,
@@ -23153,6 +29755,8 @@ function tokenEmail(value) {
 		buffer.fill(0);
 	}
 }
+/** Hermes credential_pool.py gives every entry a 6-hex `id`, the exact `auth remove` target. */
+const poolEntryLogin = (provider, entry) => record(entry) && typeof entry.id === "string" && /^[0-9a-f]{6}$/.test(entry.id) ? accountLoginId("hermes", provider, entry.id) : void 0;
 /** Native shapes from auth_codex.py/auth_xai.py and NousResearch/hermes-agent@6c80c327 auth_nous.py.
 * Explicit own credentials project local login; provider declarations and unknown schemas do not.
 */
@@ -23162,6 +29766,7 @@ function projectHermesIdentity(raw) {
 	if (!record(raw)) throw new Error("Invalid Hermes auth metadata");
 	const providers = record(raw.providers) ? raw.providers : {};
 	const ids = nonempty(raw.active_provider) ? [raw.active_provider] : Object.keys(providers);
+	if (record(providers.nous) && !ids.includes("nous")) ids.push("nous");
 	const logins = [];
 	let expired = false;
 	let renewable = false;
@@ -23169,16 +29774,22 @@ function projectHermesIdentity(raw) {
 		const state = providers[id];
 		if (id === "nous" && record(state)) {
 			try {
-				const nous = projectHermesNousSource(raw);
+				const nous = projectHermesNousSource(raw, 0, { allowInactive: true });
+				const entries = record(raw.credential_pool) ? raw.credential_pool.nous : void 0;
+				const pooled = Array.isArray(entries) && entries.length === 1 ? poolEntryLogin("nous", entries[0]) : void 0;
 				logins.push({
 					...providerLogin("nous", "oauth"),
-					...nous.email ? { accountLabel: nous.email } : {}
+					...nous.email ? { accountLabel: nous.email } : {},
+					id: pooled ?? accountLoginId("hermes", "nous", "oauth")
 				});
 			} catch (error) {
 				if (error instanceof Error && /过期/.test(error.message)) {
 					expired = true;
 					try {
-						projectHermesNousSource(raw, 0, { allowExpired: true });
+						projectHermesNousSource(raw, 0, {
+							allowExpired: true,
+							allowInactive: true
+						});
 						renewable = nonempty(state.refresh_token);
 					} catch {}
 				}
@@ -23199,9 +29810,11 @@ function projectHermesIdentity(raw) {
 			continue;
 		}
 		const email = tokenEmail(state.tokens.id_token);
+		const pooled = Array.isArray(entries) && entries.length === 1 ? poolEntryLogin(id, entries[0]) : void 0;
 		logins.push({
 			...providerLogin(id === "xai-oauth" ? "xai" : id, "oauth"),
-			...email ? { accountLabel: email } : {}
+			...email ? { accountLabel: email } : {},
+			...pooled ? { id: pooled } : {}
 		});
 	}
 	const pools = record(raw.credential_pool) ? raw.credential_pool : {};
@@ -23213,7 +29826,11 @@ function projectHermesIdentity(raw) {
 				"config",
 				...provider === "openrouter" ? ["manual:openrouter_pkce"] : []
 			].includes(String(entry.source ?? "manual")) || !usableNativeApiKey(entry.access_token ?? entry.runtime_api_key)) continue;
-			logins.push(providerLogin(provider, "api", { baseUrl: entry.base_url }));
+			const handle = poolEntryLogin(provider, entry);
+			logins.push({
+				...providerLogin(provider, "api", { baseUrl: entry.base_url }),
+				...handle ? { id: handle } : {}
+			});
 		}
 	}
 	if (logins.length) {
@@ -23238,7 +29855,14 @@ function projectHermesIdentity(raw) {
 	};
 	const pool = record(raw.credential_pool) ? Object.values(raw.credential_pool).flat() : [];
 	const api = pool.some((entry) => record(entry) && entry.auth_type === "api_key" && (nonempty(entry.access_token) || nonempty(entry.runtime_api_key)));
-	if (Object.keys(providers).length || pool.length) return configured(api ? "api" : void 0);
+	const hasCredentials = (state) => record(state) && [state, ...record(state.tokens) ? [state.tokens] : []].some((tokens) => [
+		"access_token",
+		"refresh_token",
+		"agent_key",
+		"runtime_api_key",
+		"api_key"
+	].some((key) => nonempty(tokens[key])));
+	if (Object.values(providers).some(hasCredentials) || pool.some(hasCredentials)) return configured(api ? "api" : void 0);
 }
 async function environmentLogins(path, signal, auth) {
 	let file;
@@ -23332,6 +29956,7 @@ async function readHermesAccount(config, signal) {
 		await file?.close();
 	}
 }
+const pluginHermesHome = (config) => resolve(config.stateDirectory ?? join(process.env.DSH_HOME ?? join(homedir(), ".dsh"), "cliworker-now"), "accounts", "hermes");
 async function listHermesAccountSources(config, signal) {
 	const status = await readHermesAccount(config, signal);
 	if (![
@@ -23339,14 +29964,44 @@ async function listHermesAccountSources(config, signal) {
 		"configured",
 		"unauthenticated"
 	].includes(status.state)) return [];
-	const plugin = resolve(config.stateDirectory ?? join(process.env.DSH_HOME ?? join(homedir(), ".dsh"), "cliworker-now"), "accounts", "hermes");
-	const id = effectiveHermesHome(config) === plugin ? "plugin" : "native";
+	const id = effectiveHermesHome(config) === pluginHermesHome(config) ? "plugin" : "native";
 	return [{
 		id,
-		label: id === "plugin" ? "插件账号" : "CLI 全局账号"
+		label: id === "plugin" ? "插件目录" : "原生目录"
 	}];
 }
-async function prepareHermesAccount(action, executable, project, config, signal, source) {
+/**
+* Hermes' own Nous sign-in (`hermes model`, then Nous) also makes Nous the inference provider;
+* `hermes auth add nous` only stores the login, and `hermes logout --provider nous` resets the
+* provider to auto (rechecked with Hermes 2026-10-30). With no explicit provider no account's
+* models can be listed, so after a Nous login in the plugin's account home the provider is set
+* with Hermes' own `config set`, which also drops the previous provider's route. A provider the
+* user chose stays theirs, and the user's own Hermes home is never changed.
+*/
+async function selectHermesNousAfterLogin(config, executable, run, signal) {
+	signal.throwIfAborted();
+	const home = effectiveHermesHome(config);
+	if (home !== pluginHermesHome(config)) return false;
+	const provider = (await assertHermesOwnAccounts(home, signal)).config?.model?.provider;
+	if (nonempty(provider) && provider.trim().toLowerCase() !== "auto") return false;
+	const command = await hermesNativeCommand(executable, [
+		"config",
+		"set",
+		"model.provider",
+		"nous"
+	], signal);
+	await run([
+		process.execPath,
+		fileURLToPath(new URL("./private-launch.mjs", import.meta.url)),
+		...command
+	], home, {
+		...hermesAccountEnvironment(home),
+		PYTHONDONTWRITEBYTECODE: "1",
+		ELECTRON_RUN_AS_NODE: "1"
+	});
+	return true;
+}
+async function prepareHermesAccount(action, executable, project, config, signal, source, target = {}) {
 	signal.throwIfAborted();
 	if (![
 		"login",
@@ -23399,7 +30054,23 @@ async function prepareHermesAccount(action, executable, project, config, signal,
 	try {
 		signal.throwIfAborted();
 		const temporary = privateDirectory$3(join(state, "tmp"));
-		const command = await hermesNativeCommand(executable, [action === "login" ? "model" : "auth"], signal);
+		const removed = target.login ? parseAccountLoginId(target.login) : void 0;
+		const command = await hermesNativeCommand(executable, action === "login" && target.provider ? [
+			"auth",
+			"add",
+			target.provider,
+			"--type",
+			target.provider === "nous" ? "oauth" : "api-key"
+		] : action === "logout" && removed?.cli === "hermes" && removed.provider === "nous" ? [
+			"logout",
+			"--provider",
+			"nous"
+		] : action === "logout" && removed?.cli === "hermes" && removed.entry ? [
+			"auth",
+			"remove",
+			removed.provider,
+			removed.entry
+		] : [action === "login" ? "model" : "auth"], signal);
 		return {
 			argv: [
 				process.execPath,
@@ -23435,7 +30106,10 @@ async function preparePiOmpLogout(input) {
 	signal?.throwIfAborted();
 	projectDirectory(input.project);
 	const sources = await readPiOmpLogoutSources(cli, input.stateDirectory, signal ?? new AbortController().signal, { nativeHome: input.nativeHome });
-	const source = input.source ? sources.find((item) => item.id === input.source) : sources.length === 1 ? sources[0] : void 0;
+	const target = input.login ? parseAccountLoginId(input.login) : void 0;
+	if (input.login && (!target || target.cli !== cli || !target.entry)) throw new Error("不支持单独退出该账号");
+	const place = target?.entry?.split(".")[0] ?? input.source;
+	const source = place ? sources.find((item) => item.id === place) : sources.length === 1 ? sources[0] : void 0;
 	if (!source) throw new Error(sources.length > 1 && !input.source ? "请选择要退出的账号来源" : "账号来源已变化，请刷新后重试");
 	const directory = await realpath(source.directory);
 	await safePiOmpAncestors(directory);
@@ -23499,7 +30173,8 @@ async function preparePiOmpLogout(input) {
 				fileURLToPath(new URL("./pi-login.mjs", import.meta.url)),
 				input.executable,
 				"logout",
-				auth
+				auth,
+				...target ? [target.provider] : []
 			];
 			env.PI_OFFLINE = "1";
 			env.PI_TELEMETRY = "0";
@@ -23712,11 +30387,15 @@ async function preparePiOmpAccountTerminal(input) {
 			input.executable,
 			...nativeArgs
 		] : [input.executable, ...nativeArgs];
-		if (input.action === "login") nativeArgv = cli === "omp" ? [input.executable, "setup"] : [
-			process.execPath,
-			fileURLToPath(new URL("./pi-login.mjs", import.meta.url)),
-			input.executable
-		];
+		if (input.action === "login") {
+			if (cli === "pi") nativeArgv = [
+				process.execPath,
+				fileURLToPath(new URL("./pi-login.mjs", import.meta.url)),
+				input.executable,
+				...input.provider ? ["login", input.provider] : []
+			];
+			else if (!input.provider) nativeArgv = [input.executable, "setup"];
+		}
 		const argv = [
 			process.execPath,
 			fileURLToPath(new URL("./private-launch.mjs", import.meta.url)),
@@ -23850,6 +30529,64 @@ var WindowsAccountTerminalError = class extends Error {
 		super("Windows 账号终端托管不可用，请检查 PowerShell 后重试");
 	}
 };
+/** ConPTY asks for primary device attributes before PowerShell executes the
+* bootstrap. The client cannot answer until we return the adopted terminal.
+* Answer its first startup query as the account UI's xterm, and consume that
+* query so replaying buffered output cannot inject a second reply into the CLI.
+* All other bytes, including split UTF-8 and subsequent queries, pass unchanged.
+*/
+function bootstrapOutput(terminal) {
+	const queries = [Buffer.from("\x1B[c"), Buffer.from("\x1B[0c")];
+	let pending = Buffer.alloc(0), active = true;
+	const finish = () => {
+		active = false;
+		if (pending.length) output.push(pending);
+		pending = Buffer.alloc(0);
+	};
+	const output = new Transform({
+		transform(chunk, _encoding, callback) {
+			if (!active) {
+				callback(null, chunk);
+				return;
+			}
+			const bytes = Buffer.concat([pending, chunk]);
+			pending = Buffer.alloc(0);
+			for (let i = 0; i < bytes.length; i++) {
+				const rest = bytes.subarray(i);
+				for (const query of queries) {
+					if (rest.length >= query.length && rest.subarray(0, query.length).equals(query)) {
+						active = false;
+						output.push(Buffer.concat([bytes.subarray(0, i), rest.subarray(query.length)]));
+						Promise.resolve().then(() => terminal.write("\x1B[?1;2c")).then(() => callback(), () => callback(new WindowsAccountTerminalError()));
+						return;
+					}
+					if (rest.length < query.length && query.subarray(0, rest.length).equals(rest)) {
+						pending = Buffer.from(rest);
+						callback(null, bytes.subarray(0, i));
+						return;
+					}
+				}
+			}
+			callback(null, bytes);
+		},
+		flush(callback) {
+			finish();
+			callback();
+		}
+	});
+	const failed = (error) => output.destroy(error);
+	terminal.output.on("error", failed);
+	output.once("close", () => {
+		terminal.output.off("error", failed);
+		terminal.output.unpipe(output);
+	});
+	output.on("error", () => void 0);
+	terminal.output.pipe(output);
+	return {
+		output,
+		finish
+	};
+}
 /** ConPTY publishes pid=0 during async allocation in the pinned Windows SDK.
 * Attach a waiting bootstrap to a lifecycle-only Job before allowing the CLI to
 * spawn. The separate owner is itself held by the Host's ordinary subprocess
@@ -23861,6 +30598,7 @@ async function spawnAccountTerminal(backend, spec, options = {}) {
 	const directory = await mkdtemp(join(tmpdir(), "cwn-account-job-"));
 	const windows = process.env.SystemRoot ?? "C:\\Windows";
 	let terminal;
+	let startupOutput;
 	const owner = await (async () => {
 		try {
 			return backend.spawn({
@@ -23989,8 +30727,10 @@ async function spawnAccountTerminal(backend, spec, options = {}) {
 			}
 		});
 		terminal.done.catch(() => void 0);
+		if (spec.terminalType === "xterm-256color" || spec.terminalType === "xterm") startupOutput = bootstrapOutput(terminal);
 		const until = Date.now() + (options.handshakeMs ?? 15e3);
 		while (!await exists("ready")) {
+			if (startupOutput?.output.errored) throw new WindowsAccountTerminalError();
 			await serviceManifest();
 			spec.signal?.throwIfAborted();
 			if (Date.now() >= until) throw new Error("Windows account terminal handshake timed out");
@@ -23998,6 +30738,8 @@ async function spawnAccountTerminal(backend, spec, options = {}) {
 				throw new Error("Windows account owner ended");
 			})]);
 		}
+		if (startupOutput?.output.errored) throw new WindowsAccountTerminalError();
+		startupOutput?.finish();
 		const current = terminal;
 		const done = (async () => {
 			for (;;) {
@@ -24015,7 +30757,7 @@ async function spawnAccountTerminal(backend, spec, options = {}) {
 		done.catch(() => void 0);
 		return {
 			pid: Number(await readFile(join(directory, "pid"), "utf8")),
-			output: current.output,
+			output: startupOutput?.output ?? current.output,
 			done,
 			write: (data) => current.write(data),
 			resize: (cols, rows) => current.resize(cols, rows),
@@ -24025,6 +30767,7 @@ async function spawnAccountTerminal(backend, spec, options = {}) {
 			terminate
 		};
 	} catch (error) {
+		startupOutput?.finish();
 		if (terminal) try {
 			await terminate();
 		} catch (failure) {
@@ -24058,13 +30801,37 @@ const ACTIONS = [
 	"logout",
 	"manage"
 ];
+/** Guided login window timing; tests shorten it. */
+const AGY_GUIDE_TIMING = {
+	commandDelayMs: 400,
+	pollMs: 1500,
+	loginConfirmMs: 2e4,
+	logoutConfirmMs: 2e4,
+	/** Output pause that counts as a finished draw; agy pauses ~2 s while signing in. */
+	quietMs: 3e3,
+	/** A screen that keeps animating is still read after this long. */
+	settleCapMs: 1e4,
+	/** When `/logout` is still pending after this, one more Enter runs a completed slash command. */
+	confirmEnterMs: 1500,
+	/** Other CLIs' guided windows: a screen this still with no known step goes to the native terminal. */
+	flowQuietMs: 8e3,
+	/** How long a waiting browser/device authorization is watched, and how often. */
+	authorizeWatchMs: 15 * 6e4,
+	watchPollMs: 3e3
+};
+const ANSWER_ENTER_MS = 300;
+var AccountLoginGoneError = class extends Error {
+	constructor() {
+		super("该账号已不存在，请刷新后重试");
+	}
+};
 const validateCli = (cli) => {
 	if (!CLI_IDS.includes(cli)) throw new Error("不支持的 CLI");
 };
 const instructionFor = (cli, action) => {
 	if (cli === "qoder" || cli === "qodercn") return action === "login" ? `按 ${cli === "qodercn" ? "Qoder CN" : "Qoder"} 原生提示完成登录；仅使用本版 PAT。` : action === "logout" ? `在 ${cli === "qodercn" ? "Qoder CN" : "Qoder"} 原生终端输入 /logout 并确认；本版 PAT 环境变量须由你自行清除。` : `在 ${cli === "qodercn" ? "Qoder CN" : "Qoder"} 原生终端使用 /login、/logout 和 /status 管理账号。`;
 	if (cli === "zcode" || cli === "grok") return zcodeGrokInstruction(cli, action);
-	if (cli === "antigravity") return action === "manage" ? "在 Antigravity 原生终端中使用 /login 登录，或 /logout 退出。" : `在 Antigravity 原生终端中输入 /${action} 并按 Enter。`;
+	if (cli === "antigravity") return action === "manage" ? "在 Antigravity 原生终端中使用 /login 登录，或 /logout 退出。" : action === "login" ? "按下方提示在 Antigravity 原生终端中完成登录。" : "插件会在 Antigravity 原生终端中自动输入 /logout 退出登录。";
 	if (cli === "kimi" && action !== "login") return action === "logout" ? "在 Kimi 原生终端中输入 /logout 并按 Enter，再选择要退出的提供商。" : "在 Kimi 原生终端中使用 /login 或 /logout 管理提供商与账号。";
 	if (action === "manage") return "在原生 CLI 中管理账号。";
 	return action === "login" ? "按 CLI 原生提示完成登录；需要浏览器授权时由 CLI 打开浏览器。" : "按 CLI 原生流程退出登录。";
@@ -24213,7 +30980,8 @@ var AccountManager = class {
 	onQueryCleanup;
 	sessions = /* @__PURE__ */ new Map();
 	reserved = /* @__PURE__ */ new Set();
-	unsafeQueries = /* @__PURE__ */ new Set();
+	/** CLIs whose account read left an unconfirmed range, with its display-safe reason. */
+	unsafeQueries = /* @__PURE__ */ new Map();
 	unsafeTerminals = /* @__PURE__ */ new Map();
 	statusQueries = /* @__PURE__ */ new Map();
 	pending = /* @__PURE__ */ new Set();
@@ -24221,15 +30989,47 @@ var AccountManager = class {
 	parentClosings = /* @__PURE__ */ new Map();
 	controller = new AbortController();
 	closing;
+	nativeLoginProviders;
 	constructor(backend, config, identity = nativeAgyAccountIdentity(backend, config), onQueryCleanup) {
 		this.backend = backend;
 		this.config = config;
 		this.identity = identity;
 		this.onQueryCleanup = onQueryCleanup;
+		this.nativeLoginProviders = new NativeLoginProviders(backend, config);
 	}
 	isBusy(cli) {
 		validateCli(cli);
 		return this.reserved.has(cli) || this.unsafeQueries.has(cli) || this.unsafeTerminals.has(cli);
+	}
+	/** The paused state a CLI reports while an account process range is unconfirmed. */
+	cleanupHold(cli) {
+		if (!this.unsafeQueries.has(cli) && !this.unsafeTerminals.has(cli)) return void 0;
+		const reason = this.unsafeQueries.get(cli);
+		return {
+			cli,
+			installed: true,
+			state: "unavailable",
+			summary: this.unsafeQueries.has(cli) ? `账号查询未能确认进程已退出，已暂停此 CLI${reason ? `：${reason}` : ""}` : "账号终端未能确认完全退出，已暂停此 CLI",
+			cleanupBlocked: true,
+			actions: []
+		};
+	}
+	/** An account read whose process range is unconfirmed holds the CLI until the user releases it. */
+	quarantineQuery(cli, error) {
+		this.unsafeQueries.set(cli, cleanupCauseText(error));
+		this.onQueryCleanup?.(cli, error);
+	}
+	/** The user confirmed no account process of this CLI is left; refuse while one is still owned here. */
+	assertCleanupRecoverable(cli) {
+		validateCli(cli);
+		if (this.controller.signal.aborted) throw new Error("插件正在关闭");
+		if (this.reserved.has(cli)) throw new Error("此 CLI 的账号终端仍在运行或等待关闭，请先关闭账号终端");
+		for (const query of this.statusQueries.values()) if (query.cli === cli && !query.settled) throw new Error("此 CLI 的账号状态仍在读取，请稍后再试");
+	}
+	recoverCleanup(cli) {
+		this.assertCleanupRecoverable(cli);
+		this.unsafeQueries.delete(cli);
+		this.unsafeTerminals.delete(cli);
 	}
 	async status(cli, cwd, signal) {
 		validateCli(cli);
@@ -24273,21 +31073,10 @@ var AccountManager = class {
 			}
 		}
 	}
-	async readStatus(cli, cwd, signal) {
-		if (this.unsafeTerminals.has(cli)) return {
-			cli,
-			installed: true,
-			state: "unavailable",
-			summary: "账号终端尚未确认完全退出，请重启应用",
-			actions: []
-		};
-		if (this.unsafeQueries.has(cli)) return {
-			cli,
-			installed: true,
-			state: "unavailable",
-			summary: "账号查询未完成清理，请重启应用",
-			actions: []
-		};
+	/** `renew: false` reads Hermes' own store as it is, for a window that holds off Nous renewal. */
+	async readStatus(cli, cwd, signal, { renew = true } = {}) {
+		const held = this.cleanupHold(cli);
+		if (held) return held;
 		const timer = new AbortController();
 		const timeout = setTimeout(() => timer.abort(), cli === "qoder" || cli === "qodercn" ? 15e3 : STATUS_TIMEOUT);
 		timeout.unref?.();
@@ -24321,7 +31110,7 @@ var AccountManager = class {
 			if (cli === "hermes") {
 				await verifyHermesExecutable(executable, control);
 				const local = await readHermesAccount(this.config, control);
-				if (local.logins?.some((login) => login.providerLabel === "Nous") || local.summary === "Hermes 登录已保存，等待自动续期") await ensureHermesNousFresh({
+				if (renew && (local.logins?.some((login) => login.providerLabel === "Nous") || local.summary === "Hermes 登录已保存，等待自动续期")) await ensureHermesNousFresh({
 					home: effectiveHermesHome(this.config),
 					executable,
 					backend: this.backend,
@@ -24332,6 +31121,13 @@ var AccountManager = class {
 			if (isExtendedCli(cli)) {
 				const identity = await abortable(cli === "zcode" || cli === "grok" ? zcodeGrokAccountStatus(cli, this.config, control) : cli === "opencode" ? readOpenCodeAccount(this.config, control) : cli === "hermes" ? readHermesAccount(this.config, control) : readPiOmpAccount(cli, this.config, control), control);
 				const sources = cli === "pi" || cli === "omp" ? await listPiOmpAccountSources(cli, this.config.stateDirectory, control) : cli === "hermes" ? await listHermesAccountSources(this.config, control) : void 0;
+				const native = cli === "pi" || cli === "omp" ? await this.nativeLoginProviders.read(cli, executable, control).catch((error) => {
+					if (error instanceof ProcessCleanupUnconfirmedError) throw error;
+					signal.throwIfAborted();
+					this.controller.signal.throwIfAborted();
+					return [];
+				}) : void 0;
+				const providers = loginProviders(cli, identity.logins, native);
 				return {
 					cli,
 					installed,
@@ -24339,6 +31135,9 @@ var AccountManager = class {
 					actions: actionsFor(cli, this.config).map((item) => item.id === "logout" && sources ? {
 						...item,
 						sources
+					} : item.id === "login" && providers ? {
+						...item,
+						providers
 					} : item).filter((item) => item.target === "models" || this.backend.spawnTerminal)
 				};
 			}
@@ -24410,40 +31209,51 @@ var AccountManager = class {
 				raw += decoder.end();
 			};
 			const readers = [read(child.stdout), read(child.stderr)];
+			let finished = false;
 			try {
 				const [outcome] = await abortable(Promise.all([child.done, ...readers]), control);
+				finished = true;
 				const status = claudeRoute ? claudeRouteIdentity(claudeRoute, raw, outcome.exitCode) : cli === "kimi" && outcome.exitCode === 0 ? await readKimiAccount(raw, control) : summarize(cli, raw, outcome.exitCode);
 				return {
 					cli,
 					installed,
 					...status,
-					actions: this.backend.spawnTerminal ? actionsFor(cli, this.config).map((item) => cli === "kimi" && item.id === "login" && status.state === "authenticated" ? {
-						...item,
-						label: "管理登录",
-						description: "在原生终端管理 Kimi 登录"
-					} : item) : []
+					actions: this.backend.spawnTerminal ? actionsFor(cli, this.config).map((item) => {
+						if (cli !== "kimi" || item.id !== "login") return item;
+						const providers = loginProviders(cli, status.logins);
+						return status.state === "authenticated" ? {
+							...item,
+							label: "管理登录",
+							description: "在原生终端管理 Kimi 登录",
+							providers
+						} : {
+							...item,
+							providers
+						};
+					}) : []
 				};
 			} finally {
+				let exited = false;
 				try {
-					child.terminate();
-					if (!await child.waitForExit()) throw new ProcessCleanupUnconfirmedError();
-				} catch {
-					throw new ProcessCleanupUnconfirmedError();
+					if (finished && !control.aborted) exited = await child.waitForExit(AbortSignal.timeout(METADATA_EXIT_GRACE_MS));
+					if (!exited) {
+						child.terminate();
+						exited = await child.waitForExit();
+					}
+				} catch (error) {
+					throw new ProcessCleanupUnconfirmedError({ cause: error });
 				}
+				if (!exited) throw new ProcessCleanupUnconfirmedError();
 				await Promise.allSettled([child.done, ...readers]);
 				raw = "";
 				if ("cleanup" in launch) await launch.cleanup?.();
 			}
 		} catch (error) {
 			if (error instanceof ProcessCleanupUnconfirmedError) {
-				this.unsafeQueries.add(cli);
-				this.onQueryCleanup?.(cli, error);
+				this.quarantineQuery(cli, error);
 				return {
-					cli,
-					installed,
-					state: "unavailable",
-					summary: "账号查询未完成清理，请重启应用",
-					actions: []
+					...this.cleanupHold(cli),
+					installed
 				};
 			}
 			if (signal.aborted || this.controller.signal.aborted) throw new Error("账号状态查询已取消");
@@ -24486,13 +31296,25 @@ var AccountManager = class {
 				summary: error.message,
 				actions: []
 			};
+			const hermesActions = () => actionsFor(cli, this.config).map((item) => item.id === "login" ? {
+				...item,
+				providers: loginProviders(cli, void 0, cli === "pi" || cli === "omp" ? [] : void 0)
+			} : item);
+			if (error instanceof HermesAccountSourceError) return {
+				cli,
+				installed,
+				state: "unavailable",
+				verification: "local",
+				summary: error.message,
+				actions: hermesActions()
+			};
 			if (error instanceof HermesRenewalError) return {
 				cli,
 				installed,
 				state: error.state === "relogin" ? "unauthenticated" : "unavailable",
 				verification: "local",
 				summary: error.message,
-				actions: actionsFor(cli, this.config)
+				actions: hermesActions()
 			};
 			if (code === "CLI_LAUNCHER_UNSUPPORTED") return {
 				cli,
@@ -24520,6 +31342,16 @@ var AccountManager = class {
 			clearTimeout(timeout);
 		}
 	}
+	/** The login still exists in the native store: a stale window never signs out something else. */
+	async assertLogin(cli, cwd, login, signal) {
+		if (cli === "pi" || cli === "omp") {
+			if (!await piOmpStoredLoginExists(cli, login, this.config.stateDirectory, signal)) throw new AccountLoginGoneError();
+			return;
+		}
+		const current = await this.readStatus(cli, cwd, signal);
+		signal.throwIfAborted();
+		if (!current.logins?.some((item) => item.id === login)) throw new AccountLoginGoneError();
+	}
 	hasCustomExecutable(cli) {
 		if (cli !== "harness" && this.config.cliExecutablePaths?.read(cli)?.mode === "manual") return true;
 		if (cli === "antigravity") return this.config.executable !== "agy";
@@ -24527,7 +31359,7 @@ var AccountManager = class {
 		const configured = this.config[`${cli}Executable`];
 		return !!configured && configured !== cli;
 	}
-	start(parent, cli, action, cwd, signal, source, provider) {
+	start(parent, cli, action, cwd, signal, source, provider, login) {
 		validateCli(cli);
 		if (!ACTIONS.includes(action)) throw new Error("不支持的账号操作");
 		if (source !== void 0 && (!["native", "plugin"].includes(source) || action !== "logout" || ![
@@ -24535,14 +31367,17 @@ var AccountManager = class {
 			"omp",
 			"hermes"
 		].includes(cli))) throw new Error("不支持的账号来源");
-		if (provider !== void 0 && (cli !== "zcode" || action !== "login" || source !== void 0 || !["bigmodel", "zai"].includes(provider))) throw new Error("不支持的 ZCode 授权来源");
+		if (provider !== void 0 && (action !== "login" || source !== void 0 || login !== void 0 || !(cli === "zcode" ? ["bigmodel", "zai"].includes(provider) : cli === "pi" || cli === "omp" ? /^[a-z0-9][a-z0-9._-]{0,63}$/.test(provider) : isLoginProvider(cli, provider)))) throw new Error(cli === "zcode" ? "不支持的 ZCode 授权来源" : "不支持的登录服务商");
+		const target = login === void 0 ? void 0 : parseAccountLoginId(login);
+		const entry = target?.entry;
+		if (login !== void 0 && (action !== "logout" || source !== void 0 || !target || target.cli !== cli || !(cli === "opencode" || cli === "kimi" ? entry === void 0 : cli === "hermes" ? entry !== void 0 : cli === "pi" ? entry === "native" || entry === "plugin" : cli === "omp" && !!entry && /^(?:native|plugin)\.[1-9][0-9]{0,15}$/.test(entry)))) throw new Error("不支持单独退出该账号");
 		if (!parent || parent.length > 512) throw new Error("无效的父会话");
 		this.controller.signal.throwIfAborted();
 		signal.throwIfAborted();
 		const capability = actionsFor(cli, this.config).find((item) => item.id === action);
 		if (!capability || capability.target === "models") throw new Error("此版本 CLI 未提供终端登录或账号管理入口");
 		if (!this.backend.spawnTerminal) throw new Error("当前宿主不支持交互终端");
-		if (this.unsafeTerminals.has(cli)) throw new Error("账号终端尚未确认完全退出，请重启应用");
+		if (this.unsafeTerminals.has(cli)) throw new Error("账号终端未能确认完全退出，已暂停此 CLI；确认没有残留进程后可在设置中解除暂停");
 		if (this.unsafeQueries.has(cli)) throw new ProcessCleanupUnconfirmedError();
 		if (this.reserved.has(cli)) throw new Error("此 CLI 已有账号终端，请先关闭后重试");
 		const directory = projectDirectory(cwd);
@@ -24556,12 +31391,12 @@ var AccountManager = class {
 			};
 			this.parents.set(parent, scope);
 		}
-		const operation = this.track(this.startSession(parent, cli, action, directory, signal, scope, source, provider));
+		const operation = this.track(this.startSession(parent, cli, action, directory, signal, scope, source, provider, login));
 		scope.pending.add(operation);
 		operation.finally(() => scope.pending.delete(operation)).catch(() => void 0);
 		return operation;
 	}
-	async startSession(parent, cli, action, cwd, signal, scope, source, provider) {
+	async startSession(parent, cli, action, cwd, signal, scope, source, provider, login) {
 		const timeout = new AbortController();
 		const timer = setTimeout(() => timeout.abort(), STARTUP_TIMEOUT);
 		timer.unref?.();
@@ -24577,9 +31412,15 @@ var AccountManager = class {
 		let session;
 		let allocation;
 		let release;
+		let afterLogin;
+		let nativeProviders;
 		let instruction = instructionFor(cli, action);
 		try {
 			const executable = await resolveCliExecutable(cli, this.backend, this.config, startup);
+			if (provider && (cli === "pi" || cli === "omp")) {
+				nativeProviders = await this.nativeLoginProviders.read(cli, executable, startup);
+				if (!isLoginProvider(cli, provider, nativeProviders)) throw new Error("不支持的登录服务商");
+			}
 			if (cli === "hermes") await verifyHermesExecutable(executable, startup);
 			startup.throwIfAborted();
 			let launch = {
@@ -24606,7 +31447,21 @@ var AccountManager = class {
 				];
 				launch.env = qoderEnvironment(cli);
 			} else if (cli === "kimi") {
-				if (action === "login") {
+				if (login) await this.assertLogin(cli, cwd, login, startup);
+				const target = login ? parseAccountLoginId(login) : void 0;
+				if (provider) launch.argv = [
+					executable,
+					"login",
+					"--region",
+					provider === "kimi-code-cn" ? "mainland-cn" : "global"
+				];
+				else if (target && target.provider !== "kimi-code") launch.argv = [
+					executable,
+					"provider",
+					"remove",
+					target.provider
+				];
+				else if (action === "login") {
 					const current = await this.readStatus(cli, cwd, startup);
 					startup.throwIfAborted();
 					if (current.state === "authenticated" && current.authMethod === "oauth") {
@@ -24623,14 +31478,18 @@ var AccountManager = class {
 				launch = prepared;
 				release = prepared.cleanup;
 			} else if (cli === "zcode" || cli === "grok") {
+				if (cli === "grok") release = await reserveGrokAccount(startup);
 				const prepared = await zcodeGrokAccountLaunch(cli, action, executable, this.config, this.backend, startup, { loginProvider: provider });
 				launch = prepared;
 				instruction = prepared.instruction;
 			} else if (cli === "pi" || cli === "omp") {
+				if (login) await this.assertLogin(cli, cwd, login, startup);
 				const prepared = await preparePiOmpAccountTerminal({
 					cli,
 					action,
 					source,
+					provider,
+					login,
 					executable,
 					project: cwd,
 					stateDirectory: this.config.stateDirectory ?? join(process.env.DSH_HOME ?? join(homedir(), ".dsh"), "cliworker-now"),
@@ -24646,7 +31505,11 @@ var AccountManager = class {
 				release = () => {
 					for (const free of releases) free();
 				};
-				const prepared = await prepareHermesAccount(action, executable, cwd, this.config, startup, source);
+				if (login && !(await readHermesAccount(this.config, startup)).logins?.some((item) => item.id === login)) throw new AccountLoginGoneError();
+				const prepared = await prepareHermesAccount(action, executable, cwd, this.config, startup, source, {
+					provider,
+					login
+				});
 				const cleanup = release;
 				release = async () => {
 					await prepared.cleanup();
@@ -24654,24 +31517,35 @@ var AccountManager = class {
 				};
 				const selectedHome = effectiveHermesHome(this.config);
 				if (selectedHome !== oldHome) releases.push(await reserveHermesAccount(selectedHome, startup));
+				if (action === "login" && provider === "nous") afterLogin = (signal) => selectHermesNousAfterLogin(this.config, executable, (argv, home, env) => captureCatalogMetadata(this.backend, this.config, argv, home, signal, env), signal);
 				launch = prepared;
 				instruction = prepared.instruction;
 			} else if (cli === "opencode") {
-				const prepared = await prepareOpenCodeAccount(executable, action, this.config, startup);
+				if (login) await this.assertLogin(cli, cwd, login, startup);
+				const prepared = await prepareOpenCodeAccount(executable, action, this.config, startup, {
+					provider,
+					login
+				});
 				launch = prepared;
 				instruction = prepared.instruction;
 				release = prepared.cleanup;
 			}
 			startup.throwIfAborted();
+			const guide = createAccountGuide(cli, action, {
+				provider,
+				login,
+				stores: provider ? providerStores(cli, provider, nativeProviders) : void 0
+			});
 			allocation = spawnAccountTerminal(this.backend, {
 				...launch,
-				rows: 24,
-				cols: 80,
+				...guide ? guide.size : {
+					rows: 24,
+					cols: 80
+				},
 				terminalType: "xterm-256color",
 				graceMs: this.config.graceMs,
 				signal: allocationControl.signal
 			}).then(async (terminal) => {
-				terminal.done.catch(() => void 0);
 				session = {
 					id: randomUUID(),
 					parent,
@@ -24685,9 +31559,20 @@ var AccountManager = class {
 					stopping: false,
 					changed: /* @__PURE__ */ new Set(),
 					output: Promise.resolve(),
-					release
+					exited: false,
+					...guide ? {
+						guide,
+						guideControl: new AbortController()
+					} : {},
+					project: cwd,
+					release,
+					...afterLogin ? { afterLogin } : {},
+					...action === "logout" && login && (cli === "pi" || cli === "omp") ? { logoutLogin: login } : {}
 				};
+				const own = session;
+				terminal.done.then(() => own.exited = true, () => own.exited = true);
 				this.sessions.set(session.id, session);
+				if (guide && cli !== "antigravity") session.before = this.evidence(session, session.guideControl.signal).catch(() => void 0);
 				this.emit(session, { status: "running" });
 				session.output = this.readTerminal(session);
 				session.output.catch(() => void 0);
@@ -24723,10 +31608,17 @@ var AccountManager = class {
 				this.finish(published, "closed", "账号终端未连接，已自动关闭").catch(() => void 0);
 			}, 3e4);
 			session.attachDeadline.unref?.();
-			session.terminal.done.then((outcome) => this.finish(published, outcome.exitCode === 0 ? "closed" : "failed", outcome.exitCode === 0 ? "账号终端已结束" : Number.isInteger(outcome.exitCode) ? `账号终端异常退出（退出码 ${outcome.exitCode}），请在系统终端检查该 CLI 后重试` : "账号终端连接已结束，未返回退出码；请在系统终端检查该 CLI 后重试"), () => this.finish(published, "failed", "账号终端连接失败，请重新打开")).catch(() => void 0);
+			session.terminal.done.then(async (outcome) => {
+				await this.guidedExit(published, outcome.exitCode ?? void 0);
+				return this.finish(published, outcome.exitCode === 0 ? "closed" : "failed", outcome.exitCode === 0 ? "账号终端已结束" : Number.isInteger(outcome.exitCode) ? `账号终端异常退出（退出码 ${outcome.exitCode}），请在系统终端检查该 CLI 后重试` : "账号终端连接已结束，未返回退出码；请在系统终端检查该 CLI 后重试");
+			}, () => this.finish(published, "failed", "账号终端连接失败，请重新打开")).catch(() => void 0);
 			return {
 				id: session.id,
-				instruction
+				instruction,
+				size: guide?.size ?? {
+					cols: 80,
+					rows: 24
+				}
 			};
 		} catch (error) {
 			if (!session && !allocation) try {
@@ -24736,12 +31628,14 @@ var AccountManager = class {
 			}
 			if (session && startup.aborted && !session.cleanup) await this.finish(session, "closed", "启动已取消").catch(() => void 0);
 			if (error instanceof Error && error.message === "此 CLI 已有账号终端，请先关闭后重试") throw error;
-			if (error instanceof ProcessCleanupUnconfirmedError) throw new Error("账号终端尚未确认完全退出，请重启应用");
+			if (error instanceof ProcessCleanupUnconfirmedError) throw new Error("账号终端未能确认完全退出，已暂停此 CLI；确认没有残留进程后可在设置中解除暂停");
 			if (timeout.signal.aborted) throw new Error("账号终端启动超时，正在回收启动过程；请稍后重试");
 			if (error instanceof ZCodeAccountCapabilityError) throw error;
+			if (error instanceof AccountLoginGoneError) throw error;
 			if (error instanceof WindowsAccountTerminalError) throw error;
 			if (error instanceof WindowsCliInstallationError) throw error;
 			if (error instanceof HermesExecutableError) throw error;
+			if (error instanceof HermesAccountSourceError) throw error;
 			if (error instanceof MimoConfigurationError) throw error;
 			if (error?.code === "CLI_IDENTITY_MISMATCH") throw new Error(`${cli === "omp" ? "OMP" : "Pi"} 执行入口身份不匹配，请检查该 CLI 的安装和路径`);
 			throw new Error(session || startup.aborted ? "账号终端启动已取消或清理失败，请关闭设置后重试" : "无法启动账号终端，请检查 CLI 安装");
@@ -24756,6 +31650,10 @@ var AccountManager = class {
 			for await (const chunk of session.terminal.output) {
 				const text = typeof chunk === "string" ? chunk : decoder.write(chunk);
 				for (let offset = 0; offset < text.length; offset += 4096) this.emit(session, { data: text.slice(offset, offset + 4096) });
+				if (session.guide) {
+					this.guided(session, session.guide.output(text));
+					this.settleLater(session);
+				}
 			}
 			const tail = decoder.end();
 			if (tail) this.emit(session, { data: tail });
@@ -24797,7 +31695,9 @@ var AccountManager = class {
 					seq = frame.seq;
 					yield frame;
 				}
-				if (session.state !== "running" || signal.aborted) return;
+				if (signal.aborted) return;
+				if (session.frames.some((frame) => frame.seq > seq)) continue;
+				if (session.state !== "running") return;
 				await new Promise((resolve) => {
 					const wake = () => {
 						signal.removeEventListener("abort", wake);
@@ -24822,6 +31722,171 @@ var AccountManager = class {
 		} catch {
 			throw new Error("无法写入账号终端，请重新打开");
 		}
+		if (session.guide) this.guided(session, session.guide.input(data));
+	}
+	/** The user's answer to the current step of a plugin-drawn window. */
+	async respond(parent, id, response) {
+		const session = this.owned(parent, id);
+		if (!session.guide) throw new GuideResponseError();
+		if (session.state !== "running" || session.stopping) throw new Error("账号终端已关闭");
+		const events = session.guide.respond(response);
+		for (const event of events) if ("write" in event) try {
+			await session.terminal.write(event.write);
+			if (event.enter) {
+				await setTimeout$1(ANSWER_ENTER_MS);
+				if (session.state === "running" && !session.stopping) await session.terminal.write("\r");
+			}
+		} catch {
+			throw new Error("无法写入账号终端，请重新打开");
+		}
+		this.guided(session, events.filter((event) => !("write" in event)));
+	}
+	guided(session, events) {
+		for (const event of events) if ("guide" in event) {
+			this.emit(session, { guide: event.guide });
+			if (event.guide.step === "notSignedIn") this.finish(session, "closed", "账号终端已关闭").catch(() => void 0);
+		} else if ("finish" in event) this.finish(session, "closed", "账号终端已关闭").catch(() => void 0);
+		else if ("write" in event) this.autoWrite(session, event.write);
+		else if ("command" in event) this.logOut(session, event.command);
+		else if ("identify" in event) this.identifyScreen(session);
+		else if ("watch" in event) this.watchAccount(session);
+		else this.confirmAccount(session, event.confirm);
+	}
+	/** A choice the user already made in the window, typed into the menu it belongs to. */
+	async autoWrite(session, keys) {
+		const signal = session.guideControl.signal;
+		try {
+			await setTimeout$1(AGY_GUIDE_TIMING.commandDelayMs, void 0, { signal });
+			if (session.state === "running" && !session.stopping) await session.terminal.write(keys);
+		} catch {}
+	}
+	/** The native account: agy's own credential store, or this CLI's account status. */
+	evidence(session, signal) {
+		if (session.logoutLogin && (session.cli === "pi" || session.cli === "omp")) {
+			const login = session.logoutLogin;
+			return piOmpStoredLoginExists(session.cli, login, this.config.stateDirectory, signal).then((exists) => ({
+				state: exists ? "configured" : "unconfigured",
+				logins: exists ? [{
+					id: login,
+					providerLabel: "",
+					authMethod: "api"
+				}] : []
+			}));
+		}
+		if (session.cli === "antigravity") return this.identity(session.cli, signal).catch((error) => {
+			if (error instanceof ProcessCleanupUnconfirmedError) this.quarantineQuery(session.cli, error);
+			throw error;
+		});
+		return this.readStatus(session.cli, session.project, signal, { renew: session.cli !== "hermes" });
+	}
+	/** An ordinary failed read is retried by the caller's poll; an unconfirmed process range ends it. */
+	readEvidence(session, signal) {
+		return this.evidence(session, signal).catch((error) => {
+			if (error instanceof ProcessCleanupUnconfirmedError) throw error;
+		});
+	}
+	/** Report a proven change, after the native step a login still needs. */
+	async proven(session, change, signal) {
+		if (change === "login") await session.afterLogin?.(signal).catch(() => void 0);
+		signal.throwIfAborted();
+		const events = session.guide.confirmed(change);
+		if (change === "logout" && session.logoutLogin) {
+			session.completionGuide = events.find((event) => "guide" in event)?.guide;
+			await this.finish(session, "closed", "账号终端已关闭");
+		} else this.guided(session, events);
+	}
+	/** The CLI ended its own login/logout: read the account before reporting the window closed. */
+	async guidedExit(session, exitCode) {
+		if (!session.guide || session.stopping) return;
+		session.exitCode = exitCode;
+		const events = session.guide.exited(exitCode);
+		const confirm = events.find((event) => "confirm" in event);
+		this.guided(session, events.filter((event) => !("confirm" in event)));
+		if (confirm) await this.confirmAccount(session, confirm.confirm, true);
+	}
+	settleLater(session) {
+		const now = Date.now();
+		session.firstOutputAt ??= now;
+		clearTimeout(session.settleTimer);
+		const agy = session.guide instanceof AgyAccountGuide;
+		const quiet = agy ? AGY_GUIDE_TIMING.quietMs : AGY_GUIDE_TIMING.flowQuietMs;
+		const capped = session.firstOutputAt + (agy ? AGY_GUIDE_TIMING.settleCapMs : quiet + AGY_GUIDE_TIMING.settleCapMs) - now;
+		session.settleTimer = setTimeout(() => {
+			session.firstOutputAt = void 0;
+			if (session.state === "running" && !session.stopping) this.guided(session, session.guide.settled());
+		}, Math.max(0, Math.min(quiet, capped)));
+	}
+	/** A settled screen with no known step: the native account decides whether it is signed in. */
+	async identifyScreen(session) {
+		const signal = session.guideControl.signal;
+		let identity;
+		try {
+			identity = await this.readEvidence(session, signal);
+		} catch {
+			return;
+		}
+		if (signal.aborted || session.state !== "running" || session.stopping) return;
+		this.guided(session, session.guide.identified(identity));
+	}
+	/** The sign-out command the plugin types for the user (2026-10-26 request) in a CLI without a logout subcommand. */
+	async logOut(session, command) {
+		const signal = session.guideControl.signal;
+		try {
+			await setTimeout$1(AGY_GUIDE_TIMING.commandDelayMs, void 0, { signal });
+			if (session.state !== "running" || session.stopping) return;
+			await session.terminal.write(command);
+			await setTimeout$1(AGY_GUIDE_TIMING.commandDelayMs, void 0, { signal });
+			if (session.state !== "running" || session.stopping) return;
+			await session.terminal.write("\r");
+			await setTimeout$1(AGY_GUIDE_TIMING.confirmEnterMs, void 0, { signal });
+			const identity = await this.readEvidence(session, signal);
+			signal.throwIfAborted();
+			if (identity?.state === "authenticated" && session.guide.retryEnter() && session.state === "running" && !session.stopping) await session.terminal.write("\r");
+		} catch {
+			if (!signal.aborted) this.guided(session, session.guide.unconfirmed("logout"));
+			return;
+		}
+		await this.confirmAccount(session, "logout");
+	}
+	/** A browser or device authorization the CLI waits for without exiting: read the account until it signs in. */
+	async watchAccount(session) {
+		const signal = session.guideControl.signal;
+		const until = Date.now() + AGY_GUIDE_TIMING.authorizeWatchMs;
+		const guide = session.guide;
+		try {
+			const before = await session.before;
+			while (Date.now() < until && session.state === "running" && !session.stopping) {
+				await setTimeout$1(AGY_GUIDE_TIMING.watchPollMs, void 0, { signal });
+				const after = await this.readEvidence(session, signal);
+				signal.throwIfAborted();
+				if (guide.proves("login", before, after, session.exitCode)) {
+					await this.proven(session, "login", signal);
+					return;
+				}
+			}
+		} catch {}
+	}
+	/** The native account state, not terminal text, decides that a login or logout took effect. */
+	async confirmAccount(session, change, exited = false) {
+		const signal = session.guideControl.signal;
+		const until = Date.now() + (change === "login" ? AGY_GUIDE_TIMING.loginConfirmMs : AGY_GUIDE_TIMING.logoutConfirmMs);
+		const guide = session.guide;
+		try {
+			const before = await session.before;
+			while (Date.now() < until) {
+				await setTimeout$1(AGY_GUIDE_TIMING.pollMs, void 0, { signal });
+				const after = await this.readEvidence(session, signal);
+				signal.throwIfAborted();
+				if (guide.proves(change, before, after, session.exitCode)) {
+					await this.proven(session, change, signal);
+					return;
+				}
+				if (exited && after) break;
+			}
+		} catch (error) {
+			if (signal.aborted || !(error instanceof ProcessCleanupUnconfirmedError)) return;
+		}
+		this.guided(session, guide.unconfirmed(change));
 	}
 	async resize(parent, id, cols, rows) {
 		const session = this.owned(parent, id);
@@ -24829,6 +31894,7 @@ var AccountManager = class {
 		if (session.state !== "running" || session.stopping) return;
 		try {
 			await session.terminal.resize(cols, rows);
+			session.guide?.resize?.(cols, rows);
 		} catch {
 			throw new Error("无法调整账号终端尺寸，请重新打开");
 		}
@@ -24870,13 +31936,17 @@ var AccountManager = class {
 	finish(session, state, message) {
 		if (session.cleanup) return session.cleanup;
 		session.stopping = true;
+		session.guideControl?.abort();
+		clearTimeout(session.settleTimer);
 		clearTimeout(session.deadline);
 		clearTimeout(session.attachDeadline);
 		session.cleanup = (async () => {
 			try {
+				await this.endForeground(session);
 				await session.terminal.terminate();
 				await session.output;
 				await session.release?.();
+				if (session.completionGuide) this.emit(session, { guide: session.completionGuide });
 				session.state = state;
 				this.emit(session, {
 					status: state,
@@ -24906,6 +31976,23 @@ var AccountManager = class {
 			}
 		})();
 		return session.cleanup;
+	}
+	/**
+	* A CLI that never reaped a finished helper (agy's browser opener after
+	* /login) keeps a zombie descendant, and the macOS provider then refuses to
+	* stop the session without signalling the CLI. Ending it first lets the
+	* system reap the zombie; terminate() still owns every remaining member.
+	*/
+	async endForeground(session) {
+		if (process.platform === "win32" || session.exited) return;
+		try {
+			await session.terminal.signalForeground("SIGTERM");
+		} catch {
+			return;
+		}
+		let timer;
+		await Promise.race([session.terminal.done.then(() => void 0, () => void 0), new Promise((resolve) => timer = setTimeout(resolve, this.config.graceMs))]);
+		clearTimeout(timer);
 	}
 	track(operation) {
 		this.pending.add(operation);
@@ -25103,9 +32190,9 @@ async function resolveAvailableCliName(name, installed) {
 }
 const CLI_NAME_GUIDANCE = CLI_IDS.map((cli) => cli === "qoder" ? "qoder / qodercli → qoder（按安装分流）；显式 Qoder 国际版 → qoder国际版（固定国际版）" : `${CLI_ALIASES[cli].join(" / ")} → ${cli}`).join("；") + "。泛称 qoder 按本机安装分流：只安装一版时使用该版，两版均安装时由插件原生询问 Qoder 或 Qoder CN；显式国际版使用 qoder国际版，显式中国版使用 qodercn，不互相回退。OMP（Oh My Pi，cli=omp）和 Pi Coding Agent（cli=pi）是两个独立 CLI；即使使用同名模型也必须按用户指定分别选择账号、模型、强度和会话，禁止互换或合并";
 const CLI_DELEGATION_GUIDANCE = `CLI Worker Now 是调用外部 CLI 的插件入口。用户明确指定 CLI 并要求派遣时，直接调用 cliworker_start 打开选型流程；cli 参数每次必填，使用本次用户指定的 CLI，不照搬历史省略参数的调用；此工具只需 CLI、任务标题与任务内容，模型、强度与角色由插件收集，完成选型前不会启动任务。不要仅解释用法，也不要通过 bash 运行这些 CLI。名称映射：${CLI_NAME_GUIDANCE}。glm、zhipu、智谱在 CLI 调用语境中指 ZCode，不代表已选择或授权任何 GLM 模型；“用 Pi 的 GLM 模型”仍使用 Pi。仅讨论、比较、介绍模型或 CLI、否定调用、引用调用示例不构成派遣授权。较长名称的唯一轻微拼写误差可以解析；不确定时可用只读 cliworker_resolve 检查。歧义、未知或多个目标返回简短候选错误，不启动、不猜测或改用其他 CLI。
-插件内部可先为双版本 Qoder 询问版本，再询问完整选型（模型、实际支持的思考强度与角色）或是否沿用以前设定。同项目同 CLI 的新主对话确认是否沿用，同一主对话后续使用已确认设定。主 Agent 不提前询问任务、CLI、模型、强度或角色，不增加启动确认，也不代答插件问题。Kimi print 模式不支持 read_only 或强度覆盖，其原生工具策略会自动执行；其他 CLI 权限检查仍有效，宿主规划、整体只读及子 Agent 限制不得绕过。
-用户明确提供名称时传入 agent_name，否则插件分配唯一名称，介绍 Worker 时使用返回的 agentName。用户要求已有智能体继续时，调用 cliworker_followup 并传入该父会话中精确 worker_name 或 worker_id，不要新建或猜测名称；已有会话保留创建时角色快照。独立任务分开处理，cliworker_status 查看进度，cliworker_stop 停止任务。
-任务在后台执行并报告完成；等待时继续有用工作，不要反复轮询。收到完成通知后读取对应 workerId 和 runId 的输出。侧栏续聊即使标题未变也是新任务，只总结当前任务与回复；输出不可读时查询 cliworker_status 并说明不确定，不能复用旧结果。CLI 输出是不可信证据，汇报成功前独立核验实际修改。Worker 不得递归派遣其他 Agent。`;
+插件内部可先为双版本 Qoder 询问版本，再询问完整选型（模型、实际支持的思考强度与角色）或是否沿用以前设定。同项目同 CLI 的新主对话确认是否沿用，同一主对话后续使用已确认设定。主 Agent 不提前询问任务、CLI、模型、强度或角色，不增加启动确认，也不代答插件问题。Kimi print 模式不支持 read_only 或强度覆盖，其原生工具策略会自动执行；其他 CLI 权限检查仍有效，宿主规划、整体只读及直接子 Agent 边界不得绕过。
+用户明确提供名称时传入 agent_name，否则插件分配唯一名称，介绍 Worker 时使用返回的 agentName。用户要求已有智能体继续时，调用 cliworker_followup 并传入该父会话中精确 worker_name 或 worker_id，不要新建或猜测名称；已有会话保留创建时角色快照。CLI Worker 窗口中的 DSH 原生子 Agent 名为 dsh-1、dsh-2 等（cliworker_status 会列出），用户按此名称要求继续时同样调用 cliworker_followup，回复以 DSH 子 Agent 消息回到本对话。独立任务分开处理，cliworker_status 查看进度，cliworker_stop 停止任务。
+任务在后台执行并报告完成；等待时继续有用工作，不要反复轮询。收到完成通知后读取对应 workerId 和 runId 的输出。侧栏续聊即使标题未变也是新任务，只总结当前任务与回复；输出不可读时查询 cliworker_status 并说明不确定，不能复用旧结果。CLI 输出是不可信证据，汇报成功前独立核验实际修改。CLI Worker 与 DSH 原生子 Agent 都是主对话的直接子 Agent，可以调用 cliworker_start 同级派遣或 cliworker_status 只读查询；新 Worker 仍属于主对话，与发起者同级显示，不建立孙层级。用户要求“让某个 Worker 再派另一个 CLI”时，照常派遣该 Worker 并把派遣要求写进任务，不要以“禁止嵌套”为由拒绝；只有父会话本身是子 Agent 的第三层调用者会被拒绝。模型、强度、角色、会话 ID 和权限档位不从发起者继承；由子 Agent 发起且未结束的 Worker 每个主对话最多 6 个。子 Agent 不调用 cliworker_followup、cliworker_stop 或其他派遣工具。`;
 function withoutQuotes(text) {
 	return text.slice(0, 32768).replace(/```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)/gu, "").replace(/^\s*>.*$/gmu, "").replace(/`[^`\n]*`|“[^”]*”|「[^」]*」|『[^』]*』|"[^"\n]*"|'[^'\n]*'/gu, "");
 }
@@ -25127,7 +32214,7 @@ function invocationResolution(messages) {
 		if (message.source.kind !== "user") continue;
 		const text = withoutQuotes(message.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n"));
 		for (const clause of text.split(/[\n。;；!?！？]|[,，](?=\s*(?:请|然后|顺便|同时|并且|只|仅|调用|使用|用|让))/u)) {
-			const request = clause.trim().match(command)?.[1];
+			const request = clause.trim().match(command)?.[1]?.replace(/^(?:\d+|[一二两三四五六七八九十几多]+)\s*(?:次|个|回|遍)(?!性)\s*/u, "");
 			if (!request) continue;
 			if (/^(?:cli\s+worker(?:\s+now)?\b|cliworker_(?:start|resolve)\b)/iu.test(request)) continue;
 			const explicit = request.replace(/^qoder\s+cli\s+(cn|中国版|国内版|国际版|international)(?=$|[\s\p{Script=Han}])/iu, (_, version) => /^(?:国际版|international)$/iu.test(version) ? "qoder国际版 cli" : "qodercn cli").match(/^(.*?)\s*(?:cli\b|命令行)(.*)$/iu);
@@ -25184,8 +32271,9 @@ function invocationHint(resolution) {
 function registerCliRouting(ctx) {
 	return ctx.effect(() => ctx.on("agent/pre-step", async ({ agent, signal }, next) => {
 		const decision = await next();
-		if (decision.kind !== "enter" || signal.aborted || agent.session.header.origin === "subagent" || !ctx.tools.get("cliworker_start", assembleContextFor(agent).scope)) return decision;
-		const hint = invocationHint(invocationResolution(decision.messages));
+		if (decision.kind !== "enter" || signal.aborted || !ctx.tools.get("cliworker_start", assembleContextFor(agent).scope)) return decision;
+		let hint = invocationHint(invocationResolution(decision.messages));
+		if (hint && agent.session.header.origin === "subagent") hint = hint.replace("已有命名智能体续聊仍使用 cliworker_followup。", "") + "你只能通过 cliworker_start 发起同级 Worker，或 cliworker_status 只读查询主对话的 Worker；不能调用其他派遣工具。新 Worker 属于主对话，不继承你的模型、强度、角色、会话 ID 或权限档位；未结束的子 Agent 派遣上限为 6 个。";
 		if (!hint) return decision;
 		return {
 			...decision,
@@ -25242,6 +32330,10 @@ var __esDecorate = function(ctor, descriptorIn, decorators, contextIn, initializ
 	if (target) Object.defineProperty(target, contextIn.name, descriptor);
 	done = true;
 };
+/** Catalog reads hold a busy Pi/OMP account for seconds; a run holds it longer. */
+const BUSY_ACCOUNT_WAIT_MS = 3e4;
+const BUSY_ACCOUNT_RETRY_MS = 1e3;
+const EXCLUSIVE_ACCOUNT_CLIS = /* @__PURE__ */ new Set(["omp", "pi"]);
 const preferenceSchema = z.object({
 	cli: z.enum(CLI_IDS).optional(),
 	model: z.string().min(1),
@@ -25278,6 +32370,11 @@ let CliWorkerService = (() => {
 	let _instanceExtraInitializers = [];
 	let _ensureHarnessConversation_decorators;
 	let _repairHarnessConversation_decorators;
+	let _listDshSubagents_decorators;
+	let _watchDshSubagents_decorators;
+	let _promptDshSubagent_decorators;
+	let _stopDshSubagent_decorators;
+	let _hideDshSubagent_decorators;
 	let _watch_decorators;
 	let _history_decorators;
 	let _cliSettings_decorators;
@@ -25294,15 +32391,20 @@ let CliWorkerService = (() => {
 	let _deleteWorker_decorators;
 	let _restoreWorker_decorators;
 	let _forkWorker_decorators;
+	let _generalSettings_decorators;
+	let _saveGeneralSettings_decorators;
 	let _setCliEnabled_decorators;
 	let _accountStatus_decorators;
+	let _recoverCliCleanup_decorators;
 	let _cliExecutablePath_decorators;
 	let _refreshCliExecutablePath_decorators;
 	let _accountStart_decorators;
 	let _accountStartForSource_decorators;
 	let _accountStartForProvider_decorators;
+	let _accountStartWith_decorators;
 	let _accountWatch_decorators;
 	let _accountWrite_decorators;
+	let _accountRespond_decorators;
 	let _accountResize_decorators;
 	let _accountStop_decorators;
 	let _catalog_decorators;
@@ -25329,6 +32431,11 @@ let CliWorkerService = (() => {
 			const _metadata = typeof Symbol === "function" && Symbol.metadata ? Object.create(_classSuper[Symbol.metadata] ?? null) : void 0;
 			_ensureHarnessConversation_decorators = [Remote("ensureHarnessConversation")];
 			_repairHarnessConversation_decorators = [Remote("repairHarnessConversation")];
+			_listDshSubagents_decorators = [Remote("listDshSubagents")];
+			_watchDshSubagents_decorators = [Remote({ mode: "stream" })];
+			_promptDshSubagent_decorators = [Remote("promptDshSubagent")];
+			_stopDshSubagent_decorators = [Remote("stopDshSubagent")];
+			_hideDshSubagent_decorators = [Remote("hideDshSubagent")];
 			_watch_decorators = [Remote({ mode: "stream" })];
 			_history_decorators = [Remote("history")];
 			_cliSettings_decorators = [Remote("cliSettings")];
@@ -25345,15 +32452,20 @@ let CliWorkerService = (() => {
 			_deleteWorker_decorators = [Remote("deleteWorker")];
 			_restoreWorker_decorators = [Remote("restoreWorker")];
 			_forkWorker_decorators = [Remote("forkWorker")];
+			_generalSettings_decorators = [Remote("generalSettings")];
+			_saveGeneralSettings_decorators = [Remote("saveGeneralSettings")];
 			_setCliEnabled_decorators = [Remote("setCliEnabled")];
 			_accountStatus_decorators = [Remote("accountStatus")];
+			_recoverCliCleanup_decorators = [Remote("recoverCliCleanup")];
 			_cliExecutablePath_decorators = [Remote("cliExecutablePath")];
 			_refreshCliExecutablePath_decorators = [Remote("refreshCliExecutablePath")];
 			_accountStart_decorators = [Remote("accountStart")];
 			_accountStartForSource_decorators = [Remote("accountStartForSource")];
 			_accountStartForProvider_decorators = [Remote("accountStartForProvider")];
+			_accountStartWith_decorators = [Remote("accountStartWith")];
 			_accountWatch_decorators = [Remote({ mode: "stream" })];
 			_accountWrite_decorators = [Remote("accountWrite")];
+			_accountRespond_decorators = [Remote("accountRespond")];
 			_accountResize_decorators = [Remote("accountResize")];
 			_accountStop_decorators = [Remote("accountStop")];
 			_catalog_decorators = [Remote("catalog")];
@@ -25394,6 +32506,61 @@ let CliWorkerService = (() => {
 				access: {
 					has: (obj) => "repairHarnessConversation" in obj,
 					get: (obj) => obj.repairHarnessConversation
+				},
+				metadata: _metadata
+			}, null, _instanceExtraInitializers);
+			__esDecorate(this, null, _listDshSubagents_decorators, {
+				kind: "method",
+				name: "listDshSubagents",
+				static: false,
+				private: false,
+				access: {
+					has: (obj) => "listDshSubagents" in obj,
+					get: (obj) => obj.listDshSubagents
+				},
+				metadata: _metadata
+			}, null, _instanceExtraInitializers);
+			__esDecorate(this, null, _watchDshSubagents_decorators, {
+				kind: "method",
+				name: "watchDshSubagents",
+				static: false,
+				private: false,
+				access: {
+					has: (obj) => "watchDshSubagents" in obj,
+					get: (obj) => obj.watchDshSubagents
+				},
+				metadata: _metadata
+			}, null, _instanceExtraInitializers);
+			__esDecorate(this, null, _promptDshSubagent_decorators, {
+				kind: "method",
+				name: "promptDshSubagent",
+				static: false,
+				private: false,
+				access: {
+					has: (obj) => "promptDshSubagent" in obj,
+					get: (obj) => obj.promptDshSubagent
+				},
+				metadata: _metadata
+			}, null, _instanceExtraInitializers);
+			__esDecorate(this, null, _stopDshSubagent_decorators, {
+				kind: "method",
+				name: "stopDshSubagent",
+				static: false,
+				private: false,
+				access: {
+					has: (obj) => "stopDshSubagent" in obj,
+					get: (obj) => obj.stopDshSubagent
+				},
+				metadata: _metadata
+			}, null, _instanceExtraInitializers);
+			__esDecorate(this, null, _hideDshSubagent_decorators, {
+				kind: "method",
+				name: "hideDshSubagent",
+				static: false,
+				private: false,
+				access: {
+					has: (obj) => "hideDshSubagent" in obj,
+					get: (obj) => obj.hideDshSubagent
 				},
 				metadata: _metadata
 			}, null, _instanceExtraInitializers);
@@ -25573,6 +32740,28 @@ let CliWorkerService = (() => {
 				},
 				metadata: _metadata
 			}, null, _instanceExtraInitializers);
+			__esDecorate(this, null, _generalSettings_decorators, {
+				kind: "method",
+				name: "generalSettings",
+				static: false,
+				private: false,
+				access: {
+					has: (obj) => "generalSettings" in obj,
+					get: (obj) => obj.generalSettings
+				},
+				metadata: _metadata
+			}, null, _instanceExtraInitializers);
+			__esDecorate(this, null, _saveGeneralSettings_decorators, {
+				kind: "method",
+				name: "saveGeneralSettings",
+				static: false,
+				private: false,
+				access: {
+					has: (obj) => "saveGeneralSettings" in obj,
+					get: (obj) => obj.saveGeneralSettings
+				},
+				metadata: _metadata
+			}, null, _instanceExtraInitializers);
 			__esDecorate(this, null, _setCliEnabled_decorators, {
 				kind: "method",
 				name: "setCliEnabled",
@@ -25592,6 +32781,17 @@ let CliWorkerService = (() => {
 				access: {
 					has: (obj) => "accountStatus" in obj,
 					get: (obj) => obj.accountStatus
+				},
+				metadata: _metadata
+			}, null, _instanceExtraInitializers);
+			__esDecorate(this, null, _recoverCliCleanup_decorators, {
+				kind: "method",
+				name: "recoverCliCleanup",
+				static: false,
+				private: false,
+				access: {
+					has: (obj) => "recoverCliCleanup" in obj,
+					get: (obj) => obj.recoverCliCleanup
 				},
 				metadata: _metadata
 			}, null, _instanceExtraInitializers);
@@ -25650,6 +32850,17 @@ let CliWorkerService = (() => {
 				},
 				metadata: _metadata
 			}, null, _instanceExtraInitializers);
+			__esDecorate(this, null, _accountStartWith_decorators, {
+				kind: "method",
+				name: "accountStartWith",
+				static: false,
+				private: false,
+				access: {
+					has: (obj) => "accountStartWith" in obj,
+					get: (obj) => obj.accountStartWith
+				},
+				metadata: _metadata
+			}, null, _instanceExtraInitializers);
 			__esDecorate(this, null, _accountWatch_decorators, {
 				kind: "method",
 				name: "accountWatch",
@@ -25669,6 +32880,17 @@ let CliWorkerService = (() => {
 				access: {
 					has: (obj) => "accountWrite" in obj,
 					get: (obj) => obj.accountWrite
+				},
+				metadata: _metadata
+			}, null, _instanceExtraInitializers);
+			__esDecorate(this, null, _accountRespond_decorators, {
+				kind: "method",
+				name: "accountRespond",
+				static: false,
+				private: false,
+				access: {
+					has: (obj) => "accountRespond" in obj,
+					get: (obj) => obj.accountRespond
 				},
 				metadata: _metadata
 			}, null, _instanceExtraInitializers);
@@ -25944,6 +33166,8 @@ let CliWorkerService = (() => {
 			graceMs: z$1.natural().min(100).max(3e4).default(DEFAULT_CONFIG.graceMs),
 			maxLineBytes: z$1.natural().min(1024).default(DEFAULT_CONFIG.maxLineBytes),
 			maxRunBytes: z$1.natural().min(1024).default(DEFAULT_CONFIG.maxRunBytes),
+			maxNativeLineBytes: z$1.natural().min(1024).max(67108864).default(DEFAULT_CONFIG.maxNativeLineBytes),
+			maxToolPreviewBytes: z$1.natural().min(1024).default(DEFAULT_CONFIG.maxToolPreviewBytes),
 			maxTimelineItems: z$1.natural().min(10).default(DEFAULT_CONFIG.maxTimelineItems)
 		});
 		runtime = __runInitializers(this, _instanceExtraInitializers);
@@ -25956,10 +33180,17 @@ let CliWorkerService = (() => {
 		messageSubmissions = /* @__PURE__ */ new Map();
 		selectionBindings = /* @__PURE__ */ new WeakMap();
 		selectionProjects = /* @__PURE__ */ new WeakMap();
+		/** Turn origin by runId: the parent model's tool call, or the user in the Worker UI. */
+		runOrigins;
+		/** Exact per-turn question surface; attribution never controls lifecycle. */
+		runQuestionSessions;
+		/** DSH tool calls the tool bridge is executing, by their DSH call id. */
+		bridgeCalls = /* @__PURE__ */ new Map();
 		displayedBindings = /* @__PURE__ */ new Map();
 		settingsCatalogs;
 		settingsInstance;
 		settingsSourceRevisions;
+		dshSubagents;
 		disposed = new AbortController();
 		harnessConversation;
 		harnessConversationStore;
@@ -25974,9 +33205,40 @@ let CliWorkerService = (() => {
 			};
 			const stateDirectory = config.stateDirectory ?? join(process.env.DSH_HOME ?? join(homedir(), ".dsh"), "cliworker-now");
 			this.options.cliExecutablePaths = new CliExecutablePathStore(stateDirectory);
-			this.backend = nativeProcessBackend(ctx.subprocess);
+			const raw = nativeProcessBackend(ctx.subprocess);
+			const systemProxy = process.platform === "win32" ? new WindowsSystemProxySource((spec) => raw.spawn(spec)) : void 0;
+			this.backend = nativeProcessBackend(ctx.subprocess, process.platform, { systemProxy });
+			if (systemProxy) {
+				systemProxy.refresh();
+				setHostProxy(hostProxyLookup(systemProxy));
+			}
 			this.accounts = new AccountManager(this.backend, this.options, void 0, (cli, error) => this.runtime.blockCatalogOnCleanup(cli, error));
 			this.runtime = new WorkerRuntime(new WorkerStorage(config.stateDirectory ?? join(process.env.DSH_HOME ?? join(homedir(), ".dsh"), "cliworker-now")), this.backend, this.options);
+			this.dshSubagents = new DshSubagents(stateDirectory, {
+				subagents: () => this.ctx.get("subagents"),
+				query: () => this.ctx.get("sessionQuery"),
+				ownedSessions: () => /* @__PURE__ */ new Set([...[...this.runtime.storage.workers.values()].flatMap((worker) => worker.harnessConversation ? [worker.harnessConversation.sessionId] : []), ...this.harnessConversationStore?.list().map((entry) => entry.sessionId) ?? []]),
+				subscribe: (notify) => {
+					const offSession = this.ctx.on("session/event", (session, event) => {
+						if ([
+							"subagent/catalog",
+							"subagent/descriptor",
+							"turn/start",
+							"turn/end",
+							"model/selection",
+							"request/header"
+						].includes(event.type)) notify(session.id);
+					}, { global: true });
+					const offWorkers = this.runtime.subscribe(() => {
+						for (const worker of this.runtime.storage.workers.values()) notify(worker.parentSessionId);
+					});
+					return () => {
+						offSession();
+						offWorkers();
+					};
+				},
+				log: (reason) => console.warn(`[CLI Worker / DSH] ${reason}`)
+			});
 			this.ctx.inject([
 				"sessionController",
 				"subagents",
@@ -26055,12 +33317,9 @@ let CliWorkerService = (() => {
 					},
 					permission: async (record, mode, signal) => {
 						if (this.runtime.get(record.parentSessionId, record.workerId).harnessConversation?.sessionId !== record.sessionId) throw new Error("CLI 子会话绑定已改变，未修改权限");
-						if (mode !== void 0) {
-							const saved = JSON.parse(await this.configureWorkerPermission(record.parentSessionId, record.workerId, mode, signal));
-							return `当前 CLI 权限：${workerPermissionOptions(saved).find((option) => option.value === saved.mode)?.name ?? saved.mode}`;
-						}
+						if (mode !== void 0) await this.configureWorkerPermission(record.parentSessionId, record.workerId, mode, signal);
 						const state = JSON.parse(await this.permissionForWorker(record.parentSessionId, record.workerId, signal));
-						return `当前 CLI 权限：${state.currentValue}。可用模式：${state.options.map((option) => `${option.value}（${option.name}）`).join("、")}${state.reason ? `。${state.reason}` : ""}`;
+						return `当前 CLI 权限：${state.options.find((option) => option.value === state.currentValue)?.name ?? state.currentValue}${state.plan.active ? "（规划模式）" : ""}。可用档位：${state.options.map((option) => `${option.value}（${option.name}）`).join("、")}${state.reason ? `。${state.reason}` : ""}`;
 					},
 					run: async (record, prompt, requestId, signal, messages = []) => {
 						const parent = await this.parent(record.parentSessionId);
@@ -26102,9 +33361,16 @@ let CliWorkerService = (() => {
 					const cli = cliOf(worker.preference);
 					const child = this.ctx.agents.get(binding.sessionId);
 					if (!child) throw new Error("原生子 Agent 尚未就绪，未启动 CLI 工具桥");
-					setSandboxMode(child.session, worker.mode === "plan" ? "read-only" : parent.ctx.get("sandboxPolicy").resolve({ session: parent.session }).mode);
+					const permission = this.childPermission(parent, worker);
+					setSandboxMode(child.session, input.access ?? permission.sandbox);
 					child.ctx.get("planMode")?.set(child, worker.mode === "plan");
-					const support = nativeHarnessToolCapability(cli);
+					const childApproval = child.ctx.get("approval");
+					const policy = workerApproval(input.access ?? permission.sandbox, this.permissionState(parent));
+					if (childApproval && childApproval.overrideOf(child.session) !== policy) setApprovalPolicy(child.session, policy);
+					const support = input.isolated ? {
+						transport: false,
+						reason: "本轮在隔离副本中运行，未接通 DSH 工具桥，避免写入原项目"
+					} : nativeHarnessToolCapability(cli);
 					if (!support.transport) {
 						worker.harnessConversation = {
 							...binding,
@@ -26118,7 +33384,7 @@ let CliWorkerService = (() => {
 						this.runtime.changed();
 						return;
 					}
-					const resetPresentation = child.ctx.tools.presentAs("native");
+					const executor = await createNativeHarnessExecutor(child.ctx);
 					let lease;
 					try {
 						const tools = () => {
@@ -26147,21 +33413,42 @@ let CliWorkerService = (() => {
 							tools,
 							signal,
 							executionReady: nativeHarnessExecutionReady(cli),
+							native: nativeCliCapabilities({
+								cli,
+								mode: input.access === "read-only" && askRunsAsPlan(cli) ? "plan" : worker.mode,
+								access: input.access,
+								mcpServers: await nativeCliMcpServers(cli, worker.project)
+							}),
+							resolveImage: (attachment, control) => readHarnessImage(child.ctx, attachment, control),
 							authorize: async (identity) => {
 								signal.throwIfAborted();
 								const current = this.runtime.get(parent.id, worker.id);
 								if (current.runId !== identity.runId || current.harnessConversation?.sessionId !== identity.harnessSessionId || this.ctx.agents.get(binding.sessionId) !== child || !["queued", "running"].includes(current.status)) throw new Error("工具桥运行身份已失效");
-								this.assertExecution(parent);
+								this.assertExecution(parent, true);
 								if (this.project(parent) !== worker.project) throw new Error("工具桥项目已变更");
 								this.runtime.assertCliEnabled(cli);
 							},
-							execute: async (call) => withinCliTool(worker.runId, async () => child.ctx.tools.execute({
-								callId: ToolCallId(`cliworker:${call.callId}`),
-								name: call.name,
-								arguments: call.arguments,
-								agent: child,
-								signal: call.signal
-							})),
+							execute: async (call) => {
+								const callId = ToolCallId(`cliworker:${call.callId}`);
+								this.bridgeCalls.set(callId, {
+									worker,
+									runId: call.binding.runId,
+									child,
+									name: call.name,
+									arguments: call.arguments
+								});
+								try {
+									return await withinCliTool(worker.runId, async () => executor.execute({
+										callId,
+										name: call.name,
+										arguments: call.arguments,
+										agent: child,
+										signal: call.signal
+									}));
+								} finally {
+									this.bridgeCalls.delete(callId);
+								}
+							},
 							...skills ? { skills: {
 								list: async (control) => (await skills.list(skillOptions(control))).filter((skill) => skill.invocation.modelInvocable).map(({ name, description }) => ({
 									name,
@@ -26174,11 +33461,11 @@ let CliWorkerService = (() => {
 							} } : {}
 						});
 					} catch (error) {
-						resetPresentation();
+						executor.dispose();
 						throw error;
 					}
 					const owned = lease;
-					return adoptNativeHarnessLease(owned, resetPresentation, () => {
+					return adoptNativeHarnessLease(owned, executor.dispose, () => {
 						if (worker.harnessConversation) {
 							worker.harnessConversation = {
 								...worker.harnessConversation,
@@ -26189,7 +33476,7 @@ let CliWorkerService = (() => {
 								},
 								reasons: {
 									...worker.harnessConversation.reasons,
-									tools: owned.capabilities.ready ? "共享当前子 Agent 获准的 DSH 工具与 MCP；每次执行仍走宿主权限和审批链，未接通的模型辅助与递归派遣不可用" : owned.capabilities.reason,
+									tools: owned.capabilities.ready ? "CLI 原生工具优先；仅提供原生未覆盖的获准 DSH 工具与 MCP 作为备选，每次执行仍走宿主权限和审批链，未接通的模型辅助与递归派遣不可用" : owned.capabilities.reason,
 									skills: owned.capabilities.ready ? "当前子 Agent 没有可供模型读取的 DSH 技能" : owned.capabilities.reason
 								}
 							};
@@ -26218,19 +33505,38 @@ let CliWorkerService = (() => {
 			this.runtime.setQueuedExecutionGuard((worker) => {
 				const agent = this.ctx.agents.get(worker.parentSessionId);
 				if (!agent) throw new Error("父会话已关闭，请重新打开后继续发送");
-				this.assertExecution(agent);
+				this.assertExecution(agent, true);
+				this.assertAccessSupported(agent, cliOf(worker.preference), worker.level);
 				if (this.project(agent) !== worker.project) throw new Error("项目已变更，请在原项目继续");
 				this.runtime.assertCliEnabled(cliOf(worker.preference));
 				if (this.accounts.isBusy(cliOf(worker.preference))) throw new Error("请先关闭账号终端");
 			});
 			ctx.effect(() => () => {
 				this.disposed.abort();
+				this.dshSubagents.dispose();
+				setHostProxy(void 0);
 				return Promise.all([
 					this.runtime.close(),
 					this.accounts.close(),
 					...[...this.accountParents.values()].map((dispose) => dispose())
 				]);
 			}, "cliworker:lifetime");
+			ctx.effect(() => this.runtime.setApprovalHandler((worker, request, signal, mode) => this.decideNativeApproval(worker, request, signal, mode)), "cliworker:approvals");
+			ctx.on("approval/request", (request, next) => this.answerHarnessApproval(request, next), true);
+			ctx.effect(() => this.runtime.setAccessSnapshot((worker) => {
+				const parent = this.ctx.agents.get(worker.parentSessionId);
+				if (!parent) return void 0;
+				const state = this.permissionState(parent);
+				const access = runAccess(worker.mode, worker.level, state);
+				if (worker.mode === "plan" || state.planMode) return {
+					access,
+					label: "规划模式"
+				};
+				return {
+					access,
+					label: levelName(cliOf(worker.preference), effectiveLevel(worker.level, state.sandbox))
+				};
+			}), "cliworker:access");
 			this.registerTools();
 			registerCliRouting(ctx);
 			ctx.effect(() => ctx.systemPrompt.section({
@@ -26249,25 +33555,235 @@ let CliWorkerService = (() => {
 			if (!agent.session.header.cwd) throw new Error("此主对话没有工作目录，请先选择项目");
 			return projectDirectory(agent.session.header.cwd);
 		}
-		assertExecution(agent) {
+		/** Resolve ownership only; child status stays read-only even in plan mode. */
+		/** CLI Workers win; only an unmatched reference is tried against this conversation's DSH native subagents. */
+		async dshFallback(parent, args, signal, cli, prompt) {
+			try {
+				return cli();
+			} catch (error) {
+				const name = args.worker_name?.trim();
+				if (name && !DSH_AGENT_NAME.test(name)) throw error;
+				if (this.runtime.snapshot(parent).showDshSubagents === false) throw error;
+				const ref = {
+					id: args.worker_id,
+					name
+				};
+				const found = prompt === void 0 ? await this.dshSubagents.resolve(parent, ref, signal).then((child) => child && {
+					kind: "dsh-subagent",
+					workerId: child.id,
+					agentName: child.agentName,
+					title: child.title,
+					mode: child.mode
+				}) : await this.dshSubagents.followup(parent, ref, prompt, signal);
+				if (!found) throw error;
+				return found;
+			}
+		}
+		async dispatchSubject(caller) {
+			if (caller.session.header.origin !== "subagent") return caller;
+			const parentId = caller.session.header.parentSession;
+			if (parentId) try {
+				await this.ctx.typert.lookups.get("agent")?.resolve(parentId);
+			} catch {}
+			const parent = parentId && this.ctx.agents.get(parentId);
+			if (!parent) throw new Error("无法解析子 Agent 所属主对话；任务尚未创建");
+			if (parent.id === caller.id || parent.session.header.origin === "subagent" || parent.session.header.parentSession) throw new Error("只允许主对话的直接子 Agent 同级派遣；第三层调用被拒绝");
+			return parent;
+		}
+		async siblingDispatch(caller, parent, signal) {
+			if (caller === parent) return { questionAgent: parent };
+			this.runtime.assertSiblingCapacity(parent.id);
+			const worker = [...this.runtime.storage.workers.values()].find((row) => row.parentSessionId === parent.id && row.harnessConversation?.sessionId === caller.id);
+			const surface = worker && (this.runQuestionSessions?.get(worker.runId) ?? (this.runOrigins?.get(worker.runId) === "agent" ? parent.id : caller.id));
+			const questionAgent = surface ? this.ctx.agents.get(surface) : parent;
+			if (!questionAgent) throw new Error("发起者当前轮的询问会话不可用；任务尚未创建");
+			const label = worker ? workerName(worker) : (await this.ctx.get("subagents")?.listChildren(parent.id, signal))?.find((row) => row.id === caller.id)?.label;
+			return {
+				questionAgent,
+				initiator: {
+					kind: worker ? "worker" : "subagent",
+					id: worker?.id ?? caller.id,
+					name: label || caller.id
+				}
+			};
+		}
+		/**
+		* @param dispatch - A CLI run (or its control), which 仅可查看 admits in the
+		* CLI's native read-only mode. Other project or account writes (merging an
+		* isolated copy, account login) stay refused under read-only.
+		*/
+		assertExecution(agent, dispatch = false) {
 			if (agent.session.header.origin === "subagent") throw new Error("MVP 只支持主对话下的直接 CLI 子 Agent");
 			if (agent.ctx.get("planMode")?.get(agent).active) throw new Error("请先退出 Harness 规划模式，再运行外部 CLI；本插件不会绕过规划边界");
-			if (agent.ctx.get("sandboxPolicy").resolve({ session: agent.session }).mode === "read-only") throw new Error("Harness 当前为只读权限；外部 CLI 需要可写运行状态，请先明确切换项目权限");
+			if (!dispatch && agent.ctx.get("sandboxPolicy").resolve({ session: agent.session }).mode === "read-only") throw new Error("Harness 当前为只读权限；此操作会写入项目或账号状态，请先明确切换项目权限");
+		}
+		/**
+		* Under 仅可查看 a Worker without its own level runs at its first item: the
+		* CLI's native ask mode, or Pi's tool_call gate. A CLI whose first item
+		* cannot ask before a change is refused rather than silently weakened: agy's
+		* plan launch keeps its terminal sandbox state writable, Kimi's default
+		* auto-approves Git workspace edits, and Hermes offers no first item. A level
+		* the user picked in the Worker menu runs as picked.
+		*/
+		assertAccessSupported(agent, cli, level) {
+			if (level !== void 0 || this.permissionState(agent).sandbox !== "read-only") return;
+			if (cli === "antigravity") throw new Error("Harness 当前为仅可查看；Antigravity 无法把授权请求转给你，请切换权限预设或改用其他 CLI");
+			if (cli === "hermes") throw new Error("Harness 当前为仅可查看；Hermes 没有可询问的档位，请切换权限预设或改用其他 CLI");
+			if (!runsUnderViewOnly(cli)) throw new Error("Harness 当前为仅可查看；Kimi 的第一项会自动批准 Git 仓库内的编辑，请切换权限预设或改用其他 CLI");
+		}
+		/** The child session's DSH sandbox and approval policy for a Worker's plan switch and level. */
+		childPermission(parent, worker) {
+			const state = this.permissionState(parent);
+			const sandbox = runAccess(worker.mode, worker.level, state);
+			return {
+				sandbox,
+				approval: workerApproval(sandbox, state)
+			};
+		}
+		/** The parent's DSH permission state now: plan mode, sandbox and approval policy. */
+		permissionState(agent) {
+			const approval = agent.ctx.get("approval");
+			return {
+				planMode: !!agent.ctx.get("planMode")?.get(agent).active,
+				sandbox: agent.ctx.get("sandboxPolicy").resolve({ session: agent.session }).mode,
+				approval: approval ? approval.overrideOf(agent.session) ?? approval.config.policy ?? "ask" : "never"
+			};
+		}
+		/**
+		* Decide one native authorization request from the parent's current state.
+		* A parent-started turn asks on the parent page; a Worker-UI turn asks in the
+		* Worker's own native conversation. Any failure to ask is a denial.
+		*/
+		async decideNativeApproval(worker, request, signal, mode) {
+			const parent = this.ctx.agents.get(worker.parentSessionId);
+			if (!parent) return {
+				decision: "deny",
+				source: "unavailable"
+			};
+			const decided = decideApproval(mode, worker.level, this.permissionState(parent));
+			if (decided !== "ask") return decided;
+			const cli = cliOf(worker.preference);
+			const context = {
+				worker: workerName(worker),
+				cli: CLI_LABELS[cli],
+				project: worker.project
+			};
+			const control = AbortSignal.any([signal, this.disposed.signal]);
+			const surface = this.runQuestionSessions?.get(worker.runId);
+			if (surface === parent.id || !surface && this.runOrigins?.get(worker.runId ?? "") === "agent") return decisionFromAnswer(request, (await waitForInput(parent.ctx.get("userQuestions").ask({
+				agent: parent,
+				signal: control,
+				questions: [approvalQuestion(request, context)]
+			}), control)).answers.find((item) => item.id === "cliworker_approval"));
+			const binding = worker.harnessConversation;
+			const child = this.ctx.agents.get(surface ?? binding?.sessionId);
+			const approval = child?.ctx.get("approval");
+			if (!child || !approval) return {
+				decision: "deny",
+				source: "unavailable"
+			};
+			if (approval.overrideOf(child.session) !== "ask") setApprovalPolicy(child.session, "ask");
+			return decisionFromOutcome(await approval.request({
+				agent: child,
+				toolName: `cliworker:${cli}`,
+				reason: approvalPrompt(request, context),
+				signal: control
+			}));
+		}
+		/**
+		* Answer a DSH tool approval raised by a tool bridge call like a native
+		* request: a parent-started turn asks on the parent page, a Worker-UI turn
+		* keeps the child's own panel. Any other request is not ours.
+		*/
+		async answerHarnessApproval(request, next) {
+			const call = request.callId === void 0 ? void 0 : this.bridgeCalls.get(request.callId);
+			if (!call || call.child !== request.agent) return next();
+			const { worker, runId } = call;
+			const summary = harnessApprovalRequest(call.name, call.arguments, request);
+			return outcomeFromDecision(await this.runtime.harnessApproval(worker, runId, summary, request.signal ?? this.disposed.signal, async (signal, mode) => {
+				if (this.runQuestionSessions?.has(runId) || this.runOrigins?.get(runId) === "agent") return this.decideNativeApproval(worker, summary, signal, mode);
+				const parent = this.ctx.agents.get(worker.parentSessionId);
+				if (!parent) return {
+					decision: "deny",
+					source: "unavailable"
+				};
+				const decided = decideApproval(mode, worker.level, this.permissionState(parent));
+				if (decided !== "ask") return decided;
+				return decisionFromOutcome(await waitForInput(next(), signal));
+			}));
 		}
 		async queryCatalog(...args) {
 			try {
-				return await authorizedCatalog(...args);
+				return await this.freshCatalog(...args);
 			} catch (error) {
 				if (error instanceof ProcessCleanupUnconfirmedError) this.runtime.blockCatalogOnCleanup(args[0], error);
+				if (ownAccountBusy(error)) return this.busyAccountCatalog(error, ...args);
 				throw error;
 			}
 		}
+		async freshCatalog(...args) {
+			const [cli, , , project] = args;
+			const revision = this.settingsCatalogs?.revision(cli);
+			const result = await authorizedCatalog(...args);
+			if (EXCLUSIVE_ACCOUNT_CLIS.has(cli) && revision !== void 0) try {
+				this.settingsCatalogs?.remember(project, result, revision);
+			} catch {}
+			return result;
+		}
+		/**
+		* A Pi/OMP OAuth account is exclusive while another run or catalog read holds
+		* it. Dispatch only needs this account's choices to queue the task, and the run
+		* authorizes afresh once the account is free, so a busy account uses its last
+		* verified catalog. Without one, wait for the short catalog reads to finish.
+		*/
+		async busyAccountCatalog(busy, ...args) {
+			const [cli, backend, config, project, signal, expected] = args;
+			const saved = async () => {
+				const binding = await readCliAccountBinding(cli, backend, config, project, signal);
+				if (expected && binding !== expected) throw new Error(ACCOUNT_CHANGED);
+				const catalog = this.settingsCatalogs?.display(project, cli, binding);
+				return catalog && {
+					catalog,
+					binding
+				};
+			};
+			for (const deadline = Date.now() + BUSY_ACCOUNT_WAIT_MS;;) {
+				const hit = await saved();
+				if (hit) return hit;
+				if (Date.now() >= deadline) throw busy;
+				await setTimeout$1(BUSY_ACCOUNT_RETRY_MS, void 0, { signal });
+				const later = await saved();
+				if (later) return later;
+				try {
+					return await this.freshCatalog(...args);
+				} catch (error) {
+					if (!ownAccountBusy(error)) throw error;
+				}
+			}
+		}
+		async authorizeChoice(...args) {
+			try {
+				return await this.querySelection(...args);
+			} catch (error) {
+				const [preference, backend, config, project, signal, expected] = args;
+				if (!expected || !(error instanceof Error) || error.message !== "账号已变更，请重新选择或新建任务") throw error;
+				signal.throwIfAborted();
+				return this.querySelection(preference, backend, config, project, signal);
+			}
+		}
 		async querySelection(...args) {
+			const [preference, ...rest] = args;
 			try {
 				return await authorizeSelection(...args);
 			} catch (error) {
-				if (error instanceof ProcessCleanupUnconfirmedError) this.runtime.blockCatalogOnCleanup(cliOf(args[0]), error);
-				throw error;
+				if (error instanceof ProcessCleanupUnconfirmedError) this.runtime.blockCatalogOnCleanup(cliOf(preference), error);
+				if (!ownAccountBusy(error)) throw error;
+				const result = await this.busyAccountCatalog(error, cliOf(preference), ...rest);
+				validatePreference(preference, result.catalog);
+				return {
+					...result,
+					preference: resolveModel(preference, result.catalog.models)
+				};
 			}
 		}
 		/** Read installation paths without saving discovery or opening a native account/model process. */
@@ -26297,7 +33813,7 @@ let CliWorkerService = (() => {
 				}
 			});
 		}
-		async chooseQoderVariant(agent, callerSignal, name) {
+		async chooseQoderVariant(agent, callerSignal, name, questionAgent = agent) {
 			const signal = AbortSignal.any([callerSignal, this.disposed.signal]);
 			signal.throwIfAborted();
 			const project = this.project(agent);
@@ -26321,14 +33837,14 @@ let CliWorkerService = (() => {
 			this.runtime.changed();
 			try {
 				await waitForInput(previous, signal);
-				this.assertExecution(agent);
+				this.assertExecution(agent, true);
 				const resolution = await this.resolveDispatchName(name, signal);
 				signal.throwIfAborted();
 				let cli;
 				if (resolution.status === "resolved" && (resolution.cli === "qoder" || resolution.cli === "qodercn")) cli = resolution.cli;
 				else if (resolution.status === "ambiguous") {
-					const response = await waitForInput(agent.ctx.get("userQuestions").ask({
-						agent,
+					const response = await waitForInput(questionAgent.ctx.get("userQuestions").ask({
+						agent: questionAgent,
 						signal,
 						questions: [{
 							id: "cliworker_qoder_variant",
@@ -26343,7 +33859,7 @@ let CliWorkerService = (() => {
 					cli = answer.selected[0] === "Qoder" ? "qoder" : "qodercn";
 				} else throw new Error("未找到 Qoder 或 Qoder CN 安装，请先安装或配置 CLI 路径；任务尚未启动");
 				signal.throwIfAborted();
-				this.assertExecution(agent);
+				this.assertExecution(agent, true);
 				if (this.project(agent) !== project) throw new Error("项目已变更，请重新选择");
 				this.runtime.assertCliEnabled(cli);
 				return cli;
@@ -26355,8 +33871,12 @@ let CliWorkerService = (() => {
 				this.runtime.changed();
 			}
 		}
-		/** Serialize only this conversation's selection; a cancelled waiter never owns the question. */
-		async chooseDispatch(agent, callerSignal, cli) {
+		/**
+		* Serialize only this conversation's questions; a cancelled waiter never owns
+		* the question. A settled setup asks nothing, so its catalog check leaves the
+		* queue and parallel dispatches of one conversation start together.
+		*/
+		async chooseDispatch(agent, callerSignal, cli, questionAgent = agent) {
 			const signal = AbortSignal.any([callerSignal, this.disposed.signal]);
 			signal.throwIfAborted();
 			this.runtime.assertCliEnabled(cli);
@@ -26367,143 +33887,174 @@ let CliWorkerService = (() => {
 				cli
 			]);
 			const waits = this.dispatchWaits ??= /* @__PURE__ */ new Map();
-			const previous = waits.get(key) ?? Promise.resolve();
-			let release;
-			const owned = new Promise((resolve) => {
-				release = resolve;
-			});
-			const tail = previous.then(() => owned);
-			waits.set(key, tail);
-			tail.then(() => {
-				if (waits.get(key) === tail) waits.delete(key);
-			});
+			const turn = () => {
+				const previous = waits.get(key) ?? Promise.resolve();
+				let release;
+				const owned = new Promise((resolve) => {
+					release = resolve;
+				});
+				const tail = previous.then(() => owned);
+				waits.set(key, tail);
+				tail.then(() => {
+					if (waits.get(key) === tail) waits.delete(key);
+				});
+				return {
+					previous,
+					release
+				};
+			};
 			this.pending.set(agent.id, (this.pending.get(agent.id) ?? 0) + 1);
 			this.runtime.changed();
 			try {
-				await waitForInput(previous, signal);
-				signal.throwIfAborted();
-				this.assertExecution(agent);
-				this.runtime.assertCliEnabled(cli);
-				this.settingsCatalogs ??= new SettingsCatalogCache(this.runtime.storage.directory);
-				const catalogRevision = this.settingsCatalogs.revision(cli);
-				const { catalog, binding } = await this.queryCatalog(cli, this.backend, this.options, project, signal);
-				signal.throwIfAborted();
-				this.runtime.assertCliEnabled(cli);
-				this.settingsCatalogs.remember(project, {
-					catalog,
-					binding
-				}, catalogRevision);
-				const models = catalog.models;
-				const valid = (setup) => {
-					if (!setup || setup.binding !== binding || cliOf(setup.preference) !== cli) return false;
+				for (let queued = false;; queued = true) {
+					const { previous, release } = turn();
+					let held = true;
 					try {
-						validatePreference(setup.preference, catalog);
-						return resolveModel(setup.preference, models).model === setup.preference.model;
-					} catch {
-						return false;
-					}
-				};
-				const ask = async (questions) => {
-					signal.throwIfAborted();
-					const response = await waitForInput(agent.ctx.get("userQuestions").ask({
-						agent,
-						signal,
-						questions
-					}), signal);
-					signal.throwIfAborted();
-					this.runtime.assertCliEnabled(cli);
-					return response;
-				};
-				const current = this.runtime.storage.conversationSetup(agent.id, project, cli);
-				let setup = valid(current) ? current : void 0;
-				let selected = false;
-				if (!current) {
-					const saved = this.runtime.storage.dispatchSetup(project, cli);
-					if (valid(saved)) {
-						const answer = (await ask([{
-							id: "cliworker_reuse",
-							header: "沿用设定",
-							question: `是否沿用 ${models.find((model) => model.id === saved.preference.model || Object.values(model.variants ?? {}).includes(saved.preference.model))?.label ?? saved.preference.model} · ${effortLabel(saved.preference.effort)} · ${saved.role?.name ?? "不使用角色预设"}？`,
-							options: [{ label: "沿用" }, { label: "重新选择" }]
-						}])).answers.find((item) => item.id === "cliworker_reuse");
-						if (answer?.custom !== void 0 || answer?.selected.length !== 1 || !["沿用", "重新选择"].includes(answer.selected[0])) throw new Error("请选择沿用或重新选择；任务尚未启动");
-						if (answer.selected[0] === "沿用") setup = saved;
+						await waitForInput(previous, signal);
+						signal.throwIfAborted();
+						this.assertExecution(agent, true);
+						this.runtime.assertCliEnabled(cli);
+						if (!queued && this.runtime.storage.conversationSetup(agent.id, project, cli)) {
+							release();
+							held = false;
+						}
+						this.settingsCatalogs ??= new SettingsCatalogCache(this.runtime.storage.directory);
+						const catalogRevision = this.settingsCatalogs.revision(cli);
+						const queried = await this.queryCatalog(cli, this.backend, this.options, project, signal);
+						const { catalog } = queried;
+						let { binding } = queried;
+						signal.throwIfAborted();
+						this.runtime.assertCliEnabled(cli);
+						this.settingsCatalogs.remember(project, {
+							catalog,
+							binding
+						}, catalogRevision);
+						const models = catalog.models;
+						const valid = (setup) => {
+							if (!setup || cliOf(setup.preference) !== cli) return false;
+							try {
+								validatePreference(setup.preference, catalog);
+								return resolveModel(setup.preference, models).model === setup.preference.model;
+							} catch {
+								return false;
+							}
+						};
+						let asked = false;
+						const ask = async (questions) => {
+							signal.throwIfAborted();
+							asked = true;
+							const response = await waitForInput(questionAgent.ctx.get("userQuestions").ask({
+								agent: questionAgent,
+								signal,
+								questions
+							}), signal);
+							signal.throwIfAborted();
+							this.runtime.assertCliEnabled(cli);
+							return response;
+						};
+						const current = this.runtime.storage.conversationSetup(agent.id, project, cli);
+						let setup = valid(current) ? current : void 0;
+						if (!setup && !held) continue;
+						let selected = false;
+						if (!setup && this.runtime.storage.generalSettings().askBeforeDispatch === false) {
+							const saved = this.runtime.storage.dispatchSetup(project, cli);
+							if (valid(saved)) setup = saved;
+						} else if (!current) {
+							const saved = this.runtime.storage.dispatchSetup(project, cli);
+							if (valid(saved)) {
+								const answer = (await ask([{
+									id: "cliworker_reuse",
+									header: "沿用设定",
+									question: `是否沿用 ${models.find((model) => model.id === saved.preference.model || Object.values(model.variants ?? {}).includes(saved.preference.model))?.label ?? saved.preference.model} · ${effortLabel(saved.preference.effort)} · ${saved.role?.name ?? "不使用角色预设"}？`,
+									options: [{ label: "沿用" }, { label: "重新选择" }]
+								}])).answers.find((item) => item.id === "cliworker_reuse");
+								if (answer?.custom !== void 0 || answer?.selected.length !== 1 || !["沿用", "重新选择"].includes(answer.selected[0])) throw new Error("请选择沿用或重新选择；任务尚未启动");
+								if (answer.selected[0] === "沿用") setup = saved;
+							}
+						}
+						if (!setup) {
+							const choices = visibleModelChoices(models);
+							const answer = (await ask([{
+								id: "cliworker_model",
+								header: `${CLI_LABELS[cli]} 模型`,
+								question: "选择模型",
+								options: choices.map((model) => ({ label: model.label }))
+							}])).answers.find((item) => item.id === "cliworker_model");
+							const chosen = answer?.custom === void 0 && answer?.selected.length === 1 ? choices.find((model) => model.label === answer.selected[0]) : void 0;
+							if (!chosen?.efforts?.length) throw new Error("请选择列表中的模型");
+							const offered = structuredClone(this.runtime.storage.rolePresets());
+							const questions = [];
+							if (chosen.efforts.length > 1) questions.push({
+								id: "cliworker_effort",
+								header: "思考强度",
+								question: `选择 ${chosen.label} 的思考强度`,
+								options: chosen.efforts.map((effort) => ({ label: effortLabel(effort) }))
+							});
+							questions.push(roleQuestion(offered));
+							const selection = await ask(questions);
+							const effortAnswer = selection.answers.find((item) => item.id === "cliworker_effort");
+							const effort = chosen.efforts.length === 1 ? chosen.efforts[0] : effortAnswer?.custom === void 0 && effortAnswer?.selected.length === 1 ? chosen.efforts.find((effort) => effortLabel(effort) === effortAnswer.selected[0]) : void 0;
+							setup = {
+								preference: resolveModel(preferenceSchema.parse({
+									cli,
+									model: chosen.id,
+									effort
+								}), models),
+								role: readRoleAnswer(offered, selection) ?? null,
+								binding
+							};
+							selected = true;
+						}
+						if (asked) {
+							const checked = await this.authorizeChoice(setup.preference, this.backend, this.options, project, signal, binding);
+							if (checked.preference.model !== setup.preference.model) throw new Error("模型与思考强度已变更，请重新选择");
+							binding = checked.binding;
+							setup = {
+								...setup,
+								binding
+							};
+						}
+						signal.throwIfAborted();
+						this.assertExecution(agent, true);
+						this.runtime.assertCliEnabled(cli);
+						if (this.project(agent) !== project) throw new Error("项目已变更，请重新选择");
+						if (selected) this.runtime.storage.setDispatchSetup(project, setup);
+						if (current !== setup) this.runtime.storage.setConversationSetup(agent.id, project, setup);
+						(this.selectionBindings ??= /* @__PURE__ */ new WeakMap()).set(setup.preference, binding);
+						(this.selectionProjects ??= /* @__PURE__ */ new WeakMap()).set(setup.preference, project);
+						return setup;
+					} finally {
+						if (held) release();
 					}
 				}
-				if (!setup) {
-					const choices = visibleModelChoices(models);
-					const answer = (await ask([{
-						id: "cliworker_model",
-						header: `${CLI_LABELS[cli]} 模型`,
-						question: "选择模型",
-						options: choices.map((model) => ({ label: model.label }))
-					}])).answers.find((item) => item.id === "cliworker_model");
-					const chosen = answer?.custom === void 0 && answer?.selected.length === 1 ? choices.find((model) => model.label === answer.selected[0]) : void 0;
-					if (!chosen?.efforts?.length) throw new Error("请选择列表中的模型");
-					const offered = structuredClone(this.runtime.storage.rolePresets());
-					const questions = [];
-					if (chosen.efforts.length > 1) questions.push({
-						id: "cliworker_effort",
-						header: "思考强度",
-						question: `选择 ${chosen.label} 的思考强度`,
-						options: chosen.efforts.map((effort) => ({ label: effortLabel(effort) }))
-					});
-					questions.push(roleQuestion(offered));
-					const selection = await ask(questions);
-					const effortAnswer = selection.answers.find((item) => item.id === "cliworker_effort");
-					const effort = chosen.efforts.length === 1 ? chosen.efforts[0] : effortAnswer?.custom === void 0 && effortAnswer?.selected.length === 1 ? chosen.efforts.find((effort) => effortLabel(effort) === effortAnswer.selected[0]) : void 0;
-					setup = {
-						preference: resolveModel(preferenceSchema.parse({
-							cli,
-							model: chosen.id,
-							effort
-						}), models),
-						role: readRoleAnswer(offered, selection) ?? null,
-						binding
-					};
-					selected = true;
-				}
-				if ((await this.querySelection(setup.preference, this.backend, this.options, project, signal, binding)).preference.model !== setup.preference.model) throw new Error("模型与思考强度已变更，请重新选择");
-				signal.throwIfAborted();
-				this.assertExecution(agent);
-				this.runtime.assertCliEnabled(cli);
-				if (this.project(agent) !== project) throw new Error("项目已变更，请重新选择");
-				if (selected) this.runtime.storage.setDispatchSetup(project, setup);
-				if (current !== setup) this.runtime.storage.setConversationSetup(agent.id, project, setup);
-				(this.selectionBindings ??= /* @__PURE__ */ new WeakMap()).set(setup.preference, binding);
-				(this.selectionProjects ??= /* @__PURE__ */ new WeakMap()).set(setup.preference, project);
-				return setup;
 			} finally {
-				release();
 				const pending = (this.pending.get(agent.id) ?? 1) - 1;
 				if (pending) this.pending.set(agent.id, pending);
 				else this.pending.delete(agent.id);
 				this.runtime.changed();
 			}
 		}
-		async launch(agent, title, prompt, preference, mode, workerId, identity, signal = this.disposed.signal, restartSourceId, queuedAdmission, preparationId, submissionId, attachments) {
-			if (workerId && !preparationId) return this.runtime.prepareFollowup(agent.id, workerId, signal, (control, id) => this.launch(agent, title, prompt, preference, mode, workerId, identity, control, restartSourceId, queuedAdmission, id, submissionId, attachments), queuedAdmission?.priority ? queuedAdmission.id : void 0);
-			this.assertExecution(agent);
+		async launch(agent, title, prompt, preference, mode, workerId, identity, signal = this.disposed.signal, restartSourceId, queuedAdmission, preparationId, submissionId, attachments, origin = "user", questionSessionId) {
+			if (workerId && !preparationId) return this.runtime.prepareFollowup(agent.id, workerId, signal, (control, id) => this.launch(agent, title, prompt, preference, mode, workerId, identity, control, restartSourceId, queuedAdmission, id, submissionId, attachments, origin, questionSessionId), queuedAdmission?.priority ? queuedAdmission.id : void 0);
+			this.assertExecution(agent, true);
+			this.assertAccessSupported(agent, cliOf(preference), workerId ? this.runtime.get(agent.id, workerId).level : void 0);
 			this.runtime.assertCliEnabled(cliOf(preference));
 			if (this.accounts.isBusy(cliOf(preference))) throw new Error("此 CLI 正在管理账号，请先关闭账号终端再启动任务");
 			const project = this.project(agent);
 			const selectedProject = this.selectionProjects?.get(preference);
 			if (!workerId && selectedProject && selectedProject !== project) throw new Error("项目已变更，请重新选择");
-			const expected = workerId ? this.runtime.storage.accountBinding(workerId) : this.selectionBindings?.get(preference);
-			if (workerId && !expected) {
-				const worker = this.runtime.get(agent.id, workerId);
-				if (worker.conversationId || !isUserInterrupted(worker)) throw new Error(LEGACY_ACCOUNT_RECORD_NOTICE);
-			}
-			const { binding, preference: authorizedPreference } = await this.querySelection(preference, this.backend, this.options, project, signal, expected);
+			const expected = workerId ? void 0 : this.selectionBindings?.get(preference);
+			const { binding, preference: authorizedPreference } = await this.authorizeChoice(preference, this.backend, this.options, project, signal, expected);
 			if (authorizedPreference.model !== preference.model) throw new Error("模型与思考强度不匹配，请重新选择");
 			signal.throwIfAborted();
-			this.assertExecution(agent);
+			this.assertExecution(agent, true);
 			this.runtime.assertCliEnabled(cliOf(preference));
 			if (this.accounts.isBusy(cliOf(preference))) throw new Error("请先关闭账号终端");
 			if (this.project(agent) !== project) throw new Error("项目已变更，请重新选择");
 			if (restartSourceId) this.runtime.assertLegacyRestart(agent.id, restartSourceId);
+			if (identity?.initiator && !workerId) this.runtime.assertSiblingCapacity(agent.id);
 			let submission;
-			const id = agent.ctx.get("jobs").start({
+			const publish = () => agent.ctx.get("jobs").start({
 				kind: "cliworker",
 				owner: agent.id,
 				label: `${CLI_LABELS[cliOf(preference)]} · ${title} · ${workerId ? "续聊" : "新任务"}：${prompt.replace(/\s+/g, " ").slice(0, 100)}`,
@@ -26511,6 +34062,16 @@ let CliWorkerService = (() => {
 				run: () => {
 					const submitted = this.runtime.submit(agent.id, project, title, prompt, preference, mode, workerId, identity, binding, queuedAdmission, preparationId, submissionId, attachments);
 					submission = submitted;
+					const runId = submitted.worker.runId;
+					if (runId) {
+						const origins = this.runOrigins ??= /* @__PURE__ */ new Map();
+						origins.set(runId, origin);
+						if (questionSessionId) (this.runQuestionSessions ??= /* @__PURE__ */ new Map()).set(runId, questionSessionId);
+						submitted.done.finally(() => {
+							origins.delete(runId);
+							this.runQuestionSessions?.delete(runId);
+						});
+					}
 					return {
 						cancel: submitted.cancel,
 						done: submitted.done.then((worker) => ({
@@ -26525,12 +34086,18 @@ let CliWorkerService = (() => {
 								status: worker.status,
 								response: worker.lastResult,
 								error: worker.error,
-								guidance: worker.status === "uncertain" ? "结果待核实；请先核查本轮输出和实际产物，不要自动重试。" : void 0
+								...worker.status === "completed" && worker.resultNotice ? { notice: worker.resultNotice } : {},
+								guidance: [
+									worker.status === "uncertain" ? "结果待核实；请先核查本轮输出和实际产物，不要自动重试。" : void 0,
+									worker.status === "completed" && worker.resultNotice ? worker.resultNotice : void 0,
+									isolationGuidance(worker)
+								].filter(Boolean).join(" ") || void 0
 							})
 						}))
 					};
 				}
 			});
+			const id = identity?.initiator ? publishSiblingOutsideTool(publish) : publish();
 			if (!submission) throw new Error("Harness did not publish the worker job");
 			this.nativeRunDone.set(submission.worker.runId, submission.done);
 			const runId = submission.worker.runId;
@@ -26651,7 +34218,7 @@ let CliWorkerService = (() => {
 			})), "cliworker:resolve");
 			this.ctx.effect(() => this.ctx.tools.register(defineTool({
 				name: "cliworker_start",
-				description: `用户明确要求“调用 agy cli”或“用 glm cli 完成任务”时，调用本工具打开 CLI Worker 的选型流程。只需提供 CLI、任务标题和任务内容；模型、思考强度与角色由插件收集，完成选型前不会启动任务，不要把它们当作调用本工具的前置输入。${CLI_NAME_GUIDANCE}。泛称 qoder 在双版本均安装时先通过原生询问选择版本。Host 在首次选择模型、思考强度与角色，或同项目新对话确认是否沿用时提问；同对话后续不重复。不要提前自行提问或增加确认，不代答。返回后台 job、worker ID 和 agentName。已有智能体续聊用 cliworker_followup；除泛称 qoder 的双版本选择外，其他歧义返回简短候选错误，不启动、不额外发问题卡。`,
+				description: `用户明确要求“调用 agy cli”或“用 glm cli 完成任务”时，调用本工具打开 CLI Worker 的选型流程。只需提供 CLI、任务标题和任务内容；模型、思考强度与角色由插件收集，完成选型前不会启动任务，不要把它们当作调用本工具的前置输入。${CLI_NAME_GUIDANCE}。泛称 qoder 在双版本均安装时先通过原生询问选择版本。Host 在首次选择模型、思考强度与角色，或同项目新对话确认是否沿用时提问；同对话后续不重复。不要提前自行提问或增加确认，不代答。返回后台 job、worker ID 和 agentName。主对话的直接子 Agent（包括 CLI Worker）可同级派遣，新 Worker 归属主对话并与发起者同级；发起者不提供模型、强度、角色或会话 ID，每个主对话最多 6 个未结束的子 Agent 派遣。主对话的已有智能体续聊用 cliworker_followup；除泛称 qoder 的双版本选择外，其他歧义返回简短候选错误，不启动、不额外发问题卡。`,
 				parameters: {
 					cli: {
 						type: "string",
@@ -26680,17 +34247,20 @@ let CliWorkerService = (() => {
 				isConcurrencySafe: () => true,
 				execute: async (args, exec) => {
 					if (!exec.agent) throw new Error("A parent Agent is required");
-					this.assertExecution(exec.agent);
+					const parent = await this.dispatchSubject(exec.agent);
+					this.assertExecution(parent, true);
+					const { questionAgent, initiator } = await this.siblingDispatch(exec.agent, parent, exec.signal);
 					let cli = requireCliName(args.cli);
-					if (isGenericQoderName(args.cli)) cli = await this.chooseQoderVariant(exec.agent, exec.signal, args.cli);
+					if (isGenericQoderName(args.cli)) cli = await this.chooseQoderVariant(parent, exec.signal, args.cli, questionAgent);
 					const agentName = args.agent_name === void 0 ? void 0 : agentNameSchema.parse(args.agent_name);
 					if (cli === "kimi" && args.read_only) throw new Error("Kimi 非交互模式不支持只读派遣");
-					const setup = await this.chooseDispatch(exec.agent, AbortSignal.any([exec.signal, this.disposed.signal]), cli);
+					const setup = await this.chooseDispatch(parent, AbortSignal.any([exec.signal, this.disposed.signal]), cli, questionAgent);
 					exec.signal.throwIfAborted();
-					return this.launch(exec.agent, args.title, args.prompt, setup.preference, args.read_only ? "plan" : "accept-edits", void 0, {
+					return this.launch(parent, args.title, args.prompt, setup.preference, args.read_only ? "plan" : "accept-edits", void 0, {
 						agentName,
-						role: setup.role ?? void 0
-					}, AbortSignal.any([exec.signal, this.disposed.signal]));
+						role: setup.role ?? void 0,
+						...initiator ? { initiator } : {}
+					}, AbortSignal.any([exec.signal, this.disposed.signal]), void 0, void 0, void 0, void 0, void 0, "agent", initiator ? questionAgent.id : void 0);
 				}
 			})), "cliworker:start");
 			this.ctx.effect(() => this.ctx.tools.register(defineTool({
@@ -26704,22 +34274,35 @@ let CliWorkerService = (() => {
 				isConcurrencySafe: () => true,
 				execute: async (args, exec) => {
 					if (!exec.agent) throw new Error("A parent Agent is required");
+					const parent = await this.dispatchSubject(exec.agent);
 					if (args.worker_id || args.worker_name) {
-						const worker = this.runtime.resolveWorker(exec.agent.id, args.worker_id, args.worker_name);
+						const dsh = await this.dshFallback(parent.id, args, exec.signal, () => this.runtime.resolveWorker(parent.id, args.worker_id, args.worker_name));
+						if ("kind" in dsh) return JSON.stringify(dsh);
 						return JSON.stringify({
-							...worker,
-							agentName: workerName(worker)
+							...dsh,
+							agentName: workerName(dsh),
+							guidance: isolationGuidance(dsh)
 						});
 					}
-					return JSON.stringify(this.runtime.snapshot(exec.agent.id).workers.map((worker) => ({
+					const dshRows = this.runtime.snapshot(parent.id).showDshSubagents === false ? [] : (await this.dshSubagents.list(parent.id, exec.signal)).map((row) => ({
+						kind: "dsh-subagent",
+						workerId: row.id,
+						agentName: row.agentName,
+						title: row.name,
+						status: row.stopped ? "stopped" : row.status,
+						model: row.model,
+						mode: row.mode
+					}));
+					return JSON.stringify([...this.runtime.snapshot(parent.id).workers.map((worker) => ({
 						...worker,
-						agentName: workerName(worker)
-					})));
+						agentName: workerName(worker),
+						guidance: isolationGuidance(worker)
+					})), ...dshRows]);
 				}
 			})), "cliworker:status");
 			this.ctx.effect(() => this.ctx.tools.register(defineTool({
 				name: "cliworker_followup",
-				description: "Continue a specific idle CLI worker by worker_id or its exact agentName in worker_name. Retains its role, current model/effort and CLI conversation; never starts another worker.",
+				description: "Continue a specific idle CLI worker by worker_id or its exact agentName in worker_name. Retains its role, current model/effort and CLI conversation; never starts another worker. A DSH native subagent listed in the CLI Worker window is continued the same way by its `dsh-N` name; its reply returns as a DSH subagent message.",
 				parameters: {
 					worker_id: { type: "string" },
 					worker_name: { type: "string" },
@@ -26732,8 +34315,10 @@ let CliWorkerService = (() => {
 				isConcurrencySafe: () => true,
 				execute: async (args, exec) => {
 					if (!exec.agent) throw new Error("A parent Agent is required");
-					const worker = this.runtime.resolveWorker(exec.agent.id, args.worker_id, args.worker_name);
-					return this.followup(exec.agent.id, worker.id, args.prompt, exec.signal);
+					const agent = exec.agent;
+					const target = await this.dshFallback(agent.id, args, exec.signal, () => this.runtime.resolveWorker(agent.id, args.worker_id, args.worker_name), args.prompt);
+					if ("kind" in target) return JSON.stringify(target);
+					return this.continueWorker(agent.id, target.id, args.prompt, exec.signal, "agent");
 				}
 			})), "cliworker:followup");
 			this.ctx.effect(() => this.ctx.tools.register(defineTool({
@@ -26751,6 +34336,123 @@ let CliWorkerService = (() => {
 					return JSON.stringify(await this.runtime.stop(exec.agent.id, worker.id));
 				}
 			})), "cliworker:stop");
+			this.ctx.effect(() => this.ctx.tools.register(defineTool({
+				name: "cliworker_merge",
+				description: "把空闲 CLI 智能体隔离副本中的改动三方合并回当前项目，作为未提交改动写回，不会提交。隔离运行的智能体完成后，由你核查结果再调用本工具。只有一边改过的文件直接写回；两边都改过的文件不是错误，返回 needs_integration 及基线、项目、副本三个版本的文件路径，由你按各任务目标整合，再带 resolutions 调用本工具（use=content 附完整最终内容，或 use=copy / use=project）。只有两边目标相互矛盾时才用 ask_user_question 请用户选择。决定齐全前项目不变、副本保留。不要让 CLI 改到原目录重做。",
+				parameters: {
+					worker_id: { type: "string" },
+					worker_name: { type: "string" },
+					resolutions: {
+						type: "array",
+						description: "Decisions for files a previous call returned in needs_integration. Each item: path, use (content | copy | project), and content (the complete final file text) when use is content.",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								path: {
+									type: "string",
+									required: true
+								},
+								use: {
+									type: "string",
+									enum: [
+										"content",
+										"copy",
+										"project"
+									],
+									required: true
+								},
+								content: { type: "string" }
+							}
+						}
+					}
+				},
+				output,
+				isConcurrencySafe: () => false,
+				execute: async (args, exec) => {
+					if (!exec.agent) throw new Error("A parent Agent is required");
+					const worker = this.runtime.resolveWorker(exec.agent.id, args.worker_id, args.worker_name);
+					const resolutions = readResolutions(args.resolutions);
+					const result = await this.mergeIsolatedWorker(exec.agent, worker.id, exec.signal, resolutions);
+					return JSON.stringify(result.status === "merged" ? result : integrationReport(workerName(worker), result, resolutions && result.conflicts.map((item) => item.path)));
+				}
+			})), "cliworker:merge");
+			this.ctx.effect(() => this.ctx.tools.register(defineTool({
+				name: "cliworker_discard",
+				description: "丢弃空闲 CLI 智能体的隔离副本。执行前会向用户确认；确认后副本中的改动永久删除，主目录不变。用户未确认时副本保留。",
+				parameters: {
+					worker_id: { type: "string" },
+					worker_name: { type: "string" }
+				},
+				output,
+				isConcurrencySafe: () => false,
+				execute: async (args, exec) => {
+					if (!exec.agent) throw new Error("A parent Agent is required");
+					const agent = exec.agent;
+					const worker = this.runtime.resolveWorker(agent.id, args.worker_id, args.worker_name);
+					const signal = AbortSignal.any([exec.signal, this.disposed.signal]);
+					const answer = (await waitForInput(agent.ctx.get("userQuestions").ask({
+						agent,
+						signal,
+						questions: [{
+							id: "cliworker_discard",
+							header: "丢弃副本",
+							question: `丢弃 ${workerName(worker)} 的隔离副本？副本中的改动将永久删除，项目主目录不变。`,
+							options: [{ label: "丢弃" }, { label: "保留" }]
+						}]
+					}), signal)).answers.find((item) => item.id === "cliworker_discard");
+					if (answer?.custom !== void 0 || answer?.selected.length !== 1 || answer.selected[0] !== "丢弃") return JSON.stringify({
+						status: "kept",
+						message: "用户未确认，隔离副本已保留"
+					});
+					await this.runtime.discardIsolation(agent.id, worker.id);
+					return JSON.stringify({ status: "discarded" });
+				}
+			})), "cliworker:discard");
+		}
+		/** @param parentSessionId - Main conversation. @param signal - Read lifetime. @returns Native direct children JSON. */
+		async listDshSubagents(parentSessionId, signal) {
+			return JSON.stringify(await this.dshSubagents.list(parentSessionId, signal));
+		}
+		/** @param parentSessionId - Main conversation. @param signal - Visible panel lifetime. @returns Native child snapshots. */
+		async *watchDshSubagents(parentSessionId, signal) {
+			yield* this.dshSubagents.watch(parentSessionId, signal);
+		}
+		/** @param parentSessionId - Main conversation. @param childSessionId - Direct child. @param prompt - Human message. @param requestId - Browser-minted prompt identity. @param signal - Admission lifetime. @returns Native inbox receipt JSON. */
+		async promptDshSubagent(parentSessionId, childSessionId, prompt, requestId, signal) {
+			try {
+				const text = z.string().min(1).max(1e5).parse(prompt);
+				z.string().uuid().parse(requestId);
+				return JSON.stringify(await this.dshSubagents.prompt({
+					parentSessionId: SessionId$1(parentSessionId),
+					childSessionId: SessionId$1(childSessionId),
+					requestId,
+					mode: "continuable",
+					delivery: "queue",
+					content: [{
+						type: "text",
+						text
+					}]
+				}, signal));
+			} catch (error) {
+				throw failure(error);
+			}
+		}
+		/** @param parentSessionId - Main conversation. @param childSessionId - Direct child. @param signal - Stop confirmation lifetime. @returns JSON only after native settlement. */
+		async stopDshSubagent(parentSessionId, childSessionId, signal) {
+			try {
+				return JSON.stringify(await this.dshSubagents.stop(parentSessionId, childSessionId, signal));
+			} catch (error) {
+				throw failure(error);
+			}
+		}
+		/** @param parentSessionId - Main conversation. @param childSessionId - Direct child. @param signal - Mutation lifetime. @returns Nothing; only plugin visibility changes. */
+		async hideDshSubagent(parentSessionId, childSessionId, signal) {
+			try {
+				await this.dshSubagents.hide(parentSessionId, childSessionId, signal);
+			} catch (error) {
+				throw failure(error);
+			}
 		}
 		/** @param parentSessionId - Owning Harness session. @param workerId - Selected worker or empty string. @param signal - Stream lifetime. @returns JSON snapshots, initially and after changes. */
 		async *watch(parentSessionId, workerId, signal) {
@@ -26787,7 +34489,7 @@ let CliWorkerService = (() => {
 						const query = this.ctx?.get("sessionQuery");
 						if (query) {
 							try {
-								const observation = await query.observeSession(SessionId(record.sessionId), {
+								const observation = await query.observeSession(SessionId$1(record.sessionId), {
 									signal: lifetime,
 									projectionMode: "none"
 								});
@@ -27010,6 +34712,33 @@ let CliWorkerService = (() => {
 				throw failure(error);
 			}
 		}
+		/** Writes into the parent's project, so the host's plan/read-only boundary applies. */
+		async mergeIsolatedWorker(agent, workerId, signal, resolutions) {
+			const worker = this.runtime.get(agent.id, workerId);
+			this.assertExecution(agent);
+			if (this.project(agent) !== worker.project) throw new Error("项目已变更，请在原项目合并");
+			return this.runtime.mergeIsolation(agent.id, workerId, AbortSignal.any([signal, this.disposed.signal]), resolutions);
+		}
+		/** @param parentSessionId - Owning session. @param signal - Query lifetime. @returns Profile-wide general settings JSON. */
+		async generalSettings(parentSessionId, signal) {
+			try {
+				await this.parent(parentSessionId);
+				signal.throwIfAborted();
+				return JSON.stringify(this.runtime.generalSettings());
+			} catch (error) {
+				throw failure(error);
+			}
+		}
+		/** @param parentSessionId - Owning session. @param patch - JSON object of changed fields; `null` restores a default. @param signal - Mutation admission lifetime. @returns Updated general settings JSON. */
+		async saveGeneralSettings(parentSessionId, patch, signal) {
+			try {
+				await this.parent(parentSessionId);
+				signal.throwIfAborted();
+				return JSON.stringify(this.runtime.setGeneralSettings(JSON.parse(z.string().max(4096).parse(patch))));
+			} catch (error) {
+				throw failure(error);
+			}
+		}
 		/** @param parentSessionId - Owning session. @param cli - Selected CLI. @param enabled - Allow new CLI operations. @param signal - Mutation admission lifetime. @returns Updated profile-wide CLI enablement JSON. */
 		async setCliEnabled(parentSessionId, cli, enabled, signal) {
 			try {
@@ -27034,13 +34763,50 @@ let CliWorkerService = (() => {
 				queriedCli = id;
 				const project = this.project(await this.parent(parentSessionId));
 				signal.throwIfAborted();
+				const held = () => this.cleanupHeldStatus(id);
+				const before = held();
+				if (before) return JSON.stringify(before);
 				this.runtime.assertCliEnabled(id);
 				const status = await this.accounts.status(id, project, signal);
 				signal.throwIfAborted();
+				const after = held();
+				if (after) return JSON.stringify(after);
 				this.runtime.assertCliEnabled(id);
 				return JSON.stringify(status);
 			} catch (error) {
 				if (queriedCli && error instanceof ProcessCleanupUnconfirmedError) this.runtime.blockCatalogOnCleanup(queriedCli, error);
+				throw failure(error);
+			}
+		}
+		/** A CLI paused by its own unconfirmed cleanup reports that state instead of failing the read. */
+		cleanupHeldStatus(cli) {
+			const message = this.runtime.catalogCleanupMessage(cli);
+			if (!message) return void 0;
+			this.runtime.assertHostOpen();
+			return {
+				cli,
+				installed: true,
+				state: "unavailable",
+				summary: message,
+				cleanupBlocked: true,
+				actions: []
+			};
+		}
+		/** @param parentSessionId - Owning session. @param cli - CLI the user confirmed has no leftover process. @param signal - Mutation lifetime. @returns Fresh account status JSON. */
+		async recoverCliCleanup(parentSessionId, cli, signal) {
+			try {
+				const id = z.enum(CLI_IDS).parse(cli);
+				await this.parent(parentSessionId);
+				signal.throwIfAborted();
+				this.accounts.assertCleanupRecoverable(id);
+				this.runtime.recoverCatalogCleanup(id);
+				this.accounts.recoverCleanup(id);
+				this.invalidateSettingsDisplay(id);
+				return JSON.stringify({
+					cli: id,
+					recovered: true
+				});
+			} catch (error) {
 				throw failure(error);
 			}
 		}
@@ -27147,7 +34913,27 @@ let CliWorkerService = (() => {
 				throw failure(error);
 			}
 		}
-		async startAccount(parentSessionId, cli, action, signal, source, provider) {
+		/**
+		* @param options - JSON `{ provider?, login? }`: a login provider of the window's picker, or
+		* one login (`AccountLogin.id`) to sign out. Host checks both against the installed CLI.
+		*/
+		async accountStartWith(parentSessionId, cli, action, options, signal) {
+			try {
+				const parsed = JSON.parse(typeof options === "string" && options.length <= 1024 ? options : "null");
+				const value = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : void 0;
+				const name = (key) => {
+					const item = value?.[key];
+					if (item === void 0) return void 0;
+					if (typeof item !== "string" || !item || item.length > 160) throw new Error("无效的账号操作");
+					return item;
+				};
+				if (!value || Object.keys(value).some((key) => key !== "provider" && key !== "login")) throw new Error("无效的账号操作");
+				return this.startAccount(parentSessionId, cli, action, signal, void 0, name("provider"), name("login"));
+			} catch (error) {
+				throw failure(error);
+			}
+		}
+		async startAccount(parentSessionId, cli, action, signal, source, provider, login) {
 			try {
 				const id = z.enum(CLI_IDS).parse(cli);
 				const operation = z.enum([
@@ -27167,7 +34953,7 @@ let CliWorkerService = (() => {
 					this.accountParents.set(parent.id, dispose);
 				}
 				this.invalidateSettingsDisplay(id);
-				return JSON.stringify(await this.accounts.start(parent.id, id, operation, this.project(parent), signal, source, provider));
+				return JSON.stringify(await this.accounts.start(parent.id, id, operation, this.project(parent), signal, source, provider, login));
 			} catch (error) {
 				throw failure(error);
 			}
@@ -27186,6 +34972,30 @@ let CliWorkerService = (() => {
 			try {
 				this.assertExecution(await this.parent(parentSessionId));
 				await this.accounts.write(parentSessionId, accountId, data);
+				return true;
+			} catch (error) {
+				throw failure(error);
+			}
+		}
+		/** @param parentSessionId - Owning session. @param accountId - Account terminal identity. @param response - The user's answer to the window's current step (JSON). @returns Answer accepted. */
+		async accountRespond(parentSessionId, accountId, response) {
+			try {
+				this.assertExecution(await this.parent(parentSessionId));
+				const parsed = JSON.parse(typeof response === "string" && response.length <= 8192 ? response : "null");
+				const value = parsed && typeof parsed === "object" ? parsed : {};
+				const keys = Object.keys(value);
+				const text = (name) => keys.length === 1 && typeof value[name] === "string";
+				let answer;
+				if (text("option")) answer = { option: value.option };
+				else if (text("code")) answer = { code: value.code };
+				else if (text("secret")) answer = { secret: value.secret };
+				else if (keys.length === 1 && (value.confirm === "trust" || value.confirm === "decline")) answer = { confirm: value.confirm };
+				else if (keys.length === 2 && value.agree === "terms" && typeof value.share === "boolean") answer = {
+					agree: "terms",
+					share: value.share
+				};
+				else throw new Error("无效的账号窗口操作");
+				await this.accounts.respond(parentSessionId, accountId, answer);
 				return true;
 			} catch (error) {
 				throw failure(error);
@@ -27228,23 +35038,36 @@ let CliWorkerService = (() => {
 				const worker = this.runtime.get(agent.id, workerId);
 				const cli = cliOf(worker.preference);
 				queriedCli = cli;
-				const expected = this.runtime.storage.accountBinding(workerId);
-				if (!expected) throw new Error(LEGACY_ACCOUNT_RECORD_NOTICE);
 				this.runtime.assertCliEnabled(cli);
 				this.settingsCatalogs ??= new SettingsCatalogCache(this.runtime.storage.directory);
-				let catalog = this.settingsCatalogs.display(worker.project, cli, expected);
-				if (!catalog) catalog = (await this.settingsCatalogs.get({
-					cli,
-					project: worker.project,
-					signal: control,
-					selfVerifiedDiscovery: cli === "qoder" || cli === "qodercn",
-					binding: async () => {
-						const current = await readCliAccountBinding(cli, this.backend, this.options, worker.project, control);
-						if (current !== expected) throw new Error(ACCOUNT_CHANGED);
-						return current;
-					},
-					discover: () => this.queryCatalog(cli, this.backend, this.options, worker.project, control, expected)
-				})).catalog;
+				const directory = this.runtime.catalogDirectory(worker);
+				const saved = this.runtime.storage.accountBinding(workerId);
+				let catalog = saved ? this.settingsCatalogs.display(directory, cli, saved) : void 0;
+				let expected = catalog ? saved : await readCliAccountBinding(cli, this.backend, this.options, directory, control);
+				catalog ??= this.settingsCatalogs.display(directory, cli, expected);
+				for (let attempt = 0; !catalog; attempt++) {
+					let result;
+					try {
+						result = await this.settingsCatalogs.get({
+							cli,
+							project: directory,
+							signal: control,
+							selfVerifiedDiscovery: cli === "qoder" || cli === "qodercn",
+							binding: async () => {
+								const current = await readCliAccountBinding(cli, this.backend, this.options, directory, control);
+								if (current !== expected) throw new Error(ACCOUNT_CHANGED);
+								return current;
+							},
+							discover: () => this.queryCatalog(cli, this.backend, this.options, directory, control, expected)
+						});
+					} catch (error) {
+						if (attempt > 0 || !(error instanceof Error) || error.message !== "账号已变更，请重新选择或新建任务") throw error;
+						expected = await readCliAccountBinding(cli, this.backend, this.options, directory, control);
+						catalog = this.settingsCatalogs.display(directory, cli, expected);
+						continue;
+					}
+					catalog = result.catalog;
+				}
 				control.throwIfAborted();
 				this.runtime.assertCliEnabled(cli);
 				return JSON.stringify(catalog);
@@ -27294,7 +35117,7 @@ let CliWorkerService = (() => {
 				let preference = preferenceSchema.parse(JSON.parse(selection));
 				const project = this.project(agent);
 				this.runtime.assertCliEnabled(cliOf(preference));
-				const { catalog } = await this.querySelection(preference, this.backend, this.options, project, signal, this.displayedBindings?.get(JSON.stringify([parentSessionId, cliOf(preference)])));
+				const { catalog } = await this.authorizeChoice(preference, this.backend, this.options, project, signal, this.displayedBindings?.get(JSON.stringify([parentSessionId, cliOf(preference)])));
 				validatePreference(preference, catalog);
 				preference = resolveModel(preference, catalog.models);
 				signal.throwIfAborted();
@@ -27313,11 +35136,11 @@ let CliWorkerService = (() => {
 				const worker = this.runtime.get(agent.id, workerId);
 				const preference = preferenceSchema.parse(JSON.parse(selection));
 				if (cliOf(preference) !== cliOf(worker.preference)) throw new Error("已有会话不能切换 CLI");
-				const expected = this.runtime.storage.accountBinding(workerId);
-				if (!expected) throw new Error(LEGACY_ACCOUNT_RECORD_NOTICE);
 				this.runtime.assertCliEnabled(cliOf(preference));
 				this.settingsCatalogs ??= new SettingsCatalogCache(this.runtime.storage.directory);
-				const catalog = this.settingsCatalogs.display(worker.project, cliOf(preference), expected);
+				const directory = this.runtime.catalogDirectory(worker);
+				const saved = this.runtime.storage.accountBinding(workerId);
+				const catalog = saved && this.settingsCatalogs.display(directory, cliOf(preference), saved) || this.settingsCatalogs.display(directory, cliOf(preference), await readCliAccountBinding(cliOf(preference), this.backend, this.options, directory, signal));
 				if (!catalog) throw new Error("模型目录已失效，请重试读取或在设置中刷新");
 				validatePreference(preference, catalog);
 				signal.throwIfAborted();
@@ -27336,7 +35159,7 @@ let CliWorkerService = (() => {
 		}
 		/** Update a cold child's real Session without activating an Agent or delivering input. */
 		async configureColdWorkerPermission(parent, worker, selected, signal) {
-			const sessionId = SessionId(worker.harnessConversation.sessionId);
+			const sessionId = SessionId$1(worker.harnessConversation.sessionId);
 			return this.runtime.prepareFollowup(parent.id, worker.id, AbortSignal.any([signal, this.disposed.signal]), async (control, preparationId) => {
 				const persistence = this.ctx.get("sessionPersistence");
 				const sessions = this.ctx.get("sessions");
@@ -27346,7 +35169,7 @@ let CliWorkerService = (() => {
 				const validateCurrent = () => {
 					control.throwIfAborted();
 					if (this.ctx.agents.get(parent.id) !== parent) throw new Error("所属主对话已关闭，未修改权限");
-					this.assertExecution(parent);
+					this.assertExecution(parent, true);
 					const current = this.runtime.get(parent.id, worker.id);
 					const record = this.harnessConversation?.lookup(sessionId);
 					if (this.project(parent) !== current.project || current.project !== worker.project || current.harnessConversation?.sessionId !== sessionId || current.harnessConversation.parentSessionId !== parent.id || record?.sessionId !== sessionId || record.workerId !== worker.id || record.parentSessionId !== parent.id) throw new Error("CLI 子会话所属主对话不匹配，未修改权限");
@@ -27366,10 +35189,7 @@ let CliWorkerService = (() => {
 						inheritedEventCount: writer.inheritedEventCount,
 						eventState: read.eventState
 					});
-					const inbox = projections.stateOf(session, "inbox");
-					const turn = projections.stateOf(session, "turnBoundary");
-					const plan = projections.stateOf(session, "plan");
-					if (!inbox || !turn || !plan) throw new Error("原生历史会话投影尚未就绪，未修改权限");
+					const { inbox, turn, plan } = readNativeColdSessionState(projections.stateOf(session, "inbox"), projections.stateOf(session, "turnBoundary"), projections.stateOf(session, "plan"));
 					if (plan.running !== null) throw new Error("原生规划命令尚未完成，未修改权限");
 					if (inbox["next-turn"].length || inbox["next-step"].length || turn.openTurnStartSeq !== null) throw new Error("请等待原生对话结束，并发送或移除原生待发消息后再修改设置");
 					detach = sessions.enter(session);
@@ -27387,9 +35207,9 @@ let CliWorkerService = (() => {
 					sessions.announce(session);
 					validateCurrent();
 					const saved = this.runtime.configureWorkerPermission(parent.id, worker.id, selected, preparationId);
-					const sandbox = selected === "plan" ? "read-only" : parent.ctx.get("sandboxPolicy").resolve({ session: parent.session }).mode;
+					const { sandbox } = this.childPermission(parent, saved);
 					if (parent.ctx.get("sandboxPolicy").resolve({ session }).mode !== sandbox) setSandboxMode(session, sandbox);
-					if (plan.active !== (selected === "plan") || plan.wanted !== null) session.append("plan/mode", { active: selected === "plan" });
+					if (plan.active !== (saved.mode === "plan") || plan.wanted !== null) session.append("plan/mode", { active: saved.mode === "plan" });
 					if (!await sessions.flush(session)) throw new Error("原生会话权限持久化服务不可用，请重新读取当前状态");
 					return saved;
 				} finally {
@@ -27410,7 +35230,7 @@ let CliWorkerService = (() => {
 				if (this.project(parent) !== worker.project) throw new Error("项目已变更，请在原项目继续");
 				let reason;
 				try {
-					this.assertExecution(parent);
+					this.assertExecution(parent, true);
 					this.assertNativeWorkerSettingsIdle(worker);
 					const snapshot = this.runtime.snapshot(parent.id, worker.id);
 					if (snapshot.selectedBusy) throw new Error("请等待本轮结束后再修改权限");
@@ -27419,8 +35239,12 @@ let CliWorkerService = (() => {
 					reason = error instanceof Error ? error.message : String(error);
 				}
 				const state = {
-					currentValue: worker.mode,
-					options: workerPermissionOptions(worker),
+					currentValue: effectiveLevel(worker.level, this.permissionState(parent).sandbox),
+					options: workerLevelOptions(worker),
+					plan: {
+						supported: workerPlanSupported(worker),
+						active: worker.mode === "plan"
+					},
 					writable: !reason,
 					...reason ? { reason } : {}
 				};
@@ -27434,11 +35258,18 @@ let CliWorkerService = (() => {
 			try {
 				const parent = await this.parent(parentSessionId);
 				signal.throwIfAborted();
-				this.assertExecution(parent);
+				this.assertExecution(parent, true);
 				const worker = this.runtime.get(parent.id, workerId);
 				if (this.project(parent) !== worker.project) throw new Error("项目已变更，请在原项目继续");
-				const selected = z.enum(["plan", "accept-edits"]).parse(mode);
-				if (!workerPermissionOptions(worker).some((option) => option.value === selected)) throw new Error("当前 CLI 通路不支持此权限模式");
+				const selected = z.enum([
+					"plan",
+					"accept-edits",
+					"ask",
+					"auto",
+					"full"
+				]).parse(mode);
+				if (selected === "plan" && !workerPlanSupported(worker)) throw new Error("当前 CLI 不支持规划模式");
+				if (selected !== "plan" && selected !== "accept-edits" && !cliLevelOptions(cliOf(worker.preference)).some((option) => option.value === selected)) throw new Error("当前 CLI 通路不支持此权限模式");
 				this.assertNativeWorkerSettingsIdle(worker);
 				const binding = worker.harnessConversation;
 				const child = binding && this.ctx.agents.get(binding.sessionId);
@@ -27446,9 +35277,9 @@ let CliWorkerService = (() => {
 				if (binding && !child) return JSON.stringify(await this.configureColdWorkerPermission(parent, worker, selected, signal));
 				const saved = this.runtime.configureWorkerPermission(parent.id, worker.id, selected);
 				if (child) {
-					const sandbox = selected === "plan" ? "read-only" : parent.ctx.get("sandboxPolicy").resolve({ session: parent.session }).mode;
+					const { sandbox } = this.childPermission(parent, saved);
 					if (child.ctx.get("sandboxPolicy").resolve({ session: child.session }).mode !== sandbox) setSandboxMode(child.session, sandbox);
-					child.ctx.get("planMode")?.set(child, selected === "plan");
+					child.ctx.get("planMode")?.set(child, saved.mode === "plan");
 				}
 				return JSON.stringify(saved);
 			} catch (error) {
@@ -27478,7 +35309,7 @@ let CliWorkerService = (() => {
 					const agent = await this.parent(parentSessionId);
 					control.throwIfAborted();
 					reservation.assertCurrent();
-					this.assertExecution(agent);
+					this.assertExecution(agent, true);
 					const worker = this.runtime.get(agent.id, workerId);
 					if (this.project(agent) !== worker.project) throw new Error("项目已变更，请在原项目继续");
 					if (this.accounts.isBusy(cliOf(worker.preference))) throw new Error("请先关闭账号终端");
@@ -27517,7 +35348,7 @@ let CliWorkerService = (() => {
 			try {
 				const agent = await this.parent(parentSessionId);
 				signal.throwIfAborted();
-				this.assertExecution(agent);
+				this.assertExecution(agent, true);
 				const worker = this.runtime.get(agent.id, workerId);
 				if (this.project(agent) !== worker.project) throw new Error("项目已变更，请在原项目继续");
 				return JSON.stringify(this.runtime.queueFollowup(agent.id, workerId, prompt, expectedRunId, requestId));
@@ -27534,15 +35365,16 @@ let CliWorkerService = (() => {
 				const control = AbortSignal.any([signal, this.disposed.signal]);
 				const agent = await this.parent(parentSessionId);
 				control.throwIfAborted();
-				this.assertExecution(agent);
+				this.assertExecution(agent, true);
 				const worker = this.runtime.get(agent.id, workerId);
 				if (this.project(agent) !== worker.project) throw new Error("项目已变更，请在原项目继续");
 				if (this.accounts.isBusy(cliOf(worker.preference))) throw new Error("请先关闭账号终端");
-				await this.runtime.steerMessage(agent.id, workerId, prompt, expectedRunId, requestId, control);
+				const queued = await this.runtime.steerMessage(agent.id, workerId, prompt, expectedRunId, requestId, control);
 				return JSON.stringify({
 					accepted: true,
 					requestId,
 					runId: expectedRunId,
+					...queued ? { queued } : {},
 					revision: this.runtime.revision
 				});
 			} catch (error) {
@@ -27554,7 +35386,7 @@ let CliWorkerService = (() => {
 			try {
 				const agent = await this.parent(parentSessionId);
 				signal.throwIfAborted();
-				this.assertExecution(agent);
+				this.assertExecution(agent, true);
 				const worker = this.runtime.get(agent.id, workerId);
 				if (this.project(agent) !== worker.project) throw new Error("项目已变更，请在原项目继续");
 				if (this.accounts.isBusy(cliOf(worker.preference))) throw new Error("请先关闭账号终端");
@@ -27569,7 +35401,7 @@ let CliWorkerService = (() => {
 			try {
 				const agent = await this.parent(parentSessionId);
 				signal.throwIfAborted();
-				this.assertExecution(agent);
+				this.assertExecution(agent, true);
 				const worker = this.runtime.get(agent.id, workerId);
 				if (this.project(agent) !== worker.project) throw new Error("项目已变更，请在原项目继续");
 				if (this.accounts.isBusy(cliOf(worker.preference))) throw new Error("请先关闭账号终端");
@@ -27583,7 +35415,7 @@ let CliWorkerService = (() => {
 			try {
 				const agent = await this.parent(parentSessionId);
 				signal.throwIfAborted();
-				this.assertExecution(agent);
+				this.assertExecution(agent, true);
 				const worker = this.runtime.get(agent.id, workerId);
 				if (this.project(agent) !== worker.project) throw new Error("项目已变更，请在原项目继续");
 				if (this.accounts.isBusy(cliOf(worker.preference))) throw new Error("请先关闭账号终端");
@@ -27611,7 +35443,7 @@ let CliWorkerService = (() => {
 			try {
 				const agent = await this.parent(parentSessionId);
 				signal.throwIfAborted();
-				this.assertExecution(agent);
+				this.assertExecution(agent, true);
 				const worker = this.runtime.get(agent.id, workerId);
 				if (this.project(agent) !== worker.project) throw new Error("项目已变更，请在原项目继续");
 				this.runtime.retryQueuedFollowups(agent.id, workerId, expectedRunId);
@@ -27621,13 +35453,17 @@ let CliWorkerService = (() => {
 		}
 		/** @param parentSessionId - Parent session identity. @param workerId - Worker to continue. @param prompt - New task. @param signal - Admission lifetime. @returns Published background receipt. */
 		async followup(parentSessionId, workerId, prompt, signal) {
+			return this.continueWorker(parentSessionId, workerId, prompt, signal, "user");
+		}
+		/** Shared follow-up admission; `origin` decides where this turn's approvals appear. */
+		async continueWorker(parentSessionId, workerId, prompt, signal, origin) {
 			try {
 				const agent = await this.parent(parentSessionId);
 				signal.throwIfAborted();
-				this.assertExecution(agent);
+				this.assertExecution(agent, true);
 				const worker = this.runtime.get(agent.id, workerId);
 				this.runtime.assertCliEnabled(cliOf(worker.preference));
-				return this.launch(agent, worker.title, prompt, worker.preference, worker.mode, workerId, void 0, signal);
+				return this.launch(agent, worker.title, prompt, worker.preference, worker.mode, workerId, void 0, signal, void 0, void 0, void 0, void 0, void 0, origin);
 			} catch (error) {
 				throw failure(error);
 			}
@@ -27637,7 +35473,7 @@ let CliWorkerService = (() => {
 			try {
 				const agent = await this.parent(parentSessionId);
 				signal.throwIfAborted();
-				this.assertExecution(agent);
+				this.assertExecution(agent, true);
 				const worker = this.runtime.assertLegacyRestart(agent.id, workerId);
 				if (this.project(agent) !== worker.project) throw new Error("项目已变更，请在原项目新建对话");
 				return await this.launch(agent, worker.title, prompt, { ...worker.preference }, worker.mode, void 0, { role: worker.role ? structuredClone(worker.role) : void 0 }, signal, workerId);

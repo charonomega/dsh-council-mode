@@ -1,5 +1,6 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useLayoutEffect, useRef, useState } from 'react';
+import { useT } from "./i18n.js";
 const exitDuration = 220;
 // Allow the browser one frame to finish the CSS transition before removing its DOM.
 const removalDelay = exitDuration + 32;
@@ -8,6 +9,7 @@ export function FollowupQueuePresence(props) {
     return _jsx(QueuePresence, { ...props }, props.scopeKey);
 }
 function QueuePresence({ items, expanded, bodyId, heading, renderItem }) {
+    const t = useT();
     const [rows, setRows] = useState(() => items.map((item, index) => ({ item, index, exiting: false })));
     const current = useRef(rows);
     const timers = useRef(new Map());
@@ -64,6 +66,6 @@ function QueuePresence({ items, expanded, bodyId, heading, renderItem }) {
     if (!rows.length)
         return null;
     const exiting = items.length === 0;
-    return (_jsx("div", { className: "cwn-followup-shell", "data-exiting": exiting, children: _jsx("div", { className: "cwn-followup-shell-inner", children: _jsxs("section", { className: "cwn-followup-queue", "aria-label": "\u5F85\u53D1\u9001\u6D88\u606F", "aria-live": "polite", "aria-hidden": exiting || undefined, ...(exiting ? { inert: '' } : {}), children: [_jsx("div", { className: "cwn-followup-heading", children: heading(items.length || rows.length) }), _jsx("div", { id: bodyId, className: "cwn-followup-body", "data-expanded": expanded, "aria-hidden": !expanded, ...(!expanded ? { inert: '' } : {}), children: _jsx("div", { className: "cwn-followup-body-inner", children: _jsx("ol", { children: rows.map(({ item, index, exiting: rowExiting }) => (_jsx("li", { className: "cwn-followup-row", "data-queue-id": item.id, "data-exiting": rowExiting, "aria-hidden": rowExiting || undefined, ...(rowExiting ? { inert: '' } : {}), children: _jsx("div", { className: "cwn-followup-row-inner", children: _jsx("div", { className: "cwn-followup-row-content", children: renderItem(item, index) }) }) }, item.id))) }) }) })] }) }) }));
+    return (_jsx("div", { className: "cwn-followup-shell", "data-exiting": exiting, children: _jsx("div", { className: "cwn-followup-shell-inner", children: _jsxs("section", { className: "cwn-followup-queue", "aria-label": t('待发送消息'), "aria-live": "polite", "aria-hidden": exiting || undefined, ...(exiting ? { inert: '' } : {}), children: [_jsx("div", { className: "cwn-followup-heading", children: heading(items.length || rows.length) }), _jsx("div", { id: bodyId, className: "cwn-followup-body", "data-expanded": expanded, "aria-hidden": !expanded, ...(!expanded ? { inert: '' } : {}), children: _jsx("div", { className: "cwn-followup-body-inner", children: _jsx("ol", { children: rows.map(({ item, index, exiting: rowExiting }) => (_jsx("li", { className: "cwn-followup-row", "data-queue-id": item.id, "data-exiting": rowExiting, "aria-hidden": rowExiting || undefined, ...(rowExiting ? { inert: '' } : {}), children: _jsx("div", { className: "cwn-followup-row-inner", children: _jsx("div", { className: "cwn-followup-row-content", children: renderItem(item, index) }) }) }, item.id))) }) }) })] }) }) }));
 }
 //# sourceMappingURL=followup-queue-presence.js.map

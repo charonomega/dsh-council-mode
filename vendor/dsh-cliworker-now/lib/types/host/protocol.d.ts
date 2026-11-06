@@ -4,6 +4,8 @@ export interface ProtocolResult {
     status: string;
     response: string;
     error?: string;
+    /** Native SUCCESS only: what the main agent should know without changing the status. */
+    notice?: string;
     /** AGY text observed in this process, independent of its conversation-wide result. */
     currentTurnResponse?: string;
     /** Evidence of DONE steps only; this does not establish task success. */

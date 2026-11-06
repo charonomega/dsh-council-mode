@@ -5,6 +5,10 @@ export interface PiOmpAccountTerminalInput {
     cli: PiOmpCli;
     action?: AccountAction;
     source?: AccountSource;
+    /** A provider picked in the account window (login). */
+    provider?: string;
+    /** One login of the account window to sign out (`AccountLogin.id`). */
+    login?: string;
     executable: string;
     project: string;
     stateDirectory: string;

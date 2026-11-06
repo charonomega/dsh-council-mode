@@ -1,22 +1,23 @@
 import { forkWorkerConversation, readWorkerForkState, writeWorkerForkState } from "./worker-fork.js";
 import { readClaudeOwnRoute, prepareClaudeWorkerLaunch } from "./claude-own-route.js";
 import { extendedLaunch, isExtendedCli } from "./extended-adapters.js";
-import { appendFileSync, existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, realpathSync, writeFileSync, rmSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
 import { z } from 'zod';
-import { active, CLI_IDS, CLI_LABELS, CLI_SHORT_NAMES, LEGACY_ACCOUNT_RECORD_NOTICE, isRetiredCli, isUserInterrupted, RETIRED_HARNESS_NOTICE, cliOf, workerName, foldEvents, } from "../shared/types.js";
+import { active, CLI_IDS, CLI_LABELS, CLI_SHORT_NAMES, CARRYOVER_FAILED_NOTICE, CARRYOVER_UNREACHABLE_NOTICE, CARRYOVER_FORK_REFUSED, LEGACY_ACCOUNT_NOTICES, isRetiredCli, isUserInterrupted, RETIRED_HARNESS_NOTICE, cliOf, workerName, foldEvents, DSH_AGENT_NAME, } from "../shared/types.js";
 import { agentNameSchema, availableAgentName, promptForWorker, roleSnapshotSchema, workerTitleSchema, } from "./roles.js";
 import { protocolFor, resolveCliExecutable, workerArguments, captureCatalogMetadata } from "./adapters.js";
 import { spawnManagedAgent } from "./managed-agent.js";
 import { prepareNativeWorker, transportFor, usesNativeBridge } from "./native-worker.js";
 import { BridgeProtocol } from "./bridge-protocol.js";
 import { mkdirSync } from 'node:fs';
-import { projectDirectory, ProcessCleanupUnconfirmedError, } from "./process.js";
+import { cleanupCauseText, projectDirectory, ProcessCleanupUnconfirmedError, } from "./process.js";
+import { bridgeTimeLimit, remainingMs, taskTimeLimit, timeLimitMessage } from "./task-time-limit.js";
 import { join } from 'node:path';
 import { AgyContextReader } from "./agy-context.js";
 import { attachTelemetry, TelemetryReader } from "./telemetry.js";
-import { captureConversationTelemetry, captureLastRunUsageSnapshot, withConversationTelemetry } from "./conversation-telemetry.js";
+import { addSessionUsage, captureConversationTelemetry, captureLastRunUsageSnapshot, withConversationTelemetry, } from "./conversation-telemetry.js";
 import { captureContextTelemetry, withContextTelemetry, withoutContextTelemetry } from "./context-telemetry.js";
 import { NativeSupplementalContextReader } from "./native-supplemental-context.js";
 import { HermesSessionTelemetryReader } from "./hermes-session-telemetry.js";
@@ -24,15 +25,47 @@ import { effectiveHermesHome } from "./hermes-account-context.js";
 import { NativeTimelineReprojector } from "./native-timeline-reprojection.js";
 import { projectPublicToolCall } from "./public-tool-projection.js";
 import { authorizeSelection, ACCOUNT_CHANGED } from "./authorized-catalog.js";
-import { readCliAccountBinding } from "./cli-account-binding.js";
+import { ownAccountBusy as accountBusy } from './own-account-lease.mjs';
+import { LAST_TOOL_FAILED } from './native-tool-outcomes.mjs';
+import { codexRouteEnvironment, readCliAccountBinding } from "./cli-account-binding.js";
+import { crossAccountResume, nativeSessionReachable } from "./cross-account-resume.js";
+import { carryoverContext } from "./carryover-context.js";
 import { assertFirstPartyConfiguration, firstPartyEnvironment } from "./first-party-models.js";
 import { agyBackgroundEnvironment } from "./agy-background-environment.js";
 import { qoderEnvironment } from "./qoder-accounts.js";
 import { AgyProtocol } from "./protocol.js";
 import { FollowupQueue } from "./followup-queue.js";
 import { supportsWorkerNativeSteering } from "../shared/running-message.js";
-import { workerPermissionOptions } from "../shared/worker-permissions.js";
+import { approvalDecisionText, } from "./native-approval-policy.js";
+import { askRunsAsPlan, cliLevelOptions, workerPlanSupported } from "../shared/worker-permissions.js";
 import { GOAL_OBJECTIVE_LIMIT } from "../shared/conversation-features.js";
+import { createIsolatedWorkspace, isolatedCopyExists, isolationPromptNotice, isolationRoot, IsolationUnavailableError, mergeIsolatedWorkspace, removeIsolatedWorkspace, workspacePaths, } from "./isolated-workspace.js";
+/** A message for a run whose account has since changed is queued instead of steered. */
+class AccountChangedDuringRunError extends Error {
+    constructor() {
+        super('本轮结束后发送');
+    }
+}
+/** Older records read like current ones: no account-change note survives in a timeline. */
+function legacyAccountNotes(events) {
+    return events.flatMap((event) => {
+        if (event.kind !== 'diagnostic' || !event.text || !Object.hasOwn(LEGACY_ACCOUNT_NOTICES, event.text))
+            return [event];
+        const text = LEGACY_ACCOUNT_NOTICES[event.text];
+        return text ? [{ ...event, text }] : [];
+    });
+}
+/** Raised before launch when the original session cannot be resumed under the current account. */
+class CarryoverRequiredError extends Error {
+    constructor() {
+        super('原生会话无法在当前账号续接');
+    }
+}
+function withGoal(goal, prompt) {
+    return goal ? `【当前目标】\n${goal}\n【目标结束】\n\n${prompt}` : prompt;
+}
+/** Retry for an account held outside this Host's runs, such as a catalog read. */
+const ACCOUNT_RETRY_MS = 2000;
 /** Internal identity distinguishes deliberate cancellation from timeouts and failures. */
 class UserStoppedError extends Error {
     constructor() {
@@ -40,6 +73,48 @@ class UserStoppedError extends Error {
     }
 }
 const deliveryTerminal = (state) => ['superseded', 'cancelled', 'failed', 'completed'].includes(state);
+/**
+ * Record one authorization request on the running turn, wait visibly for its
+ * decision and record that. A stop, a newer run or a failure is a denial.
+ * Shared by native CLI requests and DSH tool requests from the tool bridge.
+ */
+async function trackApproval(runtime, task, request, decide, 
+/** The asker's own cancellation, such as the DSH tool call's. */
+asker) {
+    const { worker, controller } = task;
+    const runId = worker.runId;
+    const approvals = task.approvals ?? new AbortController();
+    const signal = AbortSignal.any([controller.signal, approvals.signal, ...(asker ? [asker] : [])]);
+    // Stopping starts before the controller aborts; deny from that moment.
+    const withdrawn = () => signal.aborted || !!task.nativeStopRequested;
+    runtime.storage.append(worker, {
+        kind: 'status',
+        text: `CLI 请求授权：${request.summary}`,
+        ...(request.detail ? { detail: request.detail } : {}),
+    });
+    worker.approvalWaiting = (worker.approvalWaiting ?? 0) + 1;
+    runtime.changed();
+    let decided;
+    if (withdrawn())
+        decided = { decision: 'deny', source: 'stopped' };
+    else
+        try {
+            decided = await decide(signal, task.launchMode ?? worker.mode);
+        }
+        catch {
+            decided = { decision: 'deny', source: withdrawn() ? 'stopped' : 'unavailable' };
+        }
+    const current = worker.runId === runId;
+    const decision = withdrawn() || !current ? { decision: 'deny', source: 'stopped' } : decided;
+    if (worker.approvalWaiting)
+        worker.approvalWaiting -= 1;
+    if (!worker.approvalWaiting)
+        delete worker.approvalWaiting;
+    if (current)
+        runtime.storage.append(worker, { kind: 'status', text: approvalDecisionText(decision) });
+    runtime.changed();
+    return decision;
+}
 export class WorkerRuntime {
     storage;
     backend;
@@ -52,6 +127,60 @@ export class WorkerRuntime {
                 this.harnessPreparation = undefined;
         };
     }
+    approvalHandler;
+    /** Host decision for each native authorization request; absent denies. */
+    setApprovalHandler(handler) {
+        this.approvalHandler = handler;
+        return () => {
+            if (this.approvalHandler === handler)
+                this.approvalHandler = undefined;
+        };
+    }
+    accessSnapshot;
+    /** The run's tier (Worker level capped by the parent) and its timeline label, read once at launch. */
+    setAccessSnapshot(read) {
+        this.accessSnapshot = read;
+        return () => {
+            if (this.accessSnapshot === read)
+                this.accessSnapshot = undefined;
+        };
+    }
+    /**
+     * Relay one native authorization request to the Host decision and answer the
+     * runner. Every path answers: a missing handler, failure or stop is a denial.
+     */
+    relayApproval(task, request, answer) {
+        const { worker } = task;
+        const runId = worker.runId;
+        const withdrawn = () => task.controller.signal.aborted || !!task.approvals?.signal.aborted || !!task.nativeStopRequested;
+        const handler = this.approvalHandler;
+        void trackApproval(this, task, request, (signal, mode) => handler ? handler(worker, request, signal, mode) : Promise.resolve({ decision: 'deny', source: 'unavailable' })).then(async (decision) => {
+            await answer(decision).catch(() => {
+                // The runner denies on its own once its bridge or run ends.
+                if (worker.runId === runId && !withdrawn())
+                    this.storage.append(worker, { kind: 'diagnostic', text: '授权决定未送达 CLI，CLI 按拒绝处理' });
+            });
+        });
+    }
+    /**
+     * Record and decide one DSH tool authorization raised through this Worker's
+     * tool bridge during run `runId`, like a native request. Without that
+     * running turn it is a denial.
+     */
+    harnessApproval(worker, runId, request, signal, decide) {
+        const task = this.tasks.get(worker.id);
+        if (!task || task.worker.runId !== runId || !this.running.has(task))
+            return Promise.resolve({ decision: 'deny', source: 'stopped' });
+        // The CLI only waits for a tool result meanwhile; that is not it going quiet.
+        const release = task.holdIdle?.() ?? (() => { });
+        return trackApproval(this, task, request, decide, signal)
+            .then((decision) => {
+            if (decision.decision === 'deny' && decision.source !== 'stopped')
+                task.harnessDeniedRunId = runId;
+            return decision;
+        })
+            .finally(release);
+    }
     agyContextReader = new AgyContextReader();
     hermesSessionReader = new HermesSessionTelemetryReader();
     telemetryReader = new TelemetryReader();
@@ -62,6 +191,7 @@ export class WorkerRuntime {
     tasks = new Map();
     queue = [];
     running = new Set();
+    accountRetry;
     listeners = new Set();
     disposed = false;
     blocked;
@@ -77,6 +207,11 @@ export class WorkerRuntime {
     priorityRunners = new Map();
     reservations = new Map();
     stopOperations = new Map();
+    /** Merge or discard of a Worker's copy; excludes sends and management. */
+    isolationOperations = new Map();
+    /** Projects whose main directory a merge is writing. */
+    mainWrites = new Set();
+    admissions = 0;
     revision = 0;
     constructor(storage, backend, config) {
         this.storage = storage;
@@ -134,6 +269,29 @@ export class WorkerRuntime {
                     ? `${CLI_LABELS[cli]} 元数据清理记录无法核验，已暂停此 CLI`
                     : `${CLI_LABELS[cli]} 元数据进程清理尚未确认，已暂停此 CLI`);
         }
+        for (const worker of storage.workers.values())
+            this.recoverIsolation(worker);
+    }
+    /** Settles copies left by an earlier Host process; never deletes a ready copy. */
+    recoverIsolation(worker) {
+        const isolation = worker.isolation;
+        if (!isolation)
+            return;
+        const root = isolationRoot(this.storage.directory);
+        let next = isolation;
+        if (isolation.state === 'preparing') {
+            // An unfinished copy has no reliable baseline. The CLI never ran in it.
+            rmSync(join(root, worker.id), { recursive: true, force: true });
+            next = worker.conversationId ? { state: 'released', path: isolation.path } : undefined;
+        }
+        else if (isolation.state === 'merging')
+            next = { ...isolation, state: 'ready', message: '上次合并在 Host 关闭时中断，可重新合并；已写回的文件会被跳过' };
+        if (next && next.state !== 'released' && !isolatedCopyExists(root, worker.id, worker.project))
+            next = { ...next, message: '隔离副本目录已缺失，只能丢弃' };
+        if (next === isolation)
+            return;
+        worker.isolation = next;
+        this.storage.save(worker);
     }
     /** Explicit construction policy is overridable by legacy protocol regression fixtures. */
     initialTransport(cli) {
@@ -274,12 +432,12 @@ export class WorkerRuntime {
         if (priorSteer) {
             if (priorSteer.prompt !== prompt)
                 throw new Error('重复提交标识对应的消息不同');
-            await priorSteer.done;
-            return;
+            return this.steerOrQueue(priorSteer.done, parent, id, prompt, expectedRunId, requestId);
         }
         const receipt = this.followups.receipt(id, prompt, requestId);
         if (receipt) {
-            if (requestedMode === 'steer' && receipt.delivery !== 'steer')
+            // A steer queued after an account change answers its retries with the same queue item.
+            if (requestedMode === 'steer' && receipt.delivery !== 'steer' && !(receipt.delivery === 'queue' && receipt.item))
                 throw new Error('这条消息已经以其他方式提交，请刷新会话');
             if (receipt.delivery === 'steer') {
                 if (receipt.acknowledged)
@@ -294,7 +452,7 @@ export class WorkerRuntime {
         }
         if (mode === 'queue')
             return this.queueFollowup(parent, id, prompt, expectedRunId, requestId, !!requestedMode);
-        await this.steerMessage(parent, id, prompt, expectedRunId, requestId, signal);
+        return this.steerMessage(parent, id, prompt, expectedRunId, requestId, signal);
     }
     /** Current-run native input only. Queue state and queue generations never admit or order steering. */
     async steerMessage(parent, id, prompt, expectedRunId, requestId, signal) {
@@ -310,11 +468,13 @@ export class WorkerRuntime {
         if (prior) {
             if (prior.prompt !== prompt)
                 throw new Error('重复提交标识对应的消息不同');
-            await prior.done;
-            return;
+            return this.steerOrQueue(prior.done, parent, id, prompt, expectedRunId, requestId);
         }
         const receipt = this.followups.receipt(id, prompt, requestId);
         if (receipt) {
+            // A steer queued after an account change answers its retries with the same queue item.
+            if (receipt.delivery === 'queue' && receipt.item)
+                return receipt.item;
             if (receipt.delivery !== 'steer')
                 throw new Error('这条消息已经以其他方式提交，请刷新会话');
             if (receipt.acknowledged)
@@ -323,7 +483,18 @@ export class WorkerRuntime {
                 code: 'STEER_UNKNOWN',
             });
         }
-        await this.steerRunningMessage(worker, prompt, requestId, signal);
+        return this.steerOrQueue(this.steerRunningMessage(worker, prompt, requestId, signal), parent, id, prompt, expectedRunId, requestId);
+    }
+    /** Every caller of one steer request gets the same queue item once the run's account changed. */
+    async steerOrQueue(steering, parent, id, prompt, expectedRunId, requestId) {
+        try {
+            await steering;
+        }
+        catch (error) {
+            if (!(error instanceof AccountChangedDuringRunError))
+                throw error;
+            return this.queueFollowup(parent, id, prompt, expectedRunId, requestId);
+        }
     }
     async steerRunningMessage(worker, prompt, requestId, signal) {
         z.uuid().parse(requestId);
@@ -350,12 +521,11 @@ export class WorkerRuntime {
         const done = (async () => {
             this.queuedExecutionGuard?.(worker);
             const binding = this.storage.accountBinding(worker.id);
-            if (!binding)
-                throw new Error(LEGACY_ACCOUNT_RECORD_NOTICE);
-            const current = await readCliAccountBinding(cliOf(worker.preference), this.backend, this.config, worker.project, control);
+            const current = await readCliAccountBinding(cliOf(worker.preference), this.backend, this.config, this.executionDirectory(worker), control);
             control.throwIfAborted();
-            if (binding !== current)
-                throw new Error(ACCOUNT_CHANGED);
+            // This run keeps the account it started with; the message waits for the next turn.
+            if (!binding || binding !== current)
+                throw new AccountChangedDuringRunError();
             if (this.tasks.get(worker.id) !== task ||
                 worker.runId !== snapshot.runId ||
                 worker.status !== 'running')
@@ -364,6 +534,8 @@ export class WorkerRuntime {
             this.queuedExecutionGuard?.(worker);
             this.followups.recordSteering(worker.id, prompt, requestId, false);
             submitted = true;
+            // A carried-over prompt cannot repeat this message, so the turn is no longer replayed.
+            task.steerSubmitted = true;
             await task.steer(prompt, requestId, control);
             // A matching native receipt acknowledges delivery even if the run ends immediately afterwards.
             this.storage.append(snapshot, {
@@ -422,10 +594,6 @@ export class WorkerRuntime {
                 state: duplicate.state,
             };
         }
-        if (!this.tasks.has(id) &&
-            !this.storage.accountBinding(id) &&
-            !(!worker.conversationId && isUserInterrupted(worker)))
-            throw new Error(LEGACY_ACCOUNT_RECORD_NOTICE);
         this.queuedExecutionGuard?.(worker);
         const receipt = this.followups.receipt(id, prompt, requestId);
         if (receipt?.delivery === 'steer' || (receipt && !receipt.item))
@@ -570,8 +738,6 @@ export class WorkerRuntime {
                 state: 'sending',
             };
         }
-        if (!this.tasks.has(id) && !this.storage.accountBinding(id))
-            throw new Error(LEGACY_ACCOUNT_RECORD_NOTICE);
         if (!workerBound && worker.runId !== expectedRunId)
             throw new Error('本轮状态已变化，请刷新后重新发送');
         const receipt = this.followups.receipt(id, prompt, requestId);
@@ -701,11 +867,15 @@ export class WorkerRuntime {
         for (const callback of this.listeners)
             callback();
     }
-    assertCliEnabled(cli) {
+    /** Shutdown and the unattributed global quarantine refuse every CLI. */
+    assertHostOpen() {
         if (this.disposed)
             throw new Error('插件正在关闭');
         if (this.blocked)
             throw new Error(this.blocked);
+    }
+    assertCliEnabled(cli) {
+        this.assertHostOpen();
         if (this.catalogBlocked.has(cli))
             throw new Error(this.catalogBlocked.get(cli));
         if (isRetiredCli(cli))
@@ -719,7 +889,7 @@ export class WorkerRuntime {
     }
     /** Read-only metadata owns one CLI's account/cache, never another CLI's admission. */
     blockCatalogOnCleanup(cli, error) {
-        let message = `${CLI_LABELS[cli]} 元数据进程清理尚未确认，已暂停此 CLI：${error.message}`;
+        let message = `${CLI_LABELS[cli]} 元数据进程清理尚未确认，已暂停此 CLI：${cleanupCauseText(error) ?? error.message}`;
         this.catalogBlocked.set(cli, message);
         try {
             this.storage.blockCleanup(cli);
@@ -728,6 +898,23 @@ export class WorkerRuntime {
             message += '；清理隔离记录保存失败';
             this.catalogBlocked.set(cli, message);
         }
+        this.drain();
+        this.changed();
+    }
+    /** The CLI's own metadata quarantine, if any; the unattributed global one is reported by assertCliEnabled. */
+    catalogCleanupMessage(cli) {
+        return this.catalogBlocked.get(cli);
+    }
+    /**
+     * The user confirmed no process of this CLI is left. Only a CLI-scoped
+     * quarantine is released, and never while this CLI still has work here.
+     */
+    recoverCatalogCleanup(cli) {
+        this.assertHostOpen();
+        if ([...this.storage.workers.values()].some((worker) => !!this.busyReason(worker) && cliOf(worker.preference) === cli))
+            throw new Error('此 CLI 还有运行或排队中的任务，请等待结束后再解除暂停');
+        this.storage.clearCleanupBlock(cli);
+        this.catalogBlocked.delete(cli);
         this.drain();
         this.changed();
     }
@@ -752,6 +939,33 @@ export class WorkerRuntime {
         const settings = this.storage.setCliEnabled(cli, enabled);
         this.changed();
         return settings;
+    }
+    /** A saved user choice overrides the deployment config; lowering never stops running work. */
+    get maxConcurrent() {
+        return this.storage.generalSettings().maxConcurrent ?? this.config.maxConcurrent;
+    }
+    generalSettings() {
+        return {
+            maxConcurrent: this.maxConcurrent,
+            defaultMaxConcurrent: this.config.maxConcurrent,
+            language: this.storage.generalSettings().language ?? 'follow',
+            isolatedParallelWrites: this.storage.generalSettings().isolatedParallelWrites ?? false,
+            askBeforeDispatch: this.storage.generalSettings().askBeforeDispatch ?? true,
+            showDshSubagents: this.storage.generalSettings().showDshSubagents ?? true,
+            // The plugin config value stays the initial limit until the user chooses one.
+            taskTimeLimitMs: this.storage.generalSettings().taskTimeLimitMs ?? this.config.timeoutMs,
+            defaultTaskTimeLimitMs: this.config.timeoutMs,
+            idleTimeLimitMs: this.storage.generalSettings().idleTimeLimitMs ?? 0,
+        };
+    }
+    setGeneralSettings(patch) {
+        if (this.disposed)
+            throw new Error('插件正在关闭');
+        this.storage.setGeneralSettings(patch);
+        // A raised limit admits already queued tasks at once.
+        this.drain();
+        this.changed();
+        return this.generalSettings();
     }
     /** Account mutation must also respect a prior unconfirmed process cleanup. */
     assertAccountIdle(cli) {
@@ -795,6 +1009,8 @@ export class WorkerRuntime {
     }
     checkAgentName(parent, name, excludingId) {
         const clean = agentNameSchema.parse(name);
+        if (DSH_AGENT_NAME.test(clean))
+            throw new Error('“dsh-数字”保留给 DSH 子 Agent，请换一个名称');
         if ([...this.storage.workers.values()].some((worker) => worker.parentSessionId === parent &&
             worker.id !== excludingId &&
             [workerName(worker), ...(worker.nameAliases ?? [])].some((name) => name.toLocaleLowerCase() === clean.toLocaleLowerCase())))
@@ -891,6 +1107,8 @@ export class WorkerRuntime {
             this.preparations.has(worker.id) ||
             (this.latestPriority.has(worker.id) && this.latestPriority.get(worker.id).id !== priorityId))
             throw new Error('请等待任务结束并完成进程清理后再管理此任务');
+        if (this.isolationOperations.has(worker.id))
+            throw new Error('正在合并或丢弃隔离副本，请稍后再试');
     }
     assertLegacyRestart(parent, id) {
         const worker = this.get(parent, id);
@@ -923,6 +1141,8 @@ export class WorkerRuntime {
         return join(this.storage.directory, 'native', state?.nativeStateWorkerId ?? worker.id);
     }
     forkRunSource(worker, runId) {
+        // Inherited runs map to an ancestor's raw log, yet a carryover still left them behind.
+        this.assertAfterCarryover(worker, runId);
         let current = worker.id, conversationId = worker.conversationId;
         const visited = new Set();
         while (!existsSync(join(this.storage.directory, `${current}.${runId}.raw.jsonl`))) {
@@ -935,7 +1155,20 @@ export class WorkerRuntime {
             current = state.historySourceWorkerId;
             conversationId = state.historySourceConversationId;
         }
+        // A run before a carryover belongs to an older session; the current one has no native copy of it.
+        const owner = this.storage.workers.get(current);
+        if (owner && owner.conversationId === conversationId)
+            this.assertAfterCarryover(owner, runId);
         return { workerId: current, conversationId };
+    }
+    assertAfterCarryover(worker, runId) {
+        if (!worker.carryoverRunId || worker.carryoverRunId === runId)
+            return;
+        const events = this.storage.history(worker.id);
+        const at = events.findIndex((event) => event.runId === runId);
+        const carried = events.findIndex((event) => event.runId === worker.carryoverRunId);
+        if (at >= 0 && carried >= 0 && at < carried)
+            throw new Error(CARRYOVER_FORK_REFUSED);
     }
     /** Metadata only, through the same admitted account, argv builder and owned process backend. */
     async forkNative(worker, cut, signal) {
@@ -946,10 +1179,11 @@ export class WorkerRuntime {
             const nativeState = this.nativeStateDirectory(worker);
             mkdirSync(nativeState, { recursive: true, mode: 0o700 });
             const prompt = '分支元数据操作（不发送模型任务）';
+            const relayEnv = cli === 'codex' ? await codexRouteEnvironment(worker.project, ownSignal) : {};
             const launch = isExtendedCli(cli)
                 ? await extendedLaunch(cli, executable, worker.project, worker.preference, worker.mode, prompt, nativeState, this.config, conversationId, (argv, env) => captureCatalogMetadata(this.backend, this.config, argv, worker.project, ownSignal, env), { backend: this.backend, signal: ownSignal, graceMs: this.config.graceMs }, true)
                 : await prepareNativeWorker({ argv: workerArguments(executable, worker.project, worker.preference, worker.mode, prompt, this.config.timeoutMs, conversationId, true),
-                    env: { ...firstPartyEnvironment(cli), ...(['qoder', 'qodercn'].includes(cli) ? qoderEnvironment(cli) : {}) } }, { cli, project: worker.project, preference: worker.preference, mode: worker.mode,
+                    env: { ...firstPartyEnvironment(cli), ...relayEnv, ...(['qoder', 'qodercn'].includes(cli) ? qoderEnvironment(cli) : {}) } }, { cli, project: worker.project, preference: worker.preference, mode: worker.mode,
                     prompt, conversationId, stateDirectory: nativeState }, this.config);
             let output = '', problem;
             let handle;
@@ -1048,9 +1282,8 @@ export class WorkerRuntime {
                 throw new Error(notes.map((frame) => frame.record.note).join('；'));
             return createdId;
         };
-        const binding = this.storage.accountBinding(worker.id);
-        if (!binding || binding !== await readCliAccountBinding(cli, this.backend, this.config, worker.project, signal))
-            throw new Error(ACCOUNT_CHANGED);
+        // Any signed-in own account may branch; the branch's first turn rebinds to it.
+        await readCliAccountBinding(cli, this.backend, this.config, worker.project, signal);
         const conversationId = (await operation(sourceId, 'fork', signal));
         return { conversationId, rollback: async () => {
                 try {
@@ -1063,6 +1296,8 @@ export class WorkerRuntime {
     }
     async forkWorker(parent, id, atMessageId, bridge, signal) {
         const source = this.get(parent.id, id);
+        if (source.isolation)
+            throw new Error('隔离副本中的对话暂不支持分支，请先合并或丢弃后新建对话');
         // Paused queued followups still belong to this conversation and prohibit a fork.
         if (this.busyReason(source) || this.followups.list(id).length)
             throw new Error('请等待当前运行结束后再分支');
@@ -1150,16 +1385,16 @@ export class WorkerRuntime {
                 !supportsWorkerNativeSteering(worker)
                 ? '此历史会话使用的通信通路不支持原生引导，当前使用排队；不会更换原生会话协议'
                 : undefined,
-            resumeBlockedReason: worker?.conversationId && !this.storage.accountBinding(worker.id)
-                ? LEGACY_ACCOUNT_RECORD_NOTICE
-                : undefined,
             timeline: timeline.slice(-this.config.maxTimelineItems),
             revision: this.revision,
             truncated: timeline.length > this.config.maxTimelineItems,
+            // Absent means `follow`; every open view adopts a saved language live.
+            showDshSubagents: this.storage.generalSettings().showDshSubagents ?? true,
+            ...(this.storage.generalSettings().language ? { language: this.storage.generalSettings().language } : {}),
         };
     }
     timeline(worker) {
-        const events = this.nativeTimelineReprojector.project(worker, this.storage.history(worker.id), (runId) => join(this.storage.directory, `${worker.id}.${runId}.raw.jsonl`));
+        const events = this.nativeTimelineReprojector.project(worker, legacyAccountNotes(this.storage.history(worker.id)), (runId) => join(this.storage.directory, `${worker.id}.${runId}.raw.jsonl`));
         const rows = foldEvents(events.map((event) => ({
             ...event,
             ...projectPublicToolCall(cliOf(worker.preference), event),
@@ -1168,7 +1403,9 @@ export class WorkerRuntime {
             attachTelemetry(rows, runId, this.runTelemetry(worker, runId));
         return rows;
     }
-    runTelemetry(worker, runId) {
+    runTelemetry(bound, runId) {
+        // Native session files are keyed by the directory the CLI actually ran in.
+        const worker = bound.isolation ? { ...bound, project: bound.isolation.path } : bound;
         const rawPath = join(this.storage.directory, `${worker.id}.${runId}.raw.jsonl`);
         const observed = { ...this.telemetryReader.read(rawPath, cliOf(worker.preference), runId === worker.runId
                 ? {
@@ -1269,13 +1506,15 @@ export class WorkerRuntime {
         this.changed();
         return updated;
     }
-    configureWorkerPermission(parent, id, mode, preparationId) {
+    /** @param setting - The plan switch (`plan`/`accept-edits`) or a level; the caller enforces the parent cap. */
+    configureWorkerPermission(parent, id, setting, preparationId) {
         if (this.disposed)
             throw new Error('CLI Worker is shutting down');
         const worker = this.get(parent, id);
         if (isRetiredCli(cliOf(worker.preference)))
             throw new Error(RETIRED_HARNESS_NOTICE);
-        if (!workerPermissionOptions(worker).some((option) => option.value === mode))
+        const plan = setting === 'plan' || setting === 'accept-edits';
+        if (plan ? setting === 'plan' && !workerPlanSupported(worker) : !cliLevelOptions(cliOf(worker.preference)).some((option) => option.value === setting))
             throw new Error('当前 CLI 通路不支持此权限模式');
         if (preparationId) {
             const preparation = this.preparations.get(id);
@@ -1288,7 +1527,7 @@ export class WorkerRuntime {
         if (this.followups.list(id).length)
             throw new Error('请先发送或取消待发送消息（包含已暂停消息），再修改权限');
         this.assertCliEnabled(cliOf(worker.preference));
-        const updated = { ...worker, mode };
+        const updated = plan ? { ...worker, mode: setting } : { ...worker, level: setting };
         this.storage.save(updated);
         this.changed();
         return updated;
@@ -1301,6 +1540,12 @@ export class WorkerRuntime {
         const task = this.tasks.get(id);
         return task?.steer && !task.controller.signal.aborted && worker.status === 'running' ? 'ready' : 'pending';
     }
+    /** Synchronous admission: concurrent selections cannot overbook the sibling cap. */
+    assertSiblingCapacity(parent) {
+        const unfinished = [...this.storage.workers.values()].filter(worker => worker.parentSessionId === parent && worker.initiator && active(worker.status));
+        if (unfinished.length >= 6)
+            throw new Error('子 Agent 发起的任务已达上限（同一主对话最多 6 个未结束任务）');
+    }
     submit(parent, project, title, prompt, preference, mode, previousId, identity, authorizedBinding, queuedAdmission, preparationId, submissionId, attachments) {
         if (this.disposed)
             throw new Error('CLI Worker is shutting down');
@@ -1310,6 +1555,8 @@ export class WorkerRuntime {
             throw new Error('Task must contain 1–100000 characters');
         const canonical = projectDirectory(project);
         const previous = previousId ? this.get(parent, previousId) : undefined;
+        if (previous?.initiator || (!previous && identity?.initiator))
+            this.assertSiblingCapacity(parent);
         if (attachments?.length && previous?.transport === 'legacy')
             throw new Error('旧协议会话尚未接通附件，请使用原生 CLI 会话');
         if (previous && submissionId) {
@@ -1330,11 +1577,11 @@ export class WorkerRuntime {
             throw new Error('此会话正在准备发送，请稍后再试');
         if (previous && (active(previous.status) || this.tasks.has(previous.id)))
             throw new Error('This CLI conversation already has a running or queued turn');
+        if (previous && this.isolationOperations.has(previous.id))
+            throw new Error('正在合并或丢弃隔离副本，请稍后再发送');
         const freshAfterStop = previous && !previous.conversationId && isUserInterrupted(previous);
         if (previous && !previous.conversationId && !readWorkerForkState(this.storage.directory, previous.id)?.sourceConversationId && !freshAfterStop)
             throw new Error('No CLI conversation_id was received; start a new worker');
-        if (previous && !this.storage.accountBinding(previous.id) && !freshAfterStop)
-            throw new Error(LEGACY_ACCOUNT_RECORD_NOTICE);
         if (previous && previous.project !== canonical)
             throw new Error('Cannot resume a worker in another workspace');
         const nativeAdmission = previous
@@ -1382,6 +1629,7 @@ export class WorkerRuntime {
         const worker = previous ?? {
             id: randomUUID(),
             parentSessionId: parent,
+            ...(identity?.initiator ? { initiator: structuredClone(identity.initiator) } : {}),
             project: canonical,
             title: title.slice(0, 160),
             agentName: identity?.agentName
@@ -1412,6 +1660,8 @@ export class WorkerRuntime {
         worker.observedModel = undefined;
         worker.updatedAt = now;
         worker.jobId = undefined;
+        worker.isolationNotice = undefined;
+        worker.resultNotice = undefined;
         this.storage.save(worker);
         if (!queuedAdmission || queuedAdmission.priority) {
             this.storage.append(worker, {
@@ -1445,12 +1695,12 @@ export class WorkerRuntime {
         // or execution affect only later turns. Every CLI shares this prompt.
         const forkSource = readWorkerForkState(this.storage.directory, worker.id)?.sourceConversationId;
         const cliPrompt = promptForWorker(forkSource ? { ...worker, conversationId: forkSource } : worker, prompt);
+        const goal = worker.goal?.status === 'active' ? worker.goal.objective : undefined;
         const task = {
             worker,
             ...(attachments?.length ? { attachments: structuredClone(attachments) } : {}),
-            prompt: worker.goal?.status === 'active'
-                ? `【当前目标】\n${worker.goal.objective}\n【目标结束】\n\n${cliPrompt}`
-                : cliPrompt,
+            prompt: withGoal(goal, cliPrompt),
+            goal,
             userPrompt: prompt,
             controller,
             done,
@@ -1466,6 +1716,7 @@ export class WorkerRuntime {
             submissionId,
             steering: new Map(),
             steeringController: new AbortController(),
+            order: this.admissions++,
         };
         void admission.catch((error) => {
             if (!controller.signal.aborted)
@@ -1570,6 +1821,7 @@ export class WorkerRuntime {
             worker.status = 'stopping';
             if (task.nativeStop && this.running.has(task)) {
                 task.nativeStopRequested = true;
+                task.approvals?.abort(new UserStoppedError());
                 void Promise.resolve()
                     .then(() => task.nativeStop?.())
                     .catch(() => undefined)
@@ -1638,12 +1890,32 @@ export class WorkerRuntime {
                 void this.finishQueued(task, 'failed', blocked);
                 continue;
             }
-            if (this.running.size >= this.config.maxConcurrent)
+            if (this.running.size >= this.maxConcurrent)
                 break;
-            const conflicts = (other) => other.worker.project === task.worker.project &&
-                (other.worker.mode === 'accept-edits' || task.worker.mode === 'accept-edits');
-            if ([...this.running].some(conflicts) || this.queue.slice(0, this.queue.indexOf(task)).some(conflicts))
-                continue;
+            if (task.accountWait) {
+                // Our own holder admits the next waiter when it ends; another holder is retried.
+                if ([...this.running].some((other) => other.accountKey === task.accountKey))
+                    continue;
+                const remaining = task.accountWait.retryAt - Date.now();
+                if (remaining > 0) {
+                    this.retryDrain(remaining);
+                    continue;
+                }
+            }
+            // A conversation bound to a copy never touches the main directory.
+            if (!task.worker.isolation) {
+                const conflicts = (other) => other.worker.project === task.worker.project &&
+                    !other.worker.isolation &&
+                    !other.isolate &&
+                    (other.worker.mode === 'accept-edits' || task.worker.mode === 'accept-edits');
+                if (this.mainWrites.has(task.worker.project) ||
+                    [...this.running].some(conflicts) ||
+                    this.queue.slice(0, this.queue.indexOf(task)).some(conflicts)) {
+                    if (this.mainWrites.has(task.worker.project) || !this.canIsolate(task))
+                        continue;
+                    task.isolate = true;
+                }
+            }
             this.queue.splice(this.queue.indexOf(task), 1);
             this.running.add(task);
             void this.run(task).catch((error) => {
@@ -1651,8 +1923,110 @@ export class WorkerRuntime {
             });
         }
     }
+    /**
+     * Only a new writer with no native session may move into a copy: CLI
+     * sessions are tied to their working directory and cannot change it.
+     */
+    canIsolate(task) {
+        const worker = task.worker;
+        return (!!this.storage.generalSettings().isolatedParallelWrites &&
+            worker.mode === 'accept-edits' &&
+            !task.isolationRefused &&
+            !worker.conversationId &&
+            !readWorkerForkState(this.storage.directory, worker.id)?.sourceConversationId);
+    }
+    /** The CLI's working directory: the bound copy, or the project itself. */
+    executionDirectory(worker) {
+        return worker.isolation?.path ?? worker.project;
+    }
+    /** Metadata processes need an existing directory; a released copy is recreated only for a turn. */
+    catalogDirectory(worker) {
+        return worker.isolation && isolatedCopyExists(isolationRoot(this.storage.directory), worker.id, worker.project)
+            ? worker.isolation.path
+            : worker.project;
+    }
+    /**
+     * Creates (or recreates at the bound path) this Worker's copy. Returns the
+     * copy path, or undefined when the task went back to the serial queue.
+     */
+    async prepareIsolation(task) {
+        const { worker, controller } = task;
+        const root = isolationRoot(this.storage.directory);
+        const bound = worker.isolation;
+        if (bound && bound.state !== 'released') {
+            if (!isolatedCopyExists(root, worker.id, worker.project))
+                throw new Error('隔离副本目录已缺失，请丢弃后新建对话');
+            return bound.path;
+        }
+        mkdirSync(root, { recursive: true, mode: 0o700 });
+        const path = workspacePaths(realpathSync(root), worker.id, worker.project).copy;
+        if (bound && bound.path !== path)
+            throw new Error('隔离副本路径与会话记录不一致，请新建对话');
+        worker.isolation = { state: 'preparing', path };
+        this.storage.save(worker);
+        this.changed();
+        try {
+            const created = await createIsolatedWorkspace({
+                root,
+                workerId: worker.id,
+                project: worker.project,
+                signal: controller.signal,
+            });
+            // A stop that lands after the last copy step must not leave a fresh copy behind.
+            controller.signal.throwIfAborted();
+            worker.isolation = {
+                state: 'ready',
+                path: created.path,
+                createdAt: new Date().toISOString(),
+                ...(created.skippedLinks ? { skippedLinks: created.skippedLinks } : {}),
+            };
+            this.storage.save(worker);
+            this.storage.append(worker, {
+                kind: 'diagnostic',
+                text: bound ? '已重新创建隔离副本' : '已创建隔离副本',
+                detail: `本轮在隔离副本中运行：${created.path}${created.skippedLinks ? `\n跳过 ${created.skippedLinks} 个指向项目外或无法重建的符号链接` : ''}`,
+            });
+            this.changed();
+            // Verify the account against the directory the CLI will actually read.
+            const original = task.admission;
+            task.admission = original.then(() => readCliAccountBinding(cliOf(worker.preference), this.backend, this.config, created.path, controller.signal));
+            void task.admission.catch((error) => {
+                if (!controller.signal.aborted)
+                    task.admissionFailure ??= { error };
+                if (error instanceof ProcessCleanupUnconfirmedError) {
+                    task.admissionFailure ??= { error };
+                    this.blockCatalogOnCleanup(cliOf(worker.preference), error);
+                }
+            });
+            return created.path;
+        }
+        catch (error) {
+            // No copy existed before this preparation, so whatever is there is ours to remove.
+            await removeIsolatedWorkspace(root, worker.id).catch(() => undefined);
+            worker.isolation = bound ? { state: 'released', path: bound.path } : undefined;
+            if (bound || controller.signal.aborted) {
+                this.storage.save(worker);
+                this.changed();
+                throw error;
+            }
+            const reason = error instanceof IsolationUnavailableError ? error.message : `无法创建隔离副本：${String(error)}`;
+            worker.isolationNotice = `${reason}；已改为排队，等待主目录空闲`;
+            this.storage.save(worker);
+            this.storage.append(worker, { kind: 'diagnostic', text: '未创建隔离副本', detail: worker.isolationNotice });
+            this.changed();
+            return undefined;
+        }
+    }
     finish(task, status, error, interruptionReason) {
         const worker = task.worker;
+        if (task.carryover && !worker.conversationId) {
+            // The new session never started (including a stop while waiting for the
+            // account); keep the original, its uncombined usage and its rebound state.
+            worker.conversationId = task.carryover.previousConversationId;
+            worker.previousSessionUsage = task.carryover.previousSessionUsage;
+            if (task.carryover.forkState)
+                writeWorkerForkState(this.storage.directory, worker.id, task.carryover.forkState);
+        }
         worker.status = status;
         worker.error = error;
         worker.interruptionReason = interruptionReason;
@@ -1706,21 +2080,116 @@ export class WorkerRuntime {
         }
     }
     async run(task) {
+        let directory = task.worker.project;
+        if (task.isolate || task.worker.isolation) {
+            let prepared;
+            try {
+                prepared = await this.prepareIsolation(task);
+            }
+            catch (error) {
+                const stopped = task.controller.signal.aborted;
+                await this.finishQueued(task, stopped ? 'interrupted' : 'failed', stopped ? '用户已取消排队任务' : String(error instanceof Error ? error.message : error));
+                return;
+            }
+            if (!prepared) {
+                // Back to the serial queue at its original admission position.
+                this.running.delete(task);
+                task.isolate = false;
+                task.isolationRefused = true;
+                const index = this.queue.findIndex((other) => other.order > task.order);
+                this.queue.splice(index < 0 ? this.queue.length : index, 0, task);
+                this.changed();
+                this.drain();
+                return;
+            }
+            directory = prepared;
+        }
+        await this.execute(task, directory);
+    }
+    async execute(task, directory) {
         const { worker, controller } = task;
+        const isolated = directory !== worker.project;
+        const prompt = isolated ? isolationPromptNotice(directory, worker.project) + task.prompt : task.prompt;
         let handle;
         let readers = [];
         let harnessLease;
         let stderr = '';
         let totalBytes = 0;
-        const timeout = setTimeout(() => controller.abort(new Error('任务超时')), this.config.timeoutMs);
+        // Settings saved while this turn runs apply to later turns only.
+        const settings = this.generalSettings();
+        const limit = (task.timeLimit ??= taskTimeLimit(settings.taskTimeLimitMs, settings.idleTimeLimitMs));
+        const timeout = setTimeout(() => controller.abort(new Error(timeLimitMessage('total', limit))), remainingMs(limit));
+        let idleTimer;
         const pendingFork = readWorkerForkState(this.storage.directory, worker.id);
         const resumeConversation = worker.conversationId ?? pendingFork?.sourceConversationId;
         const expectedConversation = worker.conversationId;
         const nativeTransport = usesNativeBridge(worker);
-        const createProtocol = nativeTransport
-            ? (_cli, emit, identify, limit) => new BridgeProtocol(emit, identify, limit)
+        // The native bridge renews its own idle window; other transports are timed on their output here.
+        let idleHolds = 0;
+        const touchIdle = !nativeTransport && limit.idleMs > 0
+            ? () => {
+                clearTimeout(idleTimer);
+                // A user deciding an approval is not the CLI going quiet.
+                if (idleHolds)
+                    return;
+                idleTimer = setTimeout(() => controller.abort(new Error(timeLimitMessage('idle', limit))), limit.idleMs);
+            }
+            : undefined;
+        const holdHostIdle = () => {
+            idleHolds++;
+            clearTimeout(idleTimer);
+            let released = false;
+            return () => {
+                if (released)
+                    return;
+                released = true;
+                idleHolds--;
+                touchIdle?.();
+            };
+        };
+        task.approvals = new AbortController();
+        // Bound to the prepared launch's approval mailbox once it exists.
+        let answerApproval;
+        let holdRunnerIdle;
+        let runnerIdleHolds = 0;
+        // A native runner pauses itself for CLI approvals; DSH tool approvals ask it over the mailbox.
+        task.holdIdle = () => {
+            if (!nativeTransport)
+                return holdHostIdle();
+            const send = holdRunnerIdle;
+            if (!send || !(limit.idleMs > 0))
+                return () => { };
+            const id = `idle-${++runnerIdleHolds}`;
+            const held = send(id, 'hold').catch(() => undefined);
+            let released = false;
+            return () => {
+                if (released)
+                    return;
+                released = true;
+                // After the hold's receipt, so the runner never sees the release first.
+                void held.then(() => send(id, 'release')).catch(() => undefined);
+            };
+        };
+        const relay = (id, request) => {
+            const release = holdHostIdle();
+            this.relayApproval(task, request, (decision) => {
+                release();
+                return answerApproval ? answerApproval(id, decision) : Promise.reject(new Error('授权通路未就绪'));
+            });
+        };
+        // OMP's tool approvals and Pi's gate confirms reach the Host through their RPC bridge as well.
+        const createProtocol = nativeTransport || cliOf(worker.preference) === 'omp' || cliOf(worker.preference) === 'pi'
+            ? (_cli, emit, identify, limit) => new BridgeProtocol(emit, identify, limit, relay)
             : protocolFor;
+        // Any reply, reasoning, tool event or delivered result means the resumed turn already started.
+        let observed = false;
+        let spawned = false;
         const protocol = createProtocol(cliOf(worker.preference), (event) => {
+            if (event.kind === 'assistant' ||
+                event.kind === 'reasoning' ||
+                event.kind === 'tool' ||
+                (event.kind === 'result' && (event.state === 'SUCCESS' || !!event.text.trim())))
+                observed = true;
             if (event.observedModel) {
                 worker.observedModel = event.observedModel;
                 this.storage.save(worker);
@@ -1732,6 +2201,13 @@ export class WorkerRuntime {
                 throw new Error('Resume conversation_id does not match the requested conversation');
             if (pendingFork?.sourceConversationId === id)
                 throw new Error('原生分支没有创建新的会话 ID');
+            const left = task.carryover?.previousConversationId;
+            if (task.carryover && left !== id && !worker.conversationId) {
+                if (left && !worker.previousConversationIds?.includes(left))
+                    worker.previousConversationIds = [...(worker.previousConversationIds ?? []), left].slice(-64);
+                worker.carryoverRunId = worker.runId;
+                worker.reboundConversationId = undefined;
+            }
             worker.conversationId = id;
             this.storage.save(worker);
             if (pendingFork?.sourceConversationId) {
@@ -1746,23 +2222,70 @@ export class WorkerRuntime {
         let release;
         let quiescent = false;
         let metadataReady = false;
+        let busyAccount = false;
+        let accountRaced = false;
+        let rebound = false;
+        let reboundResume = false;
         try {
-            const admitted = await task.admission;
+            let admitted = await task.admission;
+            task.accountKey = JSON.stringify([cliOf(worker.preference), admitted]);
             controller.signal.throwIfAborted();
             const previousBinding = this.storage.accountBinding(worker.id);
-            if (previousBinding && previousBinding !== admitted)
-                throw new Error(ACCOUNT_CHANGED);
-            const { binding, preference: authorizedPreference } = await authorizeSelection(worker.preference, this.backend, this.config, worker.project, controller.signal, admitted);
+            // Every turn follows the own account signed in now; the selected model and
+            // effort are authorized again under it (continue-tasks-across-account-changes).
+            const continuing = !!previousBinding || !!resumeConversation;
+            const authorize = () => authorizeSelection(worker.preference, this.backend, this.config, directory, controller.signal, admitted);
+            let authorized;
+            try {
+                authorized = await authorize();
+            }
+            catch (error) {
+                // A turn admitted under the previous account re-reads the current one once.
+                if (!(error instanceof Error) || error.message !== ACCOUNT_CHANGED)
+                    throw error;
+                admitted = await readCliAccountBinding(cliOf(worker.preference), this.backend, this.config, directory, controller.signal);
+                task.accountKey = JSON.stringify([cliOf(worker.preference), admitted]);
+                authorized = await authorize();
+            }
+            const { binding, preference: authorizedPreference } = authorized;
             if (authorizedPreference.model !== worker.preference.model)
                 throw new Error('模型与思考强度不匹配，请重新选择');
             controller.signal.throwIfAborted();
+            rebound = continuing && previousBinding !== binding;
+            // Kept until the session resumes under this account, so a retry after a
+            // failed carryover can still carry it over.
+            // A pending Claude branch resumes its source; a rejected fork is carried over the same way.
+            if (rebound && resumeConversation)
+                worker.reboundConversationId = resumeConversation;
+            reboundResume = !!resumeConversation && worker.reboundConversationId === resumeConversation;
+            if (reboundResume &&
+                !task.carryover &&
+                (crossAccountResume(cliOf(worker.preference)) === 'carryover' ||
+                    nativeSessionReachable({
+                        cli: cliOf(worker.preference),
+                        transport: worker.transport,
+                        hermesHome: cliOf(worker.preference) === 'hermes'
+                            ? effectiveHermesHome({ ...this.config, stateDirectory: this.storage.directory })
+                            : undefined,
+                    }) === false))
+                throw new CarryoverRequiredError();
             this.assertCliEnabled(cliOf(worker.preference));
             const executable = await resolveCliExecutable(cliOf(worker.preference), this.backend, this.config, controller.signal);
             controller.signal.throwIfAborted();
-            await assertFirstPartyConfiguration(cliOf(worker.preference), worker.project, controller.signal);
+            await assertFirstPartyConfiguration(cliOf(worker.preference), directory, controller.signal);
             metadataReady = true;
-            harnessLease = await this.harnessPreparation?.(worker, controller.signal, { submissionId: task.submissionId });
-            const executionConfig = { ...this.config,
+            // One tier snapshot drives both the launch and the bridge catalog built from it.
+            const snapshot = this.accessSnapshot?.(worker);
+            const access = snapshot?.access;
+            harnessLease = await this.harnessPreparation?.(worker, controller.signal, { submissionId: task.submissionId, isolated, access });
+            if (snapshot)
+                this.storage.append(worker, { kind: 'status', text: `本轮权限：${snapshot.label}` });
+            // A first item that cannot ask (Antigravity 仅规划, Pi 只读) launches as plan;
+            // every other first item launches the CLI's native ask mode.
+            const launchMode = access === 'read-only' && askRunsAsPlan(cliOf(worker.preference)) ? 'plan' : worker.mode;
+            task.launchMode = launchMode;
+            const executionConfig = { ...this.config, timeLimit: limit,
+                ...(access ? { access } : {}),
                 ...(task.attachments?.length ? { attachments: task.attachments } : {}),
                 ...(harnessLease?.connection ? { harnessTools: harnessLease.connection } : {}),
             };
@@ -1770,29 +2293,31 @@ export class WorkerRuntime {
             this.storage.save(worker);
             this.changed();
             const selectedClaudeRoute = cliOf(worker.preference) === 'claude'
-                ? await readClaudeOwnRoute(worker.project, controller.signal)
+                ? await readClaudeOwnRoute(directory, controller.signal)
                 : undefined;
             // Bind the exact prepared snapshot as well as the current source. A -> B -> A
             // configuration changes must not authorize launching B under A's admission.
             if (selectedClaudeRoute &&
                 binding !==
-                    (await readCliAccountBinding('claude', this.backend, executionConfig, worker.project, controller.signal, selectedClaudeRoute)))
+                    (await readCliAccountBinding('claude', this.backend, executionConfig, directory, controller.signal, selectedClaudeRoute)))
                 throw new Error(ACCOUNT_CHANGED);
+            const relayEnv = cliOf(worker.preference) === 'codex' ? await codexRouteEnvironment(directory, controller.signal) : {};
             const launch = isExtendedCli(cliOf(worker.preference))
-                ? await extendedLaunch(cliOf(worker.preference), executable, worker.project, worker.preference, worker.mode, task.prompt, this.nativeStateDirectory(worker), executionConfig, resumeConversation, (argv, env) => captureCatalogMetadata(this.backend, this.config, argv, worker.project, controller.signal, env), {
+                ? await extendedLaunch(cliOf(worker.preference), executable, directory, worker.preference, launchMode, prompt, this.nativeStateDirectory(worker), executionConfig, resumeConversation, (argv, env) => captureCatalogMetadata(this.backend, this.config, argv, directory, controller.signal, env), {
                     backend: this.backend,
                     signal: controller.signal,
                     graceMs: this.config.graceMs,
                 }, nativeTransport)
                 : cliOf(worker.preference) === 'claude'
-                    ? await prepareClaudeWorkerLaunch(selectedClaudeRoute, workerArguments(executable, worker.project, worker.preference, worker.mode, task.prompt, this.config.timeoutMs, resumeConversation, nativeTransport), this.storage.directory, controller.signal)
+                    ? await prepareClaudeWorkerLaunch(selectedClaudeRoute, workerArguments(executable, directory, worker.preference, launchMode, prompt, Math.max(1000, remainingMs(limit)), resumeConversation, nativeTransport, access), this.storage.directory, controller.signal)
                     : {
                         env: {
                             ...firstPartyEnvironment(cliOf(worker.preference)),
+                            ...relayEnv,
                             ...agyBackgroundEnvironment(cliOf(worker.preference)),
                             ...(['qoder', 'qodercn'].includes(cliOf(worker.preference)) ? qoderEnvironment(cliOf(worker.preference)) : {}),
                         },
-                        argv: workerArguments(executable, worker.project, worker.preference, worker.mode, task.prompt, this.config.timeoutMs, resumeConversation, nativeTransport),
+                        argv: workerArguments(executable, directory, worker.preference, launchMode, prompt, Math.max(1000, remainingMs(limit)), resumeConversation, nativeTransport, access),
                     };
             // Preparation can already own a private credential snapshot. Retain its
             // cleanup before any later filesystem or native-bridge setup can fail.
@@ -1803,10 +2328,11 @@ export class WorkerRuntime {
             const execution = nativeTransport && !isExtendedCli(cliOf(worker.preference))
                 ? await prepareNativeWorker(launch, {
                     cli: cliOf(worker.preference),
-                    project: worker.project,
+                    project: directory,
                     preference: worker.preference,
-                    mode: worker.mode,
-                    prompt: task.prompt,
+                    mode: launchMode,
+                    ...(access ? { access } : {}),
+                    prompt: prompt,
                     conversationId: expectedConversation,
                     ...(pendingFork?.sourceConversationId ? { forkSource: { conversationId: pendingFork.sourceConversationId, messageId: pendingFork.sourceMessageId } } : {}),
                     stateDirectory: nativeState,
@@ -1825,9 +2351,13 @@ export class WorkerRuntime {
                 }, executionConfig)
                 : launch;
             release = 'cleanup' in execution ? execution.cleanup : undefined;
+            if ('answerApproval' in execution && typeof execution.answerApproval === 'function')
+                answerApproval = execution.answerApproval;
+            if ('holdIdle' in execution && typeof execution.holdIdle === 'function')
+                holdRunnerIdle = execution.holdIdle;
             controller.signal.throwIfAborted();
             if (binding !==
-                (await readCliAccountBinding(cliOf(worker.preference), this.backend, this.config, worker.project, controller.signal)))
+                (await readCliAccountBinding(cliOf(worker.preference), this.backend, this.config, directory, controller.signal)))
                 throw new Error(ACCOUNT_CHANGED);
             controller.signal.throwIfAborted();
             if ('activate' in execution && typeof execution.activate === 'function')
@@ -1836,13 +2366,13 @@ export class WorkerRuntime {
             if (task.queuedFollowupId)
                 this.queuedExecutionGuard?.(worker);
             this.storage.bindAccount(worker.id, binding);
-            if (task.queuedFollowupId && !task.priority) {
+            if (task.queuedFollowupId && !task.priority && !task.delivered) {
                 if (this.tasks.get(worker.id) !== task ||
                     this.followups.list(worker.id).find((item) => item.id === task.queuedFollowupId)?.state !==
                         'sending')
                     throw new UserStoppedError();
             }
-            if (task.priority) {
+            if (task.priority && !task.delivered) {
                 const message = this.latestPriority.get(worker.id);
                 if (!message || message.id !== task.queuedFollowupId || message.controller.signal.aborted)
                     throw new UserStoppedError();
@@ -1850,15 +2380,16 @@ export class WorkerRuntime {
                 message.spawnAttempted = true;
             }
             task.spawnAttempted = true;
+            spawned = true;
             handle = await spawnManagedAgent(this.backend, {
                 argv: execution.argv,
                 env: 'env' in execution ? execution.env : undefined,
-                cwd: worker.project,
+                cwd: directory,
                 stdio: { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' },
                 graceMs: this.config.graceMs,
                 signal: controller.signal,
             });
-            if (task.queuedFollowupId && !task.priority) {
+            if (task.queuedFollowupId && !task.priority && !task.delivered) {
                 this.storage.append(worker, {
                     kind: 'user',
                     text: task.userPrompt,
@@ -1868,12 +2399,14 @@ export class WorkerRuntime {
                 this.followups.remove(worker.id, task.queuedFollowupId);
                 this.changed();
             }
-            if (task.priority) {
+            if (task.priority && !task.delivered) {
                 const message = this.priorityHistory.get(worker.id).get(task.queuedFollowupId);
                 this.updatePriority(worker, message, 'running');
             }
+            task.delivered = true;
             // Observe spawn rejection immediately even while draining protocol streams.
             void handle.done.catch(() => undefined);
+            touchIdle?.();
             controller.signal.throwIfAborted();
             if ('steer' in execution && typeof execution.steer === 'function') {
                 task.steer = execution.steer;
@@ -1888,8 +2421,10 @@ export class WorkerRuntime {
                     throw new Error('CLI pipe unavailable');
                 const decoder = new StringDecoder('utf8');
                 for await (const chunk of stream) {
+                    touchIdle?.();
                     totalBytes += Buffer.byteLength(chunk);
-                    if (totalBytes > this.config.maxRunBytes)
+                    // The native bridge already bounds what it shows; its cumulative bytes are statistics only.
+                    if (!nativeTransport && totalBytes > this.config.maxRunBytes)
                         throw new Error('CLI output exceeded the configured per-run limit');
                     appendFileSync(this.storage.rawPath(worker) + (isError ? '.stderr' : ''), chunk, { mode: 0o600 });
                     if (isError)
@@ -1905,6 +2440,13 @@ export class WorkerRuntime {
             const outcome = await handle.done;
             controller.signal.throwIfAborted();
             protocol.end();
+            // A bridge that ended on its own timer stops the turn like the Host timer does.
+            const expired = protocol instanceof BridgeProtocol && protocol.result?.status === 'ERROR'
+                ? bridgeTimeLimit(protocol.result.error)
+                : undefined;
+            if (expired)
+                controller.abort(new Error(timeLimitMessage(expired, limit)));
+            controller.signal.throwIfAborted();
             // Native cancellation may close its bridge before the mailbox sender has
             // polled the receipt and aborted the outer Host range. Warnings on stderr
             // must not replace this exact, run-scoped cancellation evidence.
@@ -1916,20 +2458,39 @@ export class WorkerRuntime {
                 throw new Error(`CLI exited with ${outcome.exitCode}: ${stderr || protocol.result?.response || 'no diagnostic'}`);
             if (!protocol.result)
                 throw new Error('CLI exited without a final result');
+            // The Host denied a DSH fallback tool, so the runner saw only a failed tool.
+            // A denial is the user's decision: the run completes without a notice, also
+            // when that refused step was the last one before the CLI ended.
+            const harnessDenied = task.harnessDeniedRunId === worker.runId;
             if (protocol instanceof AgyProtocol &&
                 expectedConversation &&
                 protocol.result.conversationId === expectedConversation &&
                 protocol.result.status === 'ERROR' &&
                 protocol.result.completedStepResponse)
                 summaryConflict = `CLI 汇总状态冲突，结果待核实：本轮回复及已观察步骤均为 DONE，但 CLI 最终报告 ERROR。请核查本轮输出和实际产物，不要自动重试。原始汇总错误：${protocol.result.error || '未提供错误详情'}`;
-            else if (nativeTransport && protocol.result.status === 'UNCERTAIN')
-                summaryConflict =
-                    protocol.result.error || 'CLI 汇总状态冲突，结果待核实，请先核查实际产物，不要自动重试';
+            // Native runners and the Pi/OMP bridge share this frame and its unverified outcome.
+            else if (protocol instanceof BridgeProtocol && protocol.result.status === 'UNCERTAIN') {
+                if (!harnessDenied || protocol.result.error !== LAST_TOOL_FAILED)
+                    summaryConflict =
+                        protocol.result.error || 'CLI 汇总状态冲突，结果待核实，请先核查实际产物，不要自动重试';
+            }
             else if (protocol.result.status !== 'SUCCESS')
                 throw new Error(`CLI ${protocol.result.status}: ${protocol.result.error || protocol.result.response || stderr || '请检查 CLI 认证及模型/强度兼容性'}`);
+            else if (!harnessDenied && protocol instanceof BridgeProtocol && protocol.result.notice) {
+                worker.resultNotice = protocol.result.notice;
+                this.storage.append(worker, { kind: 'diagnostic', text: '本轮结果说明', detail: protocol.result.notice });
+            }
         }
         catch (error) {
             failure = error;
+            // A bridge timer that expired before any session arrives as the protocol error itself.
+            const expired = nativeTransport && !controller.signal.aborted ? bridgeTimeLimit(error) : undefined;
+            if (expired)
+                controller.abort(new Error(timeLimitMessage(expired, limit)));
+            // Per attempt: a carryover after a spawned resume can still wait for its account.
+            busyAccount = accountBusy(error) && !spawned;
+            // Nothing reached a CLI yet, so the turn can be authorized again under the new account.
+            accountRaced = !spawned && error instanceof Error && error.message === ACCOUNT_CHANGED;
             failureBeforeStop =
                 !!task.admissionFailure ||
                     (!controller.signal.aborted &&
@@ -1944,6 +2505,14 @@ export class WorkerRuntime {
         }
         finally {
             clearTimeout(timeout);
+            clearTimeout(idleTimer);
+            // Withdraw prompts still open when the CLI exits or the protocol fails.
+            task.approvals?.abort(new Error('当前运行已结束，授权请求已撤回'));
+            task.holdIdle = undefined;
+            if (worker.approvalWaiting) {
+                delete worker.approvalWaiting;
+                this.changed();
+            }
             task.steer = undefined;
             task.nativeStop = undefined;
             task.steeringController.abort(new Error('当前运行已结束，引导通路已关闭'));
@@ -2020,12 +2589,203 @@ export class WorkerRuntime {
             status = 'failed';
             error = String(failure);
         }
+        if (busyAccount && failureBeforeStop && !task.admissionFailure && !releaseFailed && !this.blocked && !this.disposed)
+            return this.waitForAccount(task);
+        if (accountRaced &&
+            !task.accountRaceRetried &&
+            failureBeforeStop &&
+            !task.admissionFailure &&
+            !releaseFailed &&
+            !this.blocked &&
+            !this.disposed) {
+            task.accountRaceRetried = true;
+            return this.waitForAccount(task, 0);
+        }
+        const unreachable = failure instanceof CarryoverRequiredError;
+        if (!task.carryover &&
+            !this.blocked &&
+            !this.disposed &&
+            !releaseFailed &&
+            failureBeforeStop &&
+            !task.admissionFailure &&
+            !controller.signal.aborted &&
+            !task.nativeStopRequested &&
+            (unreachable ||
+                // Only a resume rejected before any reply or tool event is safe to redo in a new session.
+                (reboundResume &&
+                    spawned &&
+                    quiescent &&
+                    !observed &&
+                    !task.steerSubmitted &&
+                    !(failure instanceof ProcessCleanupUnconfirmedError))))
+            return this.carryOver(task, directory, unreachable);
+        // The resumed session answered under the current account.
+        if (!task.carryover && reboundResume && (observed || status === 'completed')) {
+            worker.reboundConversationId = undefined;
+            this.storage.save(worker);
+        }
         this.finish(task, status, error, interruptionReason);
+    }
+    /** Continue this turn in a new native session with the task's own earlier record. */
+    async carryOver(task, directory, unreachable) {
+        const { worker } = task;
+        const context = carryoverContext(this.storage.history(worker.id), worker.runId);
+        const fork = readWorkerForkState(this.storage.directory, worker.id);
+        task.carryover = {
+            previousConversationId: worker.conversationId,
+            previousSessionUsage: worker.previousSessionUsage,
+            ...(fork?.sourceConversationId ? { forkState: fork } : {}),
+        };
+        // The new session starts fresh instead of forking the source again.
+        if (fork?.sourceConversationId) {
+            const { sourceConversationId: _source, sourceMessageId: _cut, ...settled } = fork;
+            writeWorkerForkState(this.storage.directory, worker.id, settled);
+        }
+        // Token usage keeps counting across sessions; the context window is the new session's own.
+        const left = captureConversationTelemetry(worker, this.runTelemetry(worker, worker.runId));
+        if (left)
+            worker.previousSessionUsage = addSessionUsage(worker.previousSessionUsage, left.usage);
+        worker.conversationId = undefined;
+        this.storage.save(worker);
+        this.storage.append(worker, {
+            kind: 'diagnostic',
+            text: unreachable ? CARRYOVER_UNREACHABLE_NOTICE : CARRYOVER_FAILED_NOTICE,
+            detail: context.omitted
+                ? `已附带此前 ${context.included} 条记录，省略 ${context.omitted} 条`
+                : `已附带此前 ${context.included} 条记录`,
+        });
+        // A new session receives the role prompt again, then the history, then this message.
+        task.prompt = withGoal(task.goal, promptForWorker(worker, context.text + task.userPrompt));
+        task.steeringController = new AbortController();
+        this.changed();
+        return this.execute(task, directory);
+    }
+    /**
+     * A Pi/OMP OAuth account serves one run at a time. Its process never started,
+     * so the turn returns to its queue position without holding a slot.
+     */
+    waitForAccount(task, delay = ACCOUNT_RETRY_MS) {
+        const { worker } = task;
+        this.running.delete(task);
+        // An account change is retried silently; only a busy account is worth telling.
+        if (!task.accountWait && delay > 0)
+            this.storage.append(worker, { kind: 'diagnostic', text: '账号正被另一个任务使用，排队等待' });
+        task.accountWait = { retryAt: Date.now() + delay };
+        // Nothing was spawned; the next attempt opens its own steering channel and time limit.
+        task.steeringController = new AbortController();
+        task.timeLimit = undefined;
+        worker.status = 'queued';
+        worker.error = undefined;
+        this.storage.save(worker);
+        const index = this.queue.findIndex((other) => other.order > task.order);
+        this.queue.splice(index < 0 ? this.queue.length : index, 0, task);
+        this.changed();
+        this.drain();
+    }
+    retryDrain(delay) {
+        if (this.accountRetry || this.disposed)
+            return;
+        this.accountRetry = setTimeout(() => {
+            this.accountRetry = undefined;
+            this.drain();
+        }, delay);
+    }
+    /** Idle, unbound-from-operations Worker with an existing copy. */
+    isolationTarget(parent, id) {
+        const worker = this.get(parent, id);
+        if (this.disposed)
+            throw new Error('CLI Worker is shutting down');
+        const isolation = worker.isolation;
+        if (!isolation || isolation.state === 'released' || isolation.state === 'preparing')
+            throw new Error('此任务没有待合并的隔离副本');
+        if (this.isolationOperations.has(id))
+            throw new Error('正在合并或丢弃隔离副本，请稍后再试');
+        if (this.busyReason(worker) || this.tasks.has(id))
+            throw new Error('请等待本轮结束后再合并或丢弃隔离副本');
+        return worker;
+    }
+    /** Ends the copy binding after its directory is confirmed gone. */
+    releaseIsolation(worker, text) {
+        const path = worker.isolation.path;
+        // A conversation never started in the copy has nothing tied to its path.
+        worker.isolation = worker.conversationId ? { state: 'released', path } : undefined;
+        this.storage.save(worker);
+        this.storage.append(worker, { kind: 'diagnostic', text });
+    }
+    /**
+     * Three-way merge of the copy into the project as uncommitted changes.
+     * Nothing is written while any undecided path conflicts; the copy is then kept.
+     */
+    async mergeIsolation(parent, id, signal, resolutions) {
+        const worker = this.isolationTarget(parent, id);
+        const project = worker.project;
+        if (this.mainWrites.has(project))
+            throw new Error('该项目正在写回另一个隔离副本，请稍后再试');
+        const writer = [...this.running].find((task) => task.worker.project === project && !task.worker.isolation && !task.isolate && task.worker.mode === 'accept-edits');
+        if (writer)
+            throw new Error('主目录中有写任务正在运行，请等它结束后再合并');
+        const previous = worker.isolation;
+        const root = isolationRoot(this.storage.directory);
+        const done = (async () => {
+            worker.isolation = { ...previous, state: 'merging', message: undefined };
+            this.storage.save(worker);
+            this.changed();
+            try {
+                const result = await mergeIsolatedWorkspace({ root, workerId: id, project, signal, resolutions });
+                if (result.status === 'conflict') {
+                    worker.isolation = { ...previous, state: 'conflict', conflicts: result.conflicts.slice(0, 200), message: undefined };
+                    this.storage.save(worker);
+                    this.storage.append(worker, {
+                        kind: 'diagnostic',
+                        text: `${result.conflicts.length} 个文件两边都改过，等待主 Agent 整合，主目录未改动`,
+                        detail: result.conflicts.map((item) => `${item.path}：${item.reason}`).join('\n'),
+                    });
+                    return result;
+                }
+                await removeIsolatedWorkspace(root, id);
+                this.releaseIsolation(worker, `已合并隔离副本：写回 ${result.written.length} 个、删除 ${result.deleted.length} 个文件（未提交）`);
+                return result;
+            }
+            catch (error) {
+                worker.isolation = { ...previous, state: previous.state, message: `合并失败：${error instanceof Error ? error.message : String(error)}` };
+                this.storage.save(worker);
+                throw error;
+            }
+        })();
+        return this.isolationOperation(id, 'merging', done, project);
+    }
+    /** Deletes the copy; reports success only after the directory is gone. */
+    async discardIsolation(parent, id) {
+        const worker = this.isolationTarget(parent, id);
+        const root = isolationRoot(this.storage.directory);
+        const done = (async () => {
+            await removeIsolatedWorkspace(root, id);
+            this.releaseIsolation(worker, '已丢弃隔离副本，主目录未改动');
+        })();
+        return this.isolationOperation(id, 'discarding', done);
+    }
+    async isolationOperation(id, kind, done, project) {
+        this.isolationOperations.set(id, { kind, done });
+        if (project)
+            this.mainWrites.add(project);
+        this.changed();
+        try {
+            return await done;
+        }
+        finally {
+            this.isolationOperations.delete(id);
+            if (project)
+                this.mainWrites.delete(project);
+            this.changed();
+            this.drain();
+        }
     }
     async close() {
         if (this.disposed)
             return;
         this.disposed = true;
+        clearTimeout(this.accountRetry);
+        this.accountRetry = undefined;
         for (const worker of this.storage.workers.values())
             this.pauseFollowups(worker.id, 'Host 已关闭，请确认后继续发送');
         const workers = new Set([
@@ -2045,6 +2805,8 @@ export class WorkerRuntime {
         })));
         await Promise.allSettled(interruptions);
         await Promise.allSettled([...this.followupRuns]);
+        // A merge writes the user's project; let it finish rather than cut it off.
+        await Promise.allSettled([...this.isolationOperations.values()].map((operation) => operation.done));
         this.listeners.clear();
         this.supplementalContextReader.clear();
         this.storage.close();

@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { createRoomService, roomView, roomPrompt } from '../lib/room-service.js';
 import { createRoomHost } from '../lib/room-host.js';
+import { createCliWorkerAdapter } from '../lib/adapter.js';
 import { createRoomTools } from '../lib/room-tools.js';
 import { createCouncilTools } from '../lib/tools.js';
 import { createCouncilProjection } from '../lib/projection.js';
@@ -235,7 +236,8 @@ test('CLI authors require the exact live child and current run binding; caller c
   const parent = { id: 'p' }, child = { id: 'child' };
   const worker = { runId: 'r1', harnessConversation: { sessionId: 'child' }, status: 'running' };
   const registry = new Map([['p', parent], ['child', child]]);
-  const cli = { harnessConversation: { lookup: () => ({ parentSessionId: 'p', workerId: 'A' }) }, runtime: { get: () => worker } };
+  const cli = { watch() {}, followup() {}, submitMessage() {},
+    harnessConversation: { lookup: () => ({ parentSessionId: 'p', workerId: 'A' }) }, runtime: { get: () => worker } };
   const host = createRoomHost({ ctx: { get: (name) => name === 'agents' ? registry : cli }, config });
   host.attach({ flight: () => ({ runId: 'r1', roomId: 'room', deliveryId: 'd1' }) });
   assert.deepEqual(await host.identify(child), { parent, roomId: 'room', memberId: 'A', deliveryId: 'd1' });
@@ -283,9 +285,14 @@ test('CLI job is collected at registration before settlement and unrelated job n
     listener({ type: 'registered', job: { id: 'j1', kind: 'cliworker', owner: 'p', label: request.prompt.slice(0, 100) } });
     assert.deepEqual(waited, [['j1', 'p']], 'waiter must exist before the submit receipt is returned');
     return { runId: 'r1' };
-  } };
+  }, followup() {}, runtime: { get: () => ({}) }, harnessConversation: { lookup() {} },
+    async *watch() {
+      yield { selected: { id: 'A', runId: 'old', status: 'completed' } };
+      yield { selected: { id: 'A', runId: 'r1', status: 'completed' }, timeline: [] };
+    },
+  };
   const ctx = { get: (key) => ({ jobs, cliworker: cli }[key]), effect: (fn) => fn() };
-  const adapter = { async *watch() { yield { selected: { runId: 'old', status: 'completed' } }; yield { selected: { runId: 'r1', status: 'completed' }, timeline: [] }; } };
+  const adapter = createCliWorkerAdapter(ctx);
   const host = createRoomHost({ ctx, adapter, config }); host.attach({});
   const result = await host.run({ parent, member: members[0], room: { epoch: 'epoch', deliveries: [1] }, prompt: 'test', flight, accepted: async () => {}, signal: new AbortController().signal });
   assert.equal(result.status, 'completed');

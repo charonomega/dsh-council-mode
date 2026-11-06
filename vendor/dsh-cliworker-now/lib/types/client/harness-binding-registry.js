@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import { cliOf } from "../shared/types.js";
+import { t } from "./i18n.js";
 /** Host-issued child identities shared by the native main view and Worker management. */
 export class HarnessBindingRegistry {
     bindings = new Map();
@@ -15,7 +16,7 @@ export class HarnessBindingRegistry {
     };
     publish(binding, worker) {
         if (!binding.sessionId || binding.sessionId === binding.parentSessionId)
-            throw new Error('不能把主会话登记为 CLI 子会话');
+            throw new Error(t('不能把主会话登记为 CLI 子会话'));
         const cliSelection = worker?.preference
             ? {
                 cli: cliOf(worker.preference),

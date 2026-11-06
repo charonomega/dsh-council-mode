@@ -1,5 +1,7 @@
 import type { HarnessConversationBinding } from '../shared/types.ts';
 type GuardedFeature = 'fork' | 'attachments';
+/** Marks a native button whose own adjacent tooltip bubble is hidden while the plugin's reason shows. */
+export declare const HARNESS_REASON_TOOLTIP = "data-cwn-reason-tooltip";
 export interface GuardedNativeControl {
     element: HTMLButtonElement;
     feature: GuardedFeature;

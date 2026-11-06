@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-council-mode",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": false,
   "description": "Persistent multi-agent Council Mode with the patched CLI Worker included for DeepSeek Harness",
   "type": "module",
@@ -30,7 +30,7 @@
   },
   "icon": "./icon.svg",
   "peerDependencies": {
-    "@deepseek-ai/cordis": "4.0.4 || 4.0.5",
+    "@deepseek-ai/cordis": "4.0.4 || 4.0.5 || ~4.1.0",
     "@deepseek-ai/dsh-agent": "*",
     "@deepseek-ai/dsh-commands": "*",
     "@deepseek-ai/dsh-llm": "*",
@@ -93,7 +93,8 @@
   ],
   "author": "charonomega",
   "engines": {
-    "node": ">=22.19.0"
+    "node": ">=22.19.0",
+    "dsh": "0.2.2-rc.1"
   },
   "repository": {
     "type": "git",
@@ -119,6 +120,7 @@
   "scripts": {
     "build": "node scripts/build-client.mjs",
     "check": "node --check index.js && node --check client.js && node scripts/verify-cliworker.mjs",
-    "test": "node --test tests/*.test.mjs"
+    "test": "node --test tests/*.test.mjs",
+    "pack:release": "node scripts/package-release.mjs"
   }
 }

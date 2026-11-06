@@ -120,6 +120,34 @@ test('assistant streaming deltas are concatenated without separators', () => {
   assert.equal(runs[0].text, '已就绪');
 });
 
+test('CLI Worker 0.8.7 response identities preserve paragraph boundaries and block whitespace', () => {
+  const runId = '11111111-1111-4111-8111-111111111111';
+  const worker = { id: 'w1', status: 'completed', runId };
+  const timeline = [
+    { id: `${runId}:response:["response-a","block-0"]`, kind: 'assistant', text: 'First ',
+      response: { id: 'response-a', blockId: 'block-0', index: 0, complete: true } },
+    { id: `${runId}:response:["response-a","block-1"]`, kind: 'assistant', text: 'response.',
+      response: { id: 'response-a', blockId: 'block-1', index: 1, complete: true } },
+    { id: `${runId}:response:["response-b","block-0"]`, kind: 'assistant', text: 'Second response.',
+      response: { id: 'response-b', blockId: 'block-0', index: 0, complete: true } },
+  ];
+  const runs = memberRuns({ workerId: 'w1', name: 'member' }, worker, { timeline });
+  assert.equal(runs[0].text, 'First response.\n\nSecond response.');
+  assert.equal(runs[0].streaming, false);
+  assert.equal(runs[0].runId, runId);
+});
+
+test('legacy step boundaries and deltas without response metadata retain their meaning', () => {
+  const runs = memberRuns({ workerId: 'w1', name: 'member' }, { status: 'completed' }, {
+    timeline: [
+      { kind: 'assistant', text: 'First ', step: 0, runId: 'legacy' },
+      { kind: 'assistant', text: 'response.', step: 0, runId: 'legacy' },
+      { kind: 'assistant', text: 'Second response.', step: 1, runId: 'legacy' },
+    ],
+  });
+  assert.equal(runs[0].text, 'First response.\n\nSecond response.');
+});
+
 test('completed member lastResult is shown when its timeline is unavailable', () => {
   const items = mergeRoom({
     chatNodes: [],

@@ -3,10 +3,10 @@ import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { windowsCodexBackgroundLaunch } from "./windows-codex-launch.js";
 import { nativeLaunchArgv } from './native-launch.mjs';
-import { createNativeStopControl, createNativeGuidanceControl } from './pi-omp-control.mjs';
+import { createNativeStopControl, createNativeGuidanceControl, createNativeApprovalControl } from './pi-omp-control.mjs';
 import { buildNativeHarnessInjection } from './native-harness-injection.mjs';
-import { prepareAgyHarnessWorkspace } from './native-agy-harness.mjs';
 export const NATIVE_TRANSPORTS = {
+    // Stable persisted bridge identity; the runner negotiates ACP or legacy stream per turn.
     antigravity: 'agy-stream-v1',
     codex: 'codex-app-v1',
     claude: 'claude-stream-v1',
@@ -50,8 +50,10 @@ export async function prepareNativeWorker(launch, input, config) {
     const request = join(directory, 'request.json');
     let control;
     let guidance;
+    let approval;
     try {
         control = await createNativeStopControl(join(directory, 'stop'));
+        approval = await createNativeApprovalControl(join(directory, 'approval'));
         if (['codex', 'hermes'].includes(input.cli))
             guidance = await createNativeGuidanceControl(join(directory, 'control'));
         const activeControl = control;
@@ -65,13 +67,8 @@ export async function prepareNativeWorker(launch, input, config) {
         const { harnessTools, ...publicInput } = input;
         const injected = buildNativeHarnessInjection({ cli: input.cli, argv: launch.argv,
             env: baseEnv ? Object.fromEntries(Object.entries(baseEnv).filter((entry) => typeof entry[1] === 'string')) : undefined,
-            connection: harnessTools });
+            connection: harnessTools, toolTimeoutMs: config.timeLimit?.totalMs ?? config.timeoutMs });
         let nativeArgv = injected.argv;
-        if (input.cli === 'antigravity' && harnessTools) {
-            const prepared = prepareAgyHarnessWorkspace({ directory, argv: nativeArgv, connection: harnessTools });
-            nativeArgv = prepared.argv;
-            Object.assign(injected.env, prepared.env);
-        }
         if (input.cli === 'codex' && harnessTools) {
             // The verified exec parser requires the prompt to remain last.
             const promptIndex = nativeArgv.indexOf(`任务：\n${input.prompt}`);
@@ -84,19 +81,29 @@ export async function prepareNativeWorker(launch, input, config) {
             stopDirectory: join(directory, 'stop'),
             stopNonce: activeControl.nonce,
             ...(guidance ? { controlDirectory: join(directory, 'control'), controlNonce: guidance.nonce } : {}),
+            approvalDirectory: join(directory, 'approval'),
+            approvalNonce: approval.nonce,
             ...(native ? { nativeExecutable: native.argv[0] } : {}),
-            timeoutMs: config.timeoutMs,
+            timeoutMs: config.timeLimit?.totalMs ?? config.timeoutMs,
+            ...(config.timeLimit ? { deadlineAt: config.timeLimit.deadlineAt, idleTimeoutMs: config.timeLimit.idleMs } : {}),
             maxLineBytes: config.maxLineBytes,
             maxRunBytes: config.maxRunBytes,
+            maxNativeLineBytes: config.maxNativeLineBytes,
+            maxToolPreviewBytes: config.maxToolPreviewBytes,
         }), { mode: 0o600, flag: 'wx' });
+        const activeApproval = approval;
         return {
             ...launch,
             argv: [process.execPath, bridgePath(), request],
+            answerApproval: (id, decision) => activeApproval.steer(JSON.stringify(decision), id),
+            /** Pauses or resumes the runner's idle window for hold `key` (`idle-…`); each command has its own mailbox id. */
+            holdIdle: (key, state) => activeApproval.steer(state, `${key}:${state}`),
             env: { ...injected.env, ELECTRON_RUN_AS_NODE: '1' },
             stop: activeControl.stop,
             ...(guidance ? { steer: guidance.steer } : {}),
             cleanup: async () => {
                 try {
+                    await activeApproval.close();
                     await guidance?.close();
                     await activeControl.close();
                     await launch.cleanup?.();
@@ -109,6 +116,7 @@ export async function prepareNativeWorker(launch, input, config) {
     }
     catch (error) {
         try {
+            await approval?.close();
             await guidance?.close();
             await control?.close();
         }

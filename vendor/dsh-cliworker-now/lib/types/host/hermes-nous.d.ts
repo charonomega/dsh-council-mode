@@ -30,6 +30,7 @@ export interface HermesNousSource {
  * No refresh-only, guest, fallback store or different pooled principal is promoted. */
 export declare function projectHermesNousSource(auth: any, minTtlSeconds?: number, options?: {
     allowExpired?: boolean;
+    allowInactive?: boolean;
 }): HermesNousSource;
 export declare function hermesNousMinimumTtl(env: Record<string, string>): number;
 /** Runtime uses its supported MIN_KEY_TTL override (120s), matching the native

@@ -1,5 +1,6 @@
 import { type Telemetry, type TokenUsage } from '../shared/telemetry.ts';
 import type { Worker } from '../shared/types.ts';
+import { type MessageKey } from './i18n.ts';
 export declare function UsageIndicator({ usage, reply, providerCredits, creditsBased }: {
     usage?: TokenUsage;
     reply?: boolean;
@@ -13,17 +14,17 @@ export declare function contextFigures(telemetry?: Telemetry): {
     rows: ({
         value: number | undefined;
         key: "systemTokens";
-        label: "系统提示词";
+        label: MessageKey;
         color: "system";
     } | {
         value: number | undefined;
         key: "toolTokens";
-        label: "工具定义";
+        label: MessageKey;
         color: "tools";
     } | {
         value: number | undefined;
         key: "messageTokens";
-        label: "对话消息";
+        label: MessageKey;
         color: "messages";
     })[];
     complete: boolean;

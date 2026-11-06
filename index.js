@@ -7,11 +7,11 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { invitationIssue, MEMBER_TOOLS } from './lib/member-protocol.js';
 import { createRoomService } from './lib/room-service.js';
-import { createRoomHost } from './lib/room-host.js';
+import { councilArchiveIssue, createRoomHost } from './lib/room-host.js';
 import { createRoomTools } from './lib/room-tools.js';
 import { createRelayLog } from './lib/relay-log.js';
 import { createUserMessage } from './lib/create-message.js';
-import { createCliWorkerAdapter } from './lib/adapter.js';
+import { cliWorkerCompatibilityIssue, createCliWorkerAdapter } from './lib/adapter.js';
 import { CLIS, CLI_IDS, ROLE_BY_ID, ROLE_IDS_TEXT, cliLabel } from './lib/catalog.js';
 import { liveCouncilConfig } from './lib/config-schema.js';
 import { createCouncilEngine } from './lib/engine.js';
@@ -32,21 +32,16 @@ function stateOf(ctx, agent) {
   }
 }
 
-function cliworkerOf(ctx) {
-  return ctx.get('cliworker');
-}
-
 function enableIssue(ctx, agent) {
   try {
     const dispatchIssue = councilDispatchIssue(agent);
     if (dispatchIssue !== null) return dispatchIssue;
+    const archiveIssue = councilArchiveIssue(ctx, agent.id);
+    if (archiveIssue !== null) return archiveIssue;
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
   }
-  if (!cliworkerOf(ctx)) {
-    return '未检测到 CLI Worker 插件；请先安装 dsh-cliworker-now，并至少登录一个 CLI。';
-  }
-  return null;
+  return cliWorkerCompatibilityIssue(ctx.get('cliworker'));
 }
 
 function usage() {
@@ -192,8 +187,18 @@ export function apply(ctx, rawConfig = {}) {
             }
 
             if (['start', 'say', 'pause', 'resume', 'stop', 'unlimited', 'room-status', 'room-resolve'].includes(action)) {
-              const issue = enableIssue(ctx, agent);
-              if (issue) return { kind: 'error', text: issue };
+              // The owner can stop new dispatch and inspect the room after a
+              // permission change or a temporarily unavailable CLI upgrade.
+              if (['pause', 'stop', 'room-status'].includes(action)) {
+                if (agent.session.header.origin === 'subagent') {
+                  return { kind: 'error', text: '议会模式仅用于主对话，不能用于子会话。' };
+                }
+              } else {
+                const issue = ['start', 'say', 'resume'].includes(action)
+                  ? enableIssue(ctx, agent)
+                  : councilDispatchIssue(agent);
+                if (issue) return { kind: 'error', text: issue };
+              }
               const state = stateOf(ctx, agent);
               if (!state.active) return { kind: 'error', text: '请先 /council on。' };
               try {

@@ -5,9 +5,11 @@ import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { EFFORTS } from "../shared/types.js";
-import { activeOpenCodeCredential, readOpenCodeProfile, snapshotOpenCodeAuth, OPENCODE_OAUTH_UNSUPPORTED, } from "./opencode-native.js";
+import { activeOpenCodeCredential, readOpenCodeProfile, snapshotOpenCodeAuth, OPENCODE_OAUTH_UNSUPPORTED, openCodeNativePaths, } from "./opencode-native.js";
 import { probeAccountModels } from './account-models.mjs';
+import { explainAuthenticationScope } from "./catalog-notice.js";
 import { NativeBlockResponses, sessionHttpResponseUsage } from './http-rpc-response.mjs';
+import { nativeSkillPaths } from './cli-native-capabilities.mjs';
 const object = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
 const modelID = (id) => /^[A-Za-z0-9_.:-]+\/[^\s\x00-\x1f]+$/.test(id);
 const sessionID = (id) => /^ses_[A-Za-z0-9]+$/.test(id);
@@ -22,7 +24,7 @@ export function openCodeAuthDirectory(stateDirectory) {
 export async function openCodeEnvironment(stateDirectory, config, authDirectory = join(stateDirectory, 'data'), _managedCredentials = false, modelsPath) {
     if (!isAbsolute(stateDirectory) || !isAbsolute(authDirectory))
         throw new Error('OpenCode state and auth directories must be absolute');
-    const paths = ['config', 'data', 'cache', 'state', 'tmp'].map((name) => join(stateDirectory, name));
+    const paths = ['config', 'data', 'cache', 'state', 'tmp', 'home'].map((name) => join(stateDirectory, name));
     for (const path of [stateDirectory, ...paths, authDirectory, join(authDirectory, 'opencode')]) {
         await mkdir(path, { recursive: true, mode: 0o700 });
         const info = await lstat(path);
@@ -44,13 +46,17 @@ export async function openCodeEnvironment(stateDirectory, config, authDirectory 
     finally {
         await rm(temporary, { force: true });
     }
-    const nativeModels = modelsPath ?? join(homedir(), '.cache', 'opencode', 'models.json');
+    const nativeModels = openCodeNativePaths({ modelsPath }).models;
     return {
         XDG_CONFIG_HOME: paths[0],
         XDG_DATA_HOME: authDirectory,
         XDG_CACHE_HOME: paths[2],
         XDG_STATE_HOME: paths[3],
         TMPDIR: paths[4],
+        // opencode 1.19 Global.Path.home: its .opencode dir merges provider/MCP config over the
+        // admitted profile and gets a dependency install. Shell HOME stays real; user skills
+        // there remain explicit skills.paths.
+        OPENCODE_TEST_HOME: paths[5],
         OPENCODE_DB: join(stateDirectory, 'data', 'opencode.db'),
         OPENCODE_CONFIG: configFile,
         OPENCODE_CONFIG_DIR: paths[0],
@@ -119,9 +125,10 @@ export async function prepareOpenCode(input) {
             edit: mode === 'plan' ? 'deny' : 'allow',
             bash: mode === 'plan' ? 'deny' : 'ask',
             task: 'deny',
-            skill: 'deny',
+            skill: 'allow',
             question: 'deny',
         },
+        skills: { paths: nativeSkillPaths('opencode', { project }) },
     }, snapshot, false, profile?.modelsPath);
     return {
         argv: [
@@ -350,7 +357,8 @@ export async function discoverOpenCode(executable, capture, stateDirectory, auth
             cost,
         });
     }
-    return models.sort((a, b) => Number(b.cost === 'free') - Number(a.cost === 'free') || a.id.localeCompare(b.id));
+    const rejected = [...scopes.values()].filter((scope) => scope.state === 'denied' && scope.denialReason === 'authentication').length;
+    return explainAuthenticationScope(models.sort((a, b) => Number(b.cost === 'free') - Number(a.cost === 'free') || a.id.localeCompare(b.id)), rejected, 'OpenCode');
 }
 /** Native OpenCode JSONL; success needs clean EOF after stop, identity and no failed tool. */
 export class OpenCodeProtocol {

@@ -37,8 +37,12 @@ export interface Config {
     graceMs?: number;
     /** Maximum NDJSON line bytes (default 1048576). */
     maxLineBytes?: number;
-    /** Maximum output bytes per run (default 16777216). */
+    /** Maximum output bytes per run (default 16777216); for native CLIs, the run's display budget. */
     maxRunBytes?: number;
+    /** Maximum bytes of one native CLI protocol frame (default 33554432). */
+    maxNativeLineBytes?: number;
+    /** Maximum shown bytes of one native tool output or reasoning block (default 262144). */
+    maxToolPreviewBytes?: number;
     /** Maximum logical timeline rows in one live view (default 1000). */
     maxTimelineItems?: number;
 }
@@ -74,10 +78,17 @@ export declare class CliWorkerService extends TypertRemoteService {
     private messageSubmissions;
     private selectionBindings;
     private selectionProjects;
+    /** Turn origin by runId: the parent model's tool call, or the user in the Worker UI. */
+    private runOrigins?;
+    /** Exact per-turn question surface; attribution never controls lifecycle. */
+    private runQuestionSessions?;
+    /** DSH tool calls the tool bridge is executing, by their DSH call id. */
+    private bridgeCalls;
     private displayedBindings;
     private settingsCatalogs?;
     private settingsInstance?;
     private settingsSourceRevisions?;
+    private dshSubagents;
     private disposed;
     private harnessConversation?;
     private harnessConversationStore?;
@@ -87,13 +98,61 @@ export declare class CliWorkerService extends TypertRemoteService {
     constructor(ctx: Context, config: Config);
     private parent;
     private project;
+    /** Resolve ownership only; child status stays read-only even in plan mode. */
+    /** CLI Workers win; only an unmatched reference is tried against this conversation's DSH native subagents. */
+    private dshFallback;
+    private dispatchSubject;
+    private siblingDispatch;
+    /**
+     * @param dispatch - A CLI run (or its control), which 仅可查看 admits in the
+     * CLI's native read-only mode. Other project or account writes (merging an
+     * isolated copy, account login) stay refused under read-only.
+     */
     private assertExecution;
+    /**
+     * Under 仅可查看 a Worker without its own level runs at its first item: the
+     * CLI's native ask mode, or Pi's tool_call gate. A CLI whose first item
+     * cannot ask before a change is refused rather than silently weakened: agy's
+     * plan launch keeps its terminal sandbox state writable, Kimi's default
+     * auto-approves Git workspace edits, and Hermes offers no first item. A level
+     * the user picked in the Worker menu runs as picked.
+     */
+    private assertAccessSupported;
+    /** The child session's DSH sandbox and approval policy for a Worker's plan switch and level. */
+    private childPermission;
+    /** The parent's DSH permission state now: plan mode, sandbox and approval policy. */
+    private permissionState;
+    /**
+     * Decide one native authorization request from the parent's current state.
+     * A parent-started turn asks on the parent page; a Worker-UI turn asks in the
+     * Worker's own native conversation. Any failure to ask is a denial.
+     */
+    private decideNativeApproval;
+    /**
+     * Answer a DSH tool approval raised by a tool bridge call like a native
+     * request: a parent-started turn asks on the parent page, a Worker-UI turn
+     * keeps the child's own panel. Any other request is not ours.
+     */
+    private answerHarnessApproval;
     private queryCatalog;
+    private freshCatalog;
+    /**
+     * A Pi/OMP OAuth account is exclusive while another run or catalog read holds
+     * it. Dispatch only needs this account's choices to queue the task, and the run
+     * authorizes afresh once the account is free, so a busy account uses its last
+     * verified catalog. Without one, wait for the short catalog reads to finish.
+     */
+    private busyAccountCatalog;
+    private authorizeChoice;
     private querySelection;
     /** Read installation paths without saving discovery or opening a native account/model process. */
     private resolveDispatchName;
     private chooseQoderVariant;
-    /** Serialize only this conversation's selection; a cancelled waiter never owns the question. */
+    /**
+     * Serialize only this conversation's questions; a cancelled waiter never owns
+     * the question. A settled setup asks nothing, so its catalog check leaves the
+     * queue and parallel dispatches of one conversation start together.
+     */
     private chooseDispatch;
     private launch;
     private waitHarnessRun;
@@ -102,6 +161,16 @@ export declare class CliWorkerService extends TypertRemoteService {
     /** @param parentSessionId - Exact owning parent. @param workerId - Existing Worker. @param expectedSessionId - Failed display binding shown by this Client. @param signal - Explicit repair lifetime. @returns Replacement display binding; never submits a CLI prompt. */
     repairHarnessConversation(parentSessionId: string, workerId: string, expectedSessionId: string, signal: AbortSignal): Promise<string>;
     private registerTools;
+    /** @param parentSessionId - Main conversation. @param signal - Read lifetime. @returns Native direct children JSON. */
+    listDshSubagents(parentSessionId: string, signal: AbortSignal): Promise<string>;
+    /** @param parentSessionId - Main conversation. @param signal - Visible panel lifetime. @returns Native child snapshots. */
+    watchDshSubagents(parentSessionId: string, signal: AbortSignal): AsyncIterable<string>;
+    /** @param parentSessionId - Main conversation. @param childSessionId - Direct child. @param prompt - Human message. @param requestId - Browser-minted prompt identity. @param signal - Admission lifetime. @returns Native inbox receipt JSON. */
+    promptDshSubagent(parentSessionId: string, childSessionId: string, prompt: string, requestId: string, signal: AbortSignal): Promise<string>;
+    /** @param parentSessionId - Main conversation. @param childSessionId - Direct child. @param signal - Stop confirmation lifetime. @returns JSON only after native settlement. */
+    stopDshSubagent(parentSessionId: string, childSessionId: string, signal: AbortSignal): Promise<string>;
+    /** @param parentSessionId - Main conversation. @param childSessionId - Direct child. @param signal - Mutation lifetime. @returns Nothing; only plugin visibility changes. */
+    hideDshSubagent(parentSessionId: string, childSessionId: string, signal: AbortSignal): Promise<void>;
     /** @param parentSessionId - Owning Harness session. @param workerId - Selected worker or empty string. @param signal - Stream lifetime. @returns JSON snapshots, initially and after changes. */
     watch(parentSessionId: string, workerId: string, signal: AbortSignal): AsyncIterable<string>;
     /** @param parentSessionId - Owning parent session. @param workerId - Worker identity. @param anchor - Stable logical row ID, excluded from the result. @param direction - before or after. @returns JSON historical page, at most 200 rows. */
@@ -136,10 +205,20 @@ export declare class CliWorkerService extends TypertRemoteService {
     restoreWorker(parentSessionId: string, workerId: string, signal: AbortSignal): Promise<void>;
     /** @param parentSessionId - Owning parent. @param workerId - Idle source Worker. @param atMessageId - Completed assistant message, or empty for latest. @param signal - Fork lifetime. @returns Worker and child session identities as JSON. */
     forkWorker(parentSessionId: string, workerId: string, atMessageId: string, signal: AbortSignal): Promise<string>;
+    /** Writes into the parent's project, so the host's plan/read-only boundary applies. */
+    private mergeIsolatedWorker;
+    /** @param parentSessionId - Owning session. @param signal - Query lifetime. @returns Profile-wide general settings JSON. */
+    generalSettings(parentSessionId: string, signal: AbortSignal): Promise<string>;
+    /** @param parentSessionId - Owning session. @param patch - JSON object of changed fields; `null` restores a default. @param signal - Mutation admission lifetime. @returns Updated general settings JSON. */
+    saveGeneralSettings(parentSessionId: string, patch: string, signal: AbortSignal): Promise<string>;
     /** @param parentSessionId - Owning session. @param cli - Selected CLI. @param enabled - Allow new CLI operations. @param signal - Mutation admission lifetime. @returns Updated profile-wide CLI enablement JSON. */
     setCliEnabled(parentSessionId: string, cli: string, enabled: boolean, signal: AbortSignal): Promise<string>;
     /** @param parentSessionId - Owning session. @param cli - Selected CLI. @param signal - Query lifetime. @returns Safe account status JSON. */
     accountStatus(parentSessionId: string, cli: string, signal: AbortSignal): Promise<string>;
+    /** A CLI paused by its own unconfirmed cleanup reports that state instead of failing the read. */
+    private cleanupHeldStatus;
+    /** @param parentSessionId - Owning session. @param cli - CLI the user confirmed has no leftover process. @param signal - Mutation lifetime. @returns Fresh account status JSON. */
+    recoverCliCleanup(parentSessionId: string, cli: string, signal: AbortSignal): Promise<string>;
     private executablePathSnapshot;
     private probeExecutablePath;
     /** @param parentSessionId - Owning session. @param cli - Selected CLI. @param signal - Query lifetime. @returns Machine-local executable path and availability JSON. */
@@ -152,11 +231,18 @@ export declare class CliWorkerService extends TypertRemoteService {
     accountStartForSource(parentSessionId: string, cli: string, action: string, source: string, signal: AbortSignal): Promise<string>;
     /** @param provider - Explicit ZCode native login provider, never a URL or logout source. */
     accountStartForProvider(parentSessionId: string, cli: string, action: string, provider: string, signal: AbortSignal): Promise<string>;
+    /**
+     * @param options - JSON `{ provider?, login? }`: a login provider of the window's picker, or
+     * one login (`AccountLogin.id`) to sign out. Host checks both against the installed CLI.
+     */
+    accountStartWith(parentSessionId: string, cli: string, action: string, options: string, signal: AbortSignal): Promise<string>;
     private startAccount;
     /** @param parentSessionId - Owning session. @param accountId - Account terminal identity. @param signal - Stream lifetime. @returns Ephemeral terminal frame JSON. */
     accountWatch(parentSessionId: string, accountId: string, signal: AbortSignal): AsyncIterable<string>;
     /** @param parentSessionId - Owning session. @param accountId - Account terminal identity. @param data - Human keyboard input. @returns Input accepted. */
     accountWrite(parentSessionId: string, accountId: string, data: string): Promise<boolean>;
+    /** @param parentSessionId - Owning session. @param accountId - Account terminal identity. @param response - The user's answer to the window's current step (JSON). @returns Answer accepted. */
+    accountRespond(parentSessionId: string, accountId: string, response: string): Promise<boolean>;
     /** @param parentSessionId - Owning session. @param accountId - Account terminal identity. @param cols - Visible columns. @param rows - Visible rows. @returns Resize accepted. */
     accountResize(parentSessionId: string, accountId: string, cols: number, rows: number): Promise<boolean>;
     /** @param parentSessionId - Owning session. @param accountId - Account terminal identity. @returns Process cleanup completed. */
@@ -199,6 +285,8 @@ export declare class CliWorkerService extends TypertRemoteService {
     retryQueuedFollowups(parentSessionId: string, workerId: string, expectedRunId: string, signal: AbortSignal): Promise<void>;
     /** @param parentSessionId - Parent session identity. @param workerId - Worker to continue. @param prompt - New task. @param signal - Admission lifetime. @returns Published background receipt. */
     followup(parentSessionId: string, workerId: string, prompt: string, signal: AbortSignal): Promise<string>;
+    /** Shared follow-up admission; `origin` decides where this turn's approvals appear. */
+    private continueWorker;
     /** @param parentSessionId - Owning parent. @param workerId - Idle legacy history without an account binding. @param prompt - Explicit new-dialog task. @param signal - Admission lifetime. @returns JSON background receipt for a fresh Worker. */
     restartWorker(parentSessionId: string, workerId: string, prompt: string, signal: AbortSignal): Promise<string>;
     /** @param parentSessionId - Owning Harness session. @param workerId - Worker to stop. @returns Final worker state after cleanup. */

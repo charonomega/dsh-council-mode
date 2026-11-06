@@ -1,20 +1,20 @@
 # The CLI Worker runtime and its native interface ship inside this bundle.
-# Stable row IDs preserve settings and produce one service instance.
+# Private UI rows project settings from the disabled stock rows.
 - insert:
     - id: council-cliworker-types
       name: ./lib/cliworker-typert.js
     - id: cliworker-native-preflight
       name: ./vendor/dsh-cliworker-now/lib/native-runtime-guard/index.mjs
-    - id: ui-session
+    - id: cliworker-ui-session
       name: ./vendor/dsh-cliworker-now/runtime-host/dsh-client-ui-session/lib/index.js
       inject: [cliworkerNativeReady]
-    - id: ui-conversation
+    - id: cliworker-ui-conversation
       name: ./vendor/dsh-cliworker-now/runtime-host/dsh-client-ui-conversation/lib/index.js
       inject: [cliworkerNativeReady]
-    - id: ui-subagent
+    - id: cliworker-ui-subagent
       name: ./vendor/dsh-cliworker-now/runtime-host/dsh-client-ui-subagent/lib/index.js
       inject: [cliworkerNativeReady]
-    - id: ui-chat
+    - id: cliworker-ui-chat
       name: ./vendor/dsh-cliworker-now/runtime-host/dsh-client-ui-chat/lib/index.js
       inject: [cliworkerNativeReady]
     - id: cliworker-now
@@ -23,3 +23,11 @@
     - id: council-mode
       name: '@local/dsh-council-mode'
       config: {}
+- id: ui-session
+  disabled: true
+- id: ui-conversation
+  disabled: true
+- id: ui-subagent
+  disabled: true
+- id: ui-chat
+  disabled: true

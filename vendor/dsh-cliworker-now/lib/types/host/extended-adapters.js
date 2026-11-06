@@ -118,6 +118,7 @@ export async function extendedLaunch(cli, executable, project, preference, mode,
     const prepared = cli === 'zcode'
         ? await prepareZCode({
             ...input,
+            ...(config.access ? { access: config.access } : {}),
             authDirectory: zcodeAuthDirectory(config.zcodeAuthDirectory, config.stateDirectory),
             builtinConfig: config.zcodeBuiltinConfig,
         })
@@ -125,6 +126,11 @@ export async function extendedLaunch(cli, executable, project, preference, mode,
             ? await preparePiOmp({
                 ...input,
                 cli,
+                maxLineBytes: config.maxLineBytes,
+                maxRunBytes: config.maxRunBytes,
+                maxNativeLineBytes: config.maxNativeLineBytes,
+                maxToolPreviewBytes: config.maxToolPreviewBytes,
+                ...(config.access ? { access: config.access } : {}),
                 ...(config.harnessTools ? { harnessTools: config.harnessTools } : {}),
                 accountRoot: config.stateDirectory ??
                     join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'cliworker-now'),
@@ -137,7 +143,11 @@ export async function extendedLaunch(cli, executable, project, preference, mode,
                 : cli === 'hermes'
                     ? await prepareHermes({ ...input, hermesHome: effectiveHermesHome(config), renewal })
                     : cli === 'grok'
-                        ? await prepareGrok(input)
+                        ? await prepareGrok({
+                            ...input,
+                            ...(config.access ? { access: config.access } : {}),
+                            ...(config.harnessTools ? { harnessTools: config.harnessTools } : {}),
+                        })
                         : undefined;
     if (!prepared)
         throw new Error('未知 CLI');
@@ -158,6 +168,7 @@ export async function extendedLaunch(cli, executable, project, preference, mode,
     try {
         if (nativeTransport && cli !== 'pi' && cli !== 'omp')
             launch = await prepareNativeWorker(prepared, { cli, project, preference, mode, prompt, conversationId, stateDirectory: state,
+                ...(config.access ? { access: config.access } : {}),
                 ...(config.attachments?.length ? { attachments: config.attachments } : {}),
                 ...(config.harnessTools ? { harnessTools: config.harnessTools } : {}) }, config);
         temporary = cli === 'zcode' ? mkdtempSync(join(nativeTemporaryRoot(), 'cwn-')) : undefined;
@@ -175,6 +186,7 @@ export async function extendedLaunch(cli, executable, project, preference, mode,
             ...('activate' in launch && launch.activate ? { activate: launch.activate } : {}),
             ...('steer' in launch && launch.steer ? { steer: launch.steer } : {}),
             ...('stop' in launch && launch.stop ? { stop: launch.stop } : {}),
+            ...('answerApproval' in launch && launch.answerApproval ? { answerApproval: launch.answerApproval } : {}),
             cleanup: async () => {
                 try {
                     await cleanupLaunch();
@@ -230,7 +242,7 @@ export async function extendedCatalog(cli, executable, capture, stateDirectory, 
                 : cli === 'hermes'
                     ? await discoverHermes(executable, run, state, effectiveHermesHome({ ...config, stateDirectory: config.stateDirectory ?? stateDirectory }), { signal, renewal })
                     : cli === 'grok'
-                        ? await discoverGrok(executable, run, state, { signal })
+                        ? await discoverGrok(executable, run, state, { signal, ...(renewal ? { renewal } : {}) })
                         : undefined;
     if (!models)
         throw new Error('未知 CLI');

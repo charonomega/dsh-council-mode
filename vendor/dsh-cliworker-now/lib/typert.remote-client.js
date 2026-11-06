@@ -13,6 +13,14 @@ let dsh_cliworker_now_cliworker_accountResize_parameter_3$schema$value
 const dsh_cliworker_now_cliworker_accountResize_parameter_3$schema = () => (dsh_cliworker_now_cliworker_accountResize_parameter_3$schema$value ??= z.number())
 let dsh_cliworker_now_cliworker_accountResize_result$schema$value
 const dsh_cliworker_now_cliworker_accountResize_result$schema = () => (dsh_cliworker_now_cliworker_accountResize_result$schema$value ??= z.boolean())
+let dsh_cliworker_now_cliworker_accountRespond_parameter_0$schema$value
+const dsh_cliworker_now_cliworker_accountRespond_parameter_0$schema = () => (dsh_cliworker_now_cliworker_accountRespond_parameter_0$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_accountRespond_parameter_1$schema$value
+const dsh_cliworker_now_cliworker_accountRespond_parameter_1$schema = () => (dsh_cliworker_now_cliworker_accountRespond_parameter_1$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_accountRespond_parameter_2$schema$value
+const dsh_cliworker_now_cliworker_accountRespond_parameter_2$schema = () => (dsh_cliworker_now_cliworker_accountRespond_parameter_2$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_accountRespond_result$schema$value
+const dsh_cliworker_now_cliworker_accountRespond_result$schema = () => (dsh_cliworker_now_cliworker_accountRespond_result$schema$value ??= z.boolean())
 let dsh_cliworker_now_cliworker_accountStart_parameter_0$schema$value
 const dsh_cliworker_now_cliworker_accountStart_parameter_0$schema = () => (dsh_cliworker_now_cliworker_accountStart_parameter_0$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_accountStart_parameter_1$schema$value
@@ -41,6 +49,16 @@ let dsh_cliworker_now_cliworker_accountStartForSource_parameter_3$schema$value
 const dsh_cliworker_now_cliworker_accountStartForSource_parameter_3$schema = () => (dsh_cliworker_now_cliworker_accountStartForSource_parameter_3$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_accountStartForSource_result$schema$value
 const dsh_cliworker_now_cliworker_accountStartForSource_result$schema = () => (dsh_cliworker_now_cliworker_accountStartForSource_result$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_accountStartWith_parameter_0$schema$value
+const dsh_cliworker_now_cliworker_accountStartWith_parameter_0$schema = () => (dsh_cliworker_now_cliworker_accountStartWith_parameter_0$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_accountStartWith_parameter_1$schema$value
+const dsh_cliworker_now_cliworker_accountStartWith_parameter_1$schema = () => (dsh_cliworker_now_cliworker_accountStartWith_parameter_1$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_accountStartWith_parameter_2$schema$value
+const dsh_cliworker_now_cliworker_accountStartWith_parameter_2$schema = () => (dsh_cliworker_now_cliworker_accountStartWith_parameter_2$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_accountStartWith_parameter_3$schema$value
+const dsh_cliworker_now_cliworker_accountStartWith_parameter_3$schema = () => (dsh_cliworker_now_cliworker_accountStartWith_parameter_3$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_accountStartWith_result$schema$value
+const dsh_cliworker_now_cliworker_accountStartWith_result$schema = () => (dsh_cliworker_now_cliworker_accountStartWith_result$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_accountStatus_parameter_0$schema$value
 const dsh_cliworker_now_cliworker_accountStatus_parameter_0$schema = () => (dsh_cliworker_now_cliworker_accountStatus_parameter_0$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_accountStatus_parameter_1$schema$value
@@ -165,6 +183,16 @@ let dsh_cliworker_now_cliworker_forkWorker_parameter_2$schema$value
 const dsh_cliworker_now_cliworker_forkWorker_parameter_2$schema = () => (dsh_cliworker_now_cliworker_forkWorker_parameter_2$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_forkWorker_result$schema$value
 const dsh_cliworker_now_cliworker_forkWorker_result$schema = () => (dsh_cliworker_now_cliworker_forkWorker_result$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_generalSettings_parameter_0$schema$value
+const dsh_cliworker_now_cliworker_generalSettings_parameter_0$schema = () => (dsh_cliworker_now_cliworker_generalSettings_parameter_0$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_generalSettings_result$schema$value
+const dsh_cliworker_now_cliworker_generalSettings_result$schema = () => (dsh_cliworker_now_cliworker_generalSettings_result$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_hideDshSubagent_parameter_0$schema$value
+const dsh_cliworker_now_cliworker_hideDshSubagent_parameter_0$schema = () => (dsh_cliworker_now_cliworker_hideDshSubagent_parameter_0$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_hideDshSubagent_parameter_1$schema$value
+const dsh_cliworker_now_cliworker_hideDshSubagent_parameter_1$schema = () => (dsh_cliworker_now_cliworker_hideDshSubagent_parameter_1$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_hideDshSubagent_result$schema$value
+const dsh_cliworker_now_cliworker_hideDshSubagent_result$schema = () => (dsh_cliworker_now_cliworker_hideDshSubagent_result$schema$value ??= z.void())
 let dsh_cliworker_now_cliworker_history_parameter_0$schema$value
 const dsh_cliworker_now_cliworker_history_parameter_0$schema = () => (dsh_cliworker_now_cliworker_history_parameter_0$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_history_parameter_1$schema$value
@@ -199,12 +227,26 @@ let dsh_cliworker_now_cliworker_interruptQueuedFollowup_parameter_3$schema$value
 const dsh_cliworker_now_cliworker_interruptQueuedFollowup_parameter_3$schema = () => (dsh_cliworker_now_cliworker_interruptQueuedFollowup_parameter_3$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_interruptQueuedFollowup_result$schema$value
 const dsh_cliworker_now_cliworker_interruptQueuedFollowup_result$schema = () => (dsh_cliworker_now_cliworker_interruptQueuedFollowup_result$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_listDshSubagents_parameter_0$schema$value
+const dsh_cliworker_now_cliworker_listDshSubagents_parameter_0$schema = () => (dsh_cliworker_now_cliworker_listDshSubagents_parameter_0$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_listDshSubagents_result$schema$value
+const dsh_cliworker_now_cliworker_listDshSubagents_result$schema = () => (dsh_cliworker_now_cliworker_listDshSubagents_result$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_permissionForWorker_parameter_0$schema$value
 const dsh_cliworker_now_cliworker_permissionForWorker_parameter_0$schema = () => (dsh_cliworker_now_cliworker_permissionForWorker_parameter_0$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_permissionForWorker_parameter_1$schema$value
 const dsh_cliworker_now_cliworker_permissionForWorker_parameter_1$schema = () => (dsh_cliworker_now_cliworker_permissionForWorker_parameter_1$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_permissionForWorker_result$schema$value
 const dsh_cliworker_now_cliworker_permissionForWorker_result$schema = () => (dsh_cliworker_now_cliworker_permissionForWorker_result$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_promptDshSubagent_parameter_0$schema$value
+const dsh_cliworker_now_cliworker_promptDshSubagent_parameter_0$schema = () => (dsh_cliworker_now_cliworker_promptDshSubagent_parameter_0$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_promptDshSubagent_parameter_1$schema$value
+const dsh_cliworker_now_cliworker_promptDshSubagent_parameter_1$schema = () => (dsh_cliworker_now_cliworker_promptDshSubagent_parameter_1$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_promptDshSubagent_parameter_2$schema$value
+const dsh_cliworker_now_cliworker_promptDshSubagent_parameter_2$schema = () => (dsh_cliworker_now_cliworker_promptDshSubagent_parameter_2$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_promptDshSubagent_parameter_3$schema$value
+const dsh_cliworker_now_cliworker_promptDshSubagent_parameter_3$schema = () => (dsh_cliworker_now_cliworker_promptDshSubagent_parameter_3$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_promptDshSubagent_result$schema$value
+const dsh_cliworker_now_cliworker_promptDshSubagent_result$schema = () => (dsh_cliworker_now_cliworker_promptDshSubagent_result$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_queueFollowup_parameter_0$schema$value
 const dsh_cliworker_now_cliworker_queueFollowup_parameter_0$schema = () => (dsh_cliworker_now_cliworker_queueFollowup_parameter_0$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_queueFollowup_parameter_1$schema$value
@@ -217,6 +259,12 @@ let dsh_cliworker_now_cliworker_queueFollowup_parameter_4$schema$value
 const dsh_cliworker_now_cliworker_queueFollowup_parameter_4$schema = () => (dsh_cliworker_now_cliworker_queueFollowup_parameter_4$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_queueFollowup_result$schema$value
 const dsh_cliworker_now_cliworker_queueFollowup_result$schema = () => (dsh_cliworker_now_cliworker_queueFollowup_result$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_recoverCliCleanup_parameter_0$schema$value
+const dsh_cliworker_now_cliworker_recoverCliCleanup_parameter_0$schema = () => (dsh_cliworker_now_cliworker_recoverCliCleanup_parameter_0$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_recoverCliCleanup_parameter_1$schema$value
+const dsh_cliworker_now_cliworker_recoverCliCleanup_parameter_1$schema = () => (dsh_cliworker_now_cliworker_recoverCliCleanup_parameter_1$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_recoverCliCleanup_result$schema$value
+const dsh_cliworker_now_cliworker_recoverCliCleanup_result$schema = () => (dsh_cliworker_now_cliworker_recoverCliCleanup_result$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_refreshCatalogForCli_parameter_0$schema$value
 const dsh_cliworker_now_cliworker_refreshCatalogForCli_parameter_0$schema = () => (dsh_cliworker_now_cliworker_refreshCatalogForCli_parameter_0$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_refreshCatalogForCli_parameter_1$schema$value
@@ -289,6 +337,12 @@ let dsh_cliworker_now_cliworker_runningMessageSettings_parameter_1$schema$value
 const dsh_cliworker_now_cliworker_runningMessageSettings_parameter_1$schema = () => (dsh_cliworker_now_cliworker_runningMessageSettings_parameter_1$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_runningMessageSettings_result$schema$value
 const dsh_cliworker_now_cliworker_runningMessageSettings_result$schema = () => (dsh_cliworker_now_cliworker_runningMessageSettings_result$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_saveGeneralSettings_parameter_0$schema$value
+const dsh_cliworker_now_cliworker_saveGeneralSettings_parameter_0$schema = () => (dsh_cliworker_now_cliworker_saveGeneralSettings_parameter_0$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_saveGeneralSettings_parameter_1$schema$value
+const dsh_cliworker_now_cliworker_saveGeneralSettings_parameter_1$schema = () => (dsh_cliworker_now_cliworker_saveGeneralSettings_parameter_1$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_saveGeneralSettings_result$schema$value
+const dsh_cliworker_now_cliworker_saveGeneralSettings_result$schema = () => (dsh_cliworker_now_cliworker_saveGeneralSettings_result$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_saveRolePreset_parameter_0$schema$value
 const dsh_cliworker_now_cliworker_saveRolePreset_parameter_0$schema = () => (dsh_cliworker_now_cliworker_saveRolePreset_parameter_0$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_saveRolePreset_parameter_1$schema$value
@@ -361,6 +415,12 @@ let dsh_cliworker_now_cliworker_stop_parameter_1$schema$value
 const dsh_cliworker_now_cliworker_stop_parameter_1$schema = () => (dsh_cliworker_now_cliworker_stop_parameter_1$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_stop_result$schema$value
 const dsh_cliworker_now_cliworker_stop_result$schema = () => (dsh_cliworker_now_cliworker_stop_result$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_stopDshSubagent_parameter_0$schema$value
+const dsh_cliworker_now_cliworker_stopDshSubagent_parameter_0$schema = () => (dsh_cliworker_now_cliworker_stopDshSubagent_parameter_0$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_stopDshSubagent_parameter_1$schema$value
+const dsh_cliworker_now_cliworker_stopDshSubagent_parameter_1$schema = () => (dsh_cliworker_now_cliworker_stopDshSubagent_parameter_1$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_stopDshSubagent_result$schema$value
+const dsh_cliworker_now_cliworker_stopDshSubagent_result$schema = () => (dsh_cliworker_now_cliworker_stopDshSubagent_result$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_submitMessage_parameter_0$schema$value
 const dsh_cliworker_now_cliworker_submitMessage_parameter_0$schema = () => (dsh_cliworker_now_cliworker_submitMessage_parameter_0$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_submitMessage_parameter_1$schema$value
@@ -375,6 +435,10 @@ let dsh_cliworker_now_cliworker_watch_parameter_1$schema$value
 const dsh_cliworker_now_cliworker_watch_parameter_1$schema = () => (dsh_cliworker_now_cliworker_watch_parameter_1$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_watch_result$schema$value
 const dsh_cliworker_now_cliworker_watch_result$schema = () => (dsh_cliworker_now_cliworker_watch_result$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_watchDshSubagents_parameter_0$schema$value
+const dsh_cliworker_now_cliworker_watchDshSubagents_parameter_0$schema = () => (dsh_cliworker_now_cliworker_watchDshSubagents_parameter_0$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_watchDshSubagents_result$schema$value
+const dsh_cliworker_now_cliworker_watchDshSubagents_result$schema = () => (dsh_cliworker_now_cliworker_watchDshSubagents_result$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_accountResize_parameter_0_strict$schema$value
 const dsh_cliworker_now_cliworker_accountResize_parameter_0_strict$schema = () => (dsh_cliworker_now_cliworker_accountResize_parameter_0_strict$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_accountResize_parameter_1_strict$schema$value
@@ -383,6 +447,12 @@ let dsh_cliworker_now_cliworker_accountResize_parameter_2_strict$schema$value
 const dsh_cliworker_now_cliworker_accountResize_parameter_2_strict$schema = () => (dsh_cliworker_now_cliworker_accountResize_parameter_2_strict$schema$value ??= z.number())
 let dsh_cliworker_now_cliworker_accountResize_parameter_3_strict$schema$value
 const dsh_cliworker_now_cliworker_accountResize_parameter_3_strict$schema = () => (dsh_cliworker_now_cliworker_accountResize_parameter_3_strict$schema$value ??= z.number())
+let dsh_cliworker_now_cliworker_accountRespond_parameter_0_strict$schema$value
+const dsh_cliworker_now_cliworker_accountRespond_parameter_0_strict$schema = () => (dsh_cliworker_now_cliworker_accountRespond_parameter_0_strict$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_accountRespond_parameter_1_strict$schema$value
+const dsh_cliworker_now_cliworker_accountRespond_parameter_1_strict$schema = () => (dsh_cliworker_now_cliworker_accountRespond_parameter_1_strict$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_accountRespond_parameter_2_strict$schema$value
+const dsh_cliworker_now_cliworker_accountRespond_parameter_2_strict$schema = () => (dsh_cliworker_now_cliworker_accountRespond_parameter_2_strict$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_accountStart_parameter_0_strict$schema$value
 const dsh_cliworker_now_cliworker_accountStart_parameter_0_strict$schema = () => (dsh_cliworker_now_cliworker_accountStart_parameter_0_strict$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_accountStart_parameter_1_strict$schema$value
@@ -405,6 +475,14 @@ let dsh_cliworker_now_cliworker_accountStartForSource_parameter_2_strict$schema$
 const dsh_cliworker_now_cliworker_accountStartForSource_parameter_2_strict$schema = () => (dsh_cliworker_now_cliworker_accountStartForSource_parameter_2_strict$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_accountStartForSource_parameter_3_strict$schema$value
 const dsh_cliworker_now_cliworker_accountStartForSource_parameter_3_strict$schema = () => (dsh_cliworker_now_cliworker_accountStartForSource_parameter_3_strict$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_accountStartWith_parameter_0_strict$schema$value
+const dsh_cliworker_now_cliworker_accountStartWith_parameter_0_strict$schema = () => (dsh_cliworker_now_cliworker_accountStartWith_parameter_0_strict$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_accountStartWith_parameter_1_strict$schema$value
+const dsh_cliworker_now_cliworker_accountStartWith_parameter_1_strict$schema = () => (dsh_cliworker_now_cliworker_accountStartWith_parameter_1_strict$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_accountStartWith_parameter_2_strict$schema$value
+const dsh_cliworker_now_cliworker_accountStartWith_parameter_2_strict$schema = () => (dsh_cliworker_now_cliworker_accountStartWith_parameter_2_strict$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_accountStartWith_parameter_3_strict$schema$value
+const dsh_cliworker_now_cliworker_accountStartWith_parameter_3_strict$schema = () => (dsh_cliworker_now_cliworker_accountStartWith_parameter_3_strict$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_accountStatus_parameter_0_strict$schema$value
 const dsh_cliworker_now_cliworker_accountStatus_parameter_0_strict$schema = () => (dsh_cliworker_now_cliworker_accountStatus_parameter_0_strict$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_accountStatus_parameter_1_strict$schema$value
@@ -491,6 +569,12 @@ let dsh_cliworker_now_cliworker_forkWorker_parameter_1_strict$schema$value
 const dsh_cliworker_now_cliworker_forkWorker_parameter_1_strict$schema = () => (dsh_cliworker_now_cliworker_forkWorker_parameter_1_strict$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_forkWorker_parameter_2_strict$schema$value
 const dsh_cliworker_now_cliworker_forkWorker_parameter_2_strict$schema = () => (dsh_cliworker_now_cliworker_forkWorker_parameter_2_strict$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_generalSettings_parameter_0_strict$schema$value
+const dsh_cliworker_now_cliworker_generalSettings_parameter_0_strict$schema = () => (dsh_cliworker_now_cliworker_generalSettings_parameter_0_strict$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_hideDshSubagent_parameter_0_strict$schema$value
+const dsh_cliworker_now_cliworker_hideDshSubagent_parameter_0_strict$schema = () => (dsh_cliworker_now_cliworker_hideDshSubagent_parameter_0_strict$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_hideDshSubagent_parameter_1_strict$schema$value
+const dsh_cliworker_now_cliworker_hideDshSubagent_parameter_1_strict$schema = () => (dsh_cliworker_now_cliworker_hideDshSubagent_parameter_1_strict$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_history_parameter_0_strict$schema$value
 const dsh_cliworker_now_cliworker_history_parameter_0_strict$schema = () => (dsh_cliworker_now_cliworker_history_parameter_0_strict$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_history_parameter_1_strict$schema$value
@@ -519,10 +603,20 @@ let dsh_cliworker_now_cliworker_interruptQueuedFollowup_parameter_2_strict$schem
 const dsh_cliworker_now_cliworker_interruptQueuedFollowup_parameter_2_strict$schema = () => (dsh_cliworker_now_cliworker_interruptQueuedFollowup_parameter_2_strict$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_interruptQueuedFollowup_parameter_3_strict$schema$value
 const dsh_cliworker_now_cliworker_interruptQueuedFollowup_parameter_3_strict$schema = () => (dsh_cliworker_now_cliworker_interruptQueuedFollowup_parameter_3_strict$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_listDshSubagents_parameter_0_strict$schema$value
+const dsh_cliworker_now_cliworker_listDshSubagents_parameter_0_strict$schema = () => (dsh_cliworker_now_cliworker_listDshSubagents_parameter_0_strict$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_permissionForWorker_parameter_0_strict$schema$value
 const dsh_cliworker_now_cliworker_permissionForWorker_parameter_0_strict$schema = () => (dsh_cliworker_now_cliworker_permissionForWorker_parameter_0_strict$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_permissionForWorker_parameter_1_strict$schema$value
 const dsh_cliworker_now_cliworker_permissionForWorker_parameter_1_strict$schema = () => (dsh_cliworker_now_cliworker_permissionForWorker_parameter_1_strict$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_promptDshSubagent_parameter_0_strict$schema$value
+const dsh_cliworker_now_cliworker_promptDshSubagent_parameter_0_strict$schema = () => (dsh_cliworker_now_cliworker_promptDshSubagent_parameter_0_strict$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_promptDshSubagent_parameter_1_strict$schema$value
+const dsh_cliworker_now_cliworker_promptDshSubagent_parameter_1_strict$schema = () => (dsh_cliworker_now_cliworker_promptDshSubagent_parameter_1_strict$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_promptDshSubagent_parameter_2_strict$schema$value
+const dsh_cliworker_now_cliworker_promptDshSubagent_parameter_2_strict$schema = () => (dsh_cliworker_now_cliworker_promptDshSubagent_parameter_2_strict$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_promptDshSubagent_parameter_3_strict$schema$value
+const dsh_cliworker_now_cliworker_promptDshSubagent_parameter_3_strict$schema = () => (dsh_cliworker_now_cliworker_promptDshSubagent_parameter_3_strict$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_queueFollowup_parameter_0_strict$schema$value
 const dsh_cliworker_now_cliworker_queueFollowup_parameter_0_strict$schema = () => (dsh_cliworker_now_cliworker_queueFollowup_parameter_0_strict$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_queueFollowup_parameter_1_strict$schema$value
@@ -533,6 +627,10 @@ let dsh_cliworker_now_cliworker_queueFollowup_parameter_3_strict$schema$value
 const dsh_cliworker_now_cliworker_queueFollowup_parameter_3_strict$schema = () => (dsh_cliworker_now_cliworker_queueFollowup_parameter_3_strict$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_queueFollowup_parameter_4_strict$schema$value
 const dsh_cliworker_now_cliworker_queueFollowup_parameter_4_strict$schema = () => (dsh_cliworker_now_cliworker_queueFollowup_parameter_4_strict$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_recoverCliCleanup_parameter_0_strict$schema$value
+const dsh_cliworker_now_cliworker_recoverCliCleanup_parameter_0_strict$schema = () => (dsh_cliworker_now_cliworker_recoverCliCleanup_parameter_0_strict$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_recoverCliCleanup_parameter_1_strict$schema$value
+const dsh_cliworker_now_cliworker_recoverCliCleanup_parameter_1_strict$schema = () => (dsh_cliworker_now_cliworker_recoverCliCleanup_parameter_1_strict$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_refreshCatalogForCli_parameter_0_strict$schema$value
 const dsh_cliworker_now_cliworker_refreshCatalogForCli_parameter_0_strict$schema = () => (dsh_cliworker_now_cliworker_refreshCatalogForCli_parameter_0_strict$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_refreshCatalogForCli_parameter_1_strict$schema$value
@@ -585,6 +683,10 @@ let dsh_cliworker_now_cliworker_runningMessageSettings_parameter_0_strict$schema
 const dsh_cliworker_now_cliworker_runningMessageSettings_parameter_0_strict$schema = () => (dsh_cliworker_now_cliworker_runningMessageSettings_parameter_0_strict$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_runningMessageSettings_parameter_1_strict$schema$value
 const dsh_cliworker_now_cliworker_runningMessageSettings_parameter_1_strict$schema = () => (dsh_cliworker_now_cliworker_runningMessageSettings_parameter_1_strict$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_saveGeneralSettings_parameter_0_strict$schema$value
+const dsh_cliworker_now_cliworker_saveGeneralSettings_parameter_0_strict$schema = () => (dsh_cliworker_now_cliworker_saveGeneralSettings_parameter_0_strict$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_saveGeneralSettings_parameter_1_strict$schema$value
+const dsh_cliworker_now_cliworker_saveGeneralSettings_parameter_1_strict$schema = () => (dsh_cliworker_now_cliworker_saveGeneralSettings_parameter_1_strict$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_saveRolePreset_parameter_0_strict$schema$value
 const dsh_cliworker_now_cliworker_saveRolePreset_parameter_0_strict$schema = () => (dsh_cliworker_now_cliworker_saveRolePreset_parameter_0_strict$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_saveRolePreset_parameter_1_strict$schema$value
@@ -641,6 +743,10 @@ let dsh_cliworker_now_cliworker_stop_parameter_0_strict$schema$value
 const dsh_cliworker_now_cliworker_stop_parameter_0_strict$schema = () => (dsh_cliworker_now_cliworker_stop_parameter_0_strict$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_stop_parameter_1_strict$schema$value
 const dsh_cliworker_now_cliworker_stop_parameter_1_strict$schema = () => (dsh_cliworker_now_cliworker_stop_parameter_1_strict$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_stopDshSubagent_parameter_0_strict$schema$value
+const dsh_cliworker_now_cliworker_stopDshSubagent_parameter_0_strict$schema = () => (dsh_cliworker_now_cliworker_stopDshSubagent_parameter_0_strict$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_stopDshSubagent_parameter_1_strict$schema$value
+const dsh_cliworker_now_cliworker_stopDshSubagent_parameter_1_strict$schema = () => (dsh_cliworker_now_cliworker_stopDshSubagent_parameter_1_strict$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_submitMessage_parameter_0_strict$schema$value
 const dsh_cliworker_now_cliworker_submitMessage_parameter_0_strict$schema = () => (dsh_cliworker_now_cliworker_submitMessage_parameter_0_strict$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_submitMessage_parameter_1_strict$schema$value
@@ -651,6 +757,8 @@ let dsh_cliworker_now_cliworker_watch_parameter_0_strict$schema$value
 const dsh_cliworker_now_cliworker_watch_parameter_0_strict$schema = () => (dsh_cliworker_now_cliworker_watch_parameter_0_strict$schema$value ??= z.string())
 let dsh_cliworker_now_cliworker_watch_parameter_1_strict$schema$value
 const dsh_cliworker_now_cliworker_watch_parameter_1_strict$schema = () => (dsh_cliworker_now_cliworker_watch_parameter_1_strict$schema$value ??= z.string())
+let dsh_cliworker_now_cliworker_watchDshSubagents_parameter_0_strict$schema$value
+const dsh_cliworker_now_cliworker_watchDshSubagents_parameter_0_strict$schema = () => (dsh_cliworker_now_cliworker_watchDshSubagents_parameter_0_strict$schema$value ??= z.string())
 
 export const TYPERT_REMOTE = createTypertRemoteInfo({
   package: 'dsh-cliworker-now',
@@ -735,7 +843,72 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Resize accepted.',
         jsonSchema: {"type":"boolean"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1893,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2534,"column":9},
+    },
+    'cliworker/accountRespond': {
+      service: 'cliworker',
+      invocation: { kind: 'direct' },
+      parameters: [
+        {
+          name: 'parentSessionId',
+          description: 'Owning session.',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/accountRespond:parentSessionId',
+            create: dsh_cliworker_now_cliworker_accountRespond_parameter_0$schema,
+            jsonSchema: {"type":"string"},
+          },
+          strictCodec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/accountRespond:parentSessionId',
+            create: dsh_cliworker_now_cliworker_accountRespond_parameter_0_strict$schema,
+            jsonSchema: {"type":"string"},
+          },
+        },
+        {
+          name: 'accountId',
+          description: 'Account terminal identity.',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/accountRespond:accountId',
+            create: dsh_cliworker_now_cliworker_accountRespond_parameter_1$schema,
+            jsonSchema: {"type":"string"},
+          },
+          strictCodec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/accountRespond:accountId',
+            create: dsh_cliworker_now_cliworker_accountRespond_parameter_1_strict$schema,
+            jsonSchema: {"type":"string"},
+          },
+        },
+        {
+          name: 'response',
+          description: 'The user\'s answer to the window\'s current step (JSON).',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/accountRespond:response',
+            create: dsh_cliworker_now_cliworker_accountRespond_parameter_2$schema,
+            jsonSchema: {"type":"string"},
+          },
+          strictCodec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/accountRespond:response',
+            create: dsh_cliworker_now_cliworker_accountRespond_parameter_2_strict$schema,
+            jsonSchema: {"type":"string"},
+          },
+        },
+      ],
+      result: {
+        mode: 'strict',
+        typeSymbol: 'dsh-cliworker-now#cliworker/accountRespond:result',
+        create: dsh_cliworker_now_cliworker_accountRespond_result$schema,
+        description: 'Answer accepted.',
+        jsonSchema: {"type":"boolean"},
+      },
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2511,"column":9},
     },
     'cliworker/accountStart': {
       service: 'cliworker',
@@ -801,7 +974,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Managed account terminal identity and instruction JSON.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1788,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2377,"column":9},
     },
     'cliworker/accountStartForProvider': {
       service: 'cliworker',
@@ -880,7 +1053,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         create: dsh_cliworker_now_cliworker_accountStartForProvider_result$schema,
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1816,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2405,"column":9},
     },
     'cliworker/accountStartForSource': {
       service: 'cliworker',
@@ -959,7 +1132,86 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         create: dsh_cliworker_now_cliworker_accountStartForSource_result$schema,
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1799,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2388,"column":9},
+    },
+    'cliworker/accountStartWith': {
+      service: 'cliworker',
+      invocation: { kind: 'direct' },
+      parameters: [
+        {
+          name: 'parentSessionId',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/accountStartWith:parentSessionId',
+            create: dsh_cliworker_now_cliworker_accountStartWith_parameter_0$schema,
+            jsonSchema: {"type":"string"},
+          },
+          strictCodec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/accountStartWith:parentSessionId',
+            create: dsh_cliworker_now_cliworker_accountStartWith_parameter_0_strict$schema,
+            jsonSchema: {"type":"string"},
+          },
+        },
+        {
+          name: 'cli',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/accountStartWith:cli',
+            create: dsh_cliworker_now_cliworker_accountStartWith_parameter_1$schema,
+            jsonSchema: {"type":"string"},
+          },
+          strictCodec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/accountStartWith:cli',
+            create: dsh_cliworker_now_cliworker_accountStartWith_parameter_1_strict$schema,
+            jsonSchema: {"type":"string"},
+          },
+        },
+        {
+          name: 'action',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/accountStartWith:action',
+            create: dsh_cliworker_now_cliworker_accountStartWith_parameter_2$schema,
+            jsonSchema: {"type":"string"},
+          },
+          strictCodec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/accountStartWith:action',
+            create: dsh_cliworker_now_cliworker_accountStartWith_parameter_2_strict$schema,
+            jsonSchema: {"type":"string"},
+          },
+        },
+        {
+          name: 'options',
+          description: 'JSON `{ provider?, login? }`: a login provider of the window\'s picker, or one login (`AccountLogin.id`) to sign out. Host checks both against the installed CLI.',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/accountStartWith:options',
+            create: dsh_cliworker_now_cliworker_accountStartWith_parameter_3$schema,
+            jsonSchema: {"type":"string"},
+          },
+          strictCodec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/accountStartWith:options',
+            create: dsh_cliworker_now_cliworker_accountStartWith_parameter_3_strict$schema,
+            jsonSchema: {"type":"string"},
+          },
+        },
+      ],
+      cancellation: { parameter: 'signal' },
+      result: {
+        mode: 'strict',
+        typeSymbol: 'dsh-cliworker-now#cliworker/accountStartWith:result',
+        create: dsh_cliworker_now_cliworker_accountStartWith_result$schema,
+        jsonSchema: {"type":"string"},
+      },
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2426,"column":9},
     },
     'cliworker/accountStatus': {
       service: 'cliworker',
@@ -1008,7 +1260,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Safe account status JSON.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1685,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2244,"column":9},
     },
     'cliworker/accountStop': {
       service: 'cliworker',
@@ -1056,7 +1308,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Process cleanup completed.',
         jsonSchema: {"type":"boolean"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1909,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2550,"column":9},
     },
     'cliworker/accountWatch': {
       service: 'cliworker',
@@ -1106,7 +1358,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Ephemeral terminal frame JSON.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1867,"column":10},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2485,"column":10},
     },
     'cliworker/accountWrite': {
       service: 'cliworker',
@@ -1171,7 +1423,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Input accepted.',
         jsonSchema: {"type":"boolean"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1882,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2500,"column":9},
     },
     'cliworker/cancelQueuedFollowup': {
       service: 'cliworker',
@@ -1237,7 +1489,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Completion; already admitted messages cannot be cancelled here.',
         jsonSchemaError: 'typert tool schema: unsupported void value',
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2473,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":3139,"column":9},
     },
     'cliworker/catalog': {
       service: 'cliworker',
@@ -1269,7 +1521,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'JSON model catalog and project preference.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1919,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2560,"column":9},
     },
     'cliworker/catalogForCli': {
       service: 'cliworker',
@@ -1318,7 +1570,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'CLI catalog and saved project preference.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1924,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2565,"column":9},
     },
     'cliworker/catalogForWorker': {
       service: 'cliworker',
@@ -1367,7 +1619,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Saved model choices; only a missing valid directory requires discovery.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1929,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2570,"column":9},
     },
     'cliworker/clearWorkerGoal': {
       service: 'cliworker',
@@ -1433,7 +1685,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Completion.',
         jsonSchemaError: 'typert tool schema: unsupported void value',
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1617,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2142,"column":9},
     },
     'cliworker/cliExecutablePath': {
       service: 'cliworker',
@@ -1482,7 +1734,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Machine-local executable path and availability JSON.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1738,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2327,"column":9},
     },
     'cliworker/cliSettings': {
       service: 'cliworker',
@@ -1514,7 +1766,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Profile-wide CLI enablement JSON.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1439,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1964,"column":9},
     },
     'cliworker/configure': {
       service: 'cliworker',
@@ -1563,7 +1815,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Saved JSON preference.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2014,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2670,"column":9},
     },
     'cliworker/configureWorker': {
       service: 'cliworker',
@@ -1629,7 +1881,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Saved preference; execution performs live authorization.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2041,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2697,"column":9},
     },
     'cliworker/configureWorkerPermission': {
       service: 'cliworker',
@@ -1695,7 +1947,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Saved Worker; no task is launched.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2204,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2869,"column":9},
     },
     'cliworker/deleteRolePreset': {
       service: 'cliworker',
@@ -1744,7 +1996,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Completion.',
         jsonSchemaError: 'typert tool schema: unsupported void value',
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1551,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2076,"column":9},
     },
     'cliworker/deleteWorker': {
       service: 'cliworker',
@@ -1793,7 +2045,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Completion without deleting native data.',
         jsonSchemaError: 'typert tool schema: unsupported void value',
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1628,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2153,"column":9},
     },
     'cliworker/ensureHarnessConversation': {
       service: 'cliworker',
@@ -1842,7 +2094,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Real native child binding; opening never submits the user task again.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1091,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1476,"column":9},
     },
     'cliworker/followup': {
       service: 'cliworker',
@@ -1908,7 +2160,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Published background receipt.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2508,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":3174,"column":9},
     },
     'cliworker/forkWorker': {
       service: 'cliworker',
@@ -1974,7 +2226,88 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Worker and child session identities as JSON.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1650,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2175,"column":9},
+    },
+    'cliworker/generalSettings': {
+      service: 'cliworker',
+      invocation: { kind: 'direct' },
+      parameters: [
+        {
+          name: 'parentSessionId',
+          description: 'Owning session.',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/generalSettings:parentSessionId',
+            create: dsh_cliworker_now_cliworker_generalSettings_parameter_0$schema,
+            jsonSchema: {"type":"string"},
+          },
+          strictCodec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/generalSettings:parentSessionId',
+            create: dsh_cliworker_now_cliworker_generalSettings_parameter_0_strict$schema,
+            jsonSchema: {"type":"string"},
+          },
+        },
+      ],
+      cancellation: { parameter: 'signal' },
+      result: {
+        mode: 'strict',
+        typeSymbol: 'dsh-cliworker-now#cliworker/generalSettings:result',
+        create: dsh_cliworker_now_cliworker_generalSettings_result$schema,
+        description: 'Profile-wide general settings JSON.',
+        jsonSchema: {"type":"string"},
+      },
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2197,"column":9},
+    },
+    'cliworker/hideDshSubagent': {
+      service: 'cliworker',
+      invocation: { kind: 'direct' },
+      parameters: [
+        {
+          name: 'parentSessionId',
+          description: 'Main conversation.',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/hideDshSubagent:parentSessionId',
+            create: dsh_cliworker_now_cliworker_hideDshSubagent_parameter_0$schema,
+            jsonSchema: {"type":"string"},
+          },
+          strictCodec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/hideDshSubagent:parentSessionId',
+            create: dsh_cliworker_now_cliworker_hideDshSubagent_parameter_0_strict$schema,
+            jsonSchema: {"type":"string"},
+          },
+        },
+        {
+          name: 'childSessionId',
+          description: 'Direct child.',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/hideDshSubagent:childSessionId',
+            create: dsh_cliworker_now_cliworker_hideDshSubagent_parameter_1$schema,
+            jsonSchema: {"type":"string"},
+          },
+          strictCodec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/hideDshSubagent:childSessionId',
+            create: dsh_cliworker_now_cliworker_hideDshSubagent_parameter_1_strict$schema,
+            jsonSchema: {"type":"string"},
+          },
+        },
+      ],
+      cancellation: { parameter: 'signal' },
+      result: {
+        mode: 'strict',
+        typeSymbol: 'dsh-cliworker-now#cliworker/hideDshSubagent:result',
+        create: dsh_cliworker_now_cliworker_hideDshSubagent_result$schema,
+        description: 'Nothing; only plugin visibility changes.',
+        jsonSchemaError: 'typert tool schema: unsupported void value',
+      },
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1854,"column":9},
     },
     'cliworker/history': {
       service: 'cliworker',
@@ -2056,7 +2389,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'JSON historical page, at most 200 rows.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1425,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1950,"column":9},
     },
     'cliworker/interruptMessage': {
       service: 'cliworker',
@@ -2173,7 +2506,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'JSON durable acceptance receipt; execution proceeds independently of this RPC.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2426,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":3092,"column":9},
     },
     'cliworker/interruptQueuedFollowup': {
       service: 'cliworker',
@@ -2256,7 +2589,39 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'JSON priority request receipt with queuedId and snapshot revision; not confirmation of native delivery.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2451,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":3117,"column":9},
+    },
+    'cliworker/listDshSubagents': {
+      service: 'cliworker',
+      invocation: { kind: 'direct' },
+      parameters: [
+        {
+          name: 'parentSessionId',
+          description: 'Main conversation.',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/listDshSubagents:parentSessionId',
+            create: dsh_cliworker_now_cliworker_listDshSubagents_parameter_0$schema,
+            jsonSchema: {"type":"string"},
+          },
+          strictCodec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/listDshSubagents:parentSessionId',
+            create: dsh_cliworker_now_cliworker_listDshSubagents_parameter_0_strict$schema,
+            jsonSchema: {"type":"string"},
+          },
+        },
+      ],
+      cancellation: { parameter: 'signal' },
+      result: {
+        mode: 'strict',
+        typeSymbol: 'dsh-cliworker-now#cliworker/listDshSubagents:result',
+        create: dsh_cliworker_now_cliworker_listDshSubagents_result$schema,
+        description: 'Native direct children JSON.',
+        jsonSchema: {"type":"string"},
+      },
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1825,"column":9},
     },
     'cliworker/permissionForWorker': {
       service: 'cliworker',
@@ -2305,7 +2670,90 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Native permission control data; no task or permission change.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2181,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2842,"column":9},
+    },
+    'cliworker/promptDshSubagent': {
+      service: 'cliworker',
+      invocation: { kind: 'direct' },
+      parameters: [
+        {
+          name: 'parentSessionId',
+          description: 'Main conversation.',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/promptDshSubagent:parentSessionId',
+            create: dsh_cliworker_now_cliworker_promptDshSubagent_parameter_0$schema,
+            jsonSchema: {"type":"string"},
+          },
+          strictCodec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/promptDshSubagent:parentSessionId',
+            create: dsh_cliworker_now_cliworker_promptDshSubagent_parameter_0_strict$schema,
+            jsonSchema: {"type":"string"},
+          },
+        },
+        {
+          name: 'childSessionId',
+          description: 'Direct child.',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/promptDshSubagent:childSessionId',
+            create: dsh_cliworker_now_cliworker_promptDshSubagent_parameter_1$schema,
+            jsonSchema: {"type":"string"},
+          },
+          strictCodec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/promptDshSubagent:childSessionId',
+            create: dsh_cliworker_now_cliworker_promptDshSubagent_parameter_1_strict$schema,
+            jsonSchema: {"type":"string"},
+          },
+        },
+        {
+          name: 'prompt',
+          description: 'Human message.',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/promptDshSubagent:prompt',
+            create: dsh_cliworker_now_cliworker_promptDshSubagent_parameter_2$schema,
+            jsonSchema: {"type":"string"},
+          },
+          strictCodec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/promptDshSubagent:prompt',
+            create: dsh_cliworker_now_cliworker_promptDshSubagent_parameter_2_strict$schema,
+            jsonSchema: {"type":"string"},
+          },
+        },
+        {
+          name: 'requestId',
+          description: 'Browser-minted prompt identity.',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/promptDshSubagent:requestId',
+            create: dsh_cliworker_now_cliworker_promptDshSubagent_parameter_3$schema,
+            jsonSchema: {"type":"string"},
+          },
+          strictCodec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/promptDshSubagent:requestId',
+            create: dsh_cliworker_now_cliworker_promptDshSubagent_parameter_3_strict$schema,
+            jsonSchema: {"type":"string"},
+          },
+        },
+      ],
+      cancellation: { parameter: 'signal' },
+      result: {
+        mode: 'strict',
+        typeSymbol: 'dsh-cliworker-now#cliworker/promptDshSubagent:result',
+        create: dsh_cliworker_now_cliworker_promptDshSubagent_result$schema,
+        description: 'Native inbox receipt JSON.',
+        jsonSchema: {"type":"string"},
+      },
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1835,"column":9},
     },
     'cliworker/queueFollowup': {
       service: 'cliworker',
@@ -2405,7 +2853,56 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Accepted outbox item JSON.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2337,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":3001,"column":9},
+    },
+    'cliworker/recoverCliCleanup': {
+      service: 'cliworker',
+      invocation: { kind: 'direct' },
+      parameters: [
+        {
+          name: 'parentSessionId',
+          description: 'Owning session.',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/recoverCliCleanup:parentSessionId',
+            create: dsh_cliworker_now_cliworker_recoverCliCleanup_parameter_0$schema,
+            jsonSchema: {"type":"string"},
+          },
+          strictCodec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/recoverCliCleanup:parentSessionId',
+            create: dsh_cliworker_now_cliworker_recoverCliCleanup_parameter_0_strict$schema,
+            jsonSchema: {"type":"string"},
+          },
+        },
+        {
+          name: 'cli',
+          description: 'CLI the user confirmed has no leftover process.',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/recoverCliCleanup:cli',
+            create: dsh_cliworker_now_cliworker_recoverCliCleanup_parameter_1$schema,
+            jsonSchema: {"type":"string"},
+          },
+          strictCodec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/recoverCliCleanup:cli',
+            create: dsh_cliworker_now_cliworker_recoverCliCleanup_parameter_1_strict$schema,
+            jsonSchema: {"type":"string"},
+          },
+        },
+      ],
+      cancellation: { parameter: 'signal' },
+      result: {
+        mode: 'strict',
+        typeSymbol: 'dsh-cliworker-now#cliworker/recoverCliCleanup:result',
+        create: dsh_cliworker_now_cliworker_recoverCliCleanup_result$schema,
+        description: 'Fresh account status JSON.',
+        jsonSchema: {"type":"string"},
+      },
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2277,"column":9},
     },
     'cliworker/refreshCatalogForCli': {
       service: 'cliworker',
@@ -2454,7 +2951,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Fresh model catalog and saved project preference.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1976,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2632,"column":9},
     },
     'cliworker/refreshCliExecutablePath': {
       service: 'cliworker',
@@ -2537,7 +3034,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Saved machine-local path and fresh availability JSON.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1759,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2348,"column":9},
     },
     'cliworker/renameWorker': {
       service: 'cliworker',
@@ -2603,7 +3100,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Completion.',
         jsonSchemaError: 'typert tool schema: unsupported void value',
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1563,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2088,"column":9},
     },
     'cliworker/renameWorkerTitle': {
       service: 'cliworker',
@@ -2669,7 +3166,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Completion.',
         jsonSchemaError: 'typert tool schema: unsupported void value',
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1579,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2104,"column":9},
     },
     'cliworker/repairHarnessConversation': {
       service: 'cliworker',
@@ -2735,7 +3232,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Replacement display binding; never submits a CLI prompt.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1133,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1518,"column":9},
     },
     'cliworker/restartWorker': {
       service: 'cliworker',
@@ -2801,7 +3298,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'JSON background receipt for a fresh Worker.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2536,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":3218,"column":9},
     },
     'cliworker/restoreWorker': {
       service: 'cliworker',
@@ -2850,7 +3347,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Completion with the original ID and history.',
         jsonSchemaError: 'typert tool schema: unsupported void value',
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1639,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2164,"column":9},
     },
     'cliworker/retryQueuedFollowups': {
       service: 'cliworker',
@@ -2916,7 +3413,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Explicit queue reactivation; each turn rechecks native authorization.',
         jsonSchemaError: 'typert tool schema: unsupported void value',
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2489,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":3155,"column":9},
     },
     'cliworker/rolePresets': {
       service: 'cliworker',
@@ -2948,7 +3445,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'JSON role preset library.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1527,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2052,"column":9},
     },
     'cliworker/runningMessageSettings': {
       service: 'cliworker',
@@ -2997,7 +3494,56 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Project/CLI running-message preference and native capability.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1492,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2017,"column":9},
+    },
+    'cliworker/saveGeneralSettings': {
+      service: 'cliworker',
+      invocation: { kind: 'direct' },
+      parameters: [
+        {
+          name: 'parentSessionId',
+          description: 'Owning session.',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/saveGeneralSettings:parentSessionId',
+            create: dsh_cliworker_now_cliworker_saveGeneralSettings_parameter_0$schema,
+            jsonSchema: {"type":"string"},
+          },
+          strictCodec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/saveGeneralSettings:parentSessionId',
+            create: dsh_cliworker_now_cliworker_saveGeneralSettings_parameter_0_strict$schema,
+            jsonSchema: {"type":"string"},
+          },
+        },
+        {
+          name: 'patch',
+          description: 'JSON object of changed fields; `null` restores a default.',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/saveGeneralSettings:patch',
+            create: dsh_cliworker_now_cliworker_saveGeneralSettings_parameter_1$schema,
+            jsonSchema: {"type":"string"},
+          },
+          strictCodec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/saveGeneralSettings:patch',
+            create: dsh_cliworker_now_cliworker_saveGeneralSettings_parameter_1_strict$schema,
+            jsonSchema: {"type":"string"},
+          },
+        },
+      ],
+      cancellation: { parameter: 'signal' },
+      result: {
+        mode: 'strict',
+        typeSymbol: 'dsh-cliworker-now#cliworker/saveGeneralSettings:result',
+        create: dsh_cliworker_now_cliworker_saveGeneralSettings_result$schema,
+        description: 'Updated general settings JSON.',
+        jsonSchema: {"type":"string"},
+      },
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2208,"column":9},
     },
     'cliworker/saveRolePreset': {
       service: 'cliworker',
@@ -3046,7 +3592,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Saved preset JSON.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1538,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2063,"column":9},
     },
     'cliworker/saveRunningMessageMode': {
       service: 'cliworker',
@@ -3112,7 +3658,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Saved preference; never starts a CLI.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1505,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2030,"column":9},
     },
     'cliworker/sendRunningMessage': {
       service: 'cliworker',
@@ -3212,7 +3758,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Accepted submission using the saved mode.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2396,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":3062,"column":9},
     },
     'cliworker/setCliEnabled': {
       service: 'cliworker',
@@ -3278,7 +3824,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Updated profile-wide CLI enablement JSON.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1660,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2219,"column":9},
     },
     'cliworker/setWorkerGoal': {
       service: 'cliworker',
@@ -3361,7 +3907,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'WorkerGoal JSON.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1595,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2120,"column":9},
     },
     'cliworker/setWorkerGoalStatus': {
       service: 'cliworker',
@@ -3444,7 +3990,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'WorkerGoal JSON.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1606,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2131,"column":9},
     },
     'cliworker/steerMessage': {
       service: 'cliworker',
@@ -3544,7 +4090,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Native acceptance; never creates or schedules a later turn.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2358,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":3022,"column":9},
     },
     'cliworker/stop': {
       service: 'cliworker',
@@ -3592,7 +4138,56 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Final worker state after cleanup.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2565,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":3247,"column":9},
+    },
+    'cliworker/stopDshSubagent': {
+      service: 'cliworker',
+      invocation: { kind: 'direct' },
+      parameters: [
+        {
+          name: 'parentSessionId',
+          description: 'Main conversation.',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/stopDshSubagent:parentSessionId',
+            create: dsh_cliworker_now_cliworker_stopDshSubagent_parameter_0$schema,
+            jsonSchema: {"type":"string"},
+          },
+          strictCodec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/stopDshSubagent:parentSessionId',
+            create: dsh_cliworker_now_cliworker_stopDshSubagent_parameter_0_strict$schema,
+            jsonSchema: {"type":"string"},
+          },
+        },
+        {
+          name: 'childSessionId',
+          description: 'Direct child.',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/stopDshSubagent:childSessionId',
+            create: dsh_cliworker_now_cliworker_stopDshSubagent_parameter_1$schema,
+            jsonSchema: {"type":"string"},
+          },
+          strictCodec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/stopDshSubagent:childSessionId',
+            create: dsh_cliworker_now_cliworker_stopDshSubagent_parameter_1_strict$schema,
+            jsonSchema: {"type":"string"},
+          },
+        },
+      ],
+      cancellation: { parameter: 'signal' },
+      result: {
+        mode: 'strict',
+        typeSymbol: 'dsh-cliworker-now#cliworker/stopDshSubagent:result',
+        create: dsh_cliworker_now_cliworker_stopDshSubagent_result$schema,
+        description: 'JSON only after native settlement.',
+        jsonSchema: {"type":"string"},
+      },
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1848,"column":9},
     },
     'cliworker/submitMessage': {
       service: 'cliworker',
@@ -3658,7 +4253,7 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'Exact message acceptance receipt, not native completion.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2246,"column":9},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":2910,"column":9},
     },
     'cliworker/watch': {
       service: 'cliworker',
@@ -3708,7 +4303,40 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
         description: 'JSON snapshots, initially and after changes.',
         jsonSchema: {"type":"string"},
       },
-      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1335,"column":10},
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1860,"column":10},
+    },
+    'cliworker/watchDshSubagents': {
+      service: 'cliworker',
+      mode: 'stream',
+      invocation: { kind: 'direct' },
+      parameters: [
+        {
+          name: 'parentSessionId',
+          description: 'Main conversation.',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/watchDshSubagents:parentSessionId',
+            create: dsh_cliworker_now_cliworker_watchDshSubagents_parameter_0$schema,
+            jsonSchema: {"type":"string"},
+          },
+          strictCodec: {
+            mode: 'strict',
+            typeSymbol: 'dsh-cliworker-now#cliworker/watchDshSubagents:parentSessionId',
+            create: dsh_cliworker_now_cliworker_watchDshSubagents_parameter_0_strict$schema,
+            jsonSchema: {"type":"string"},
+          },
+        },
+      ],
+      cancellation: { parameter: 'signal' },
+      result: {
+        mode: 'strict',
+        typeSymbol: 'dsh-cliworker-now#cliworker/watchDshSubagents:result',
+        create: dsh_cliworker_now_cliworker_watchDshSubagents_result$schema,
+        description: 'Native child snapshots.',
+        jsonSchema: {"type":"string"},
+      },
+      sourceLocation: {"file":"packages/cliworker/src/host/index.ts","line":1830,"column":10},
     },
   },
 }, z)

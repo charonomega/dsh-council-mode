@@ -7,3 +7,10 @@ export declare function harnessInputHash(message: UserMessage): string;
 export declare function resolveHarnessAttachments(ctx: {
     get(name: string): unknown;
 }, messages: readonly UserMessage[]): NativeAttachment[];
+/** Inline bytes of a host tool's image result, for a CLI whose MCP accepts images. */
+export declare function readHarnessImage(ctx: {
+    get(name: string): unknown;
+}, ref: unknown, signal: AbortSignal): Promise<{
+    data: string;
+    mimeType: string;
+} | undefined>;

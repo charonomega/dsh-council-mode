@@ -17,6 +17,7 @@ export declare class MimoMetadataCache {
     private readonly entries;
     constructor(ttlMs?: number, limit?: number);
     get(key: string | undefined, own: MimoOwnSnapshot): FirstPartyModelSource[] | undefined;
+    clear(): void;
     set(key: string | undefined, sources: FirstPartyModelSource[], own: MimoOwnSnapshot): void;
 }
 export declare const mimoMetadataCache: MimoMetadataCache;

@@ -5,7 +5,8 @@ interface SettingsDialogProps {
     onClose: () => void;
     api: API;
     sessionId: string;
-    initialCli: CliId;
+    /** The CLI page to open; without one the dialog opens on 「CLI Worker 设置」. */
+    initialCli?: CliId;
     openNativeSettings?: () => void;
 }
 /** Native modal owns focus, dismissal, theme, elevation and entrance animation. */

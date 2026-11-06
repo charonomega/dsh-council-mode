@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { accountEmail } from "./account-identity.js";
+import { hostFetch } from './host-fetch.mjs';
 const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const text = (value) => typeof value === 'string' && !!value.trim() && value.length <= 32768 && !/[\x00-\x20\x7f]/.test(value);
 export const NOUS_PORTAL = 'https://portal.nousresearch.com';
@@ -48,7 +49,7 @@ function unavailable(row) {
 export function projectHermesNousSource(auth, minTtlSeconds = 0, options = {}) {
     const state = auth?.providers?.nous;
     if (!object(state) ||
-        auth.active_provider !== 'nous' ||
+        (!options.allowInactive && auth.active_provider !== 'nous') ||
         state.auth_method === 'anonymous' ||
         state.account_tier === 'anonymous' ||
         (state.last_auth_error?.relogin_required === true && !state.access_token && !state.refresh_token) ||
@@ -116,6 +117,8 @@ export function selectHermesNousSource(material, options = {}) {
     const cfg = config.model;
     if (!object(cfg) || cfg.provider !== 'nous' || config.providers?.nous?.enabled === false)
         invalid();
+    if (!text(auth.providers?.nous?.access_token) || !text(auth.providers?.nous?.agent_key))
+        throw new HermesNousError('Nous 账号尚未登录，请在 Hermes 登录设置中登录');
     if (!Array.isArray(auth.credential_pool?.nous) || !auth.credential_pool.nous.length)
         throw new HermesNousError('Nous 登录已保存，请在 Hermes 登录设置中完成原生账号初始化');
     if ((cfg.extra_headers && Object.keys(cfg.extra_headers).length) ||
@@ -220,7 +223,7 @@ async function get(url, token, options) {
     const chunks = [];
     try {
         signal.throwIfAborted();
-        const response = await (options.fetch ?? fetch)(url, {
+        const response = await (options.fetch ?? hostFetch)(url, {
             method: 'GET',
             redirect: 'error',
             signal,
@@ -228,6 +231,12 @@ async function get(url, token, options) {
         });
         if (!response.ok || response.redirected) {
             await response.body?.cancel();
+            // An HTML block page is not an OAuth rejection. Never surface its body or
+            // ask users to replace healthy credentials because an edge blocked HTTP.
+            if (response.status === 403 &&
+                (/^text\/html(?:\s*;|\s*$)/i.test(response.headers.get('content-type') ?? '') ||
+                    response.headers.get('cf-mitigated') === 'challenge'))
+                throw new HermesNousError('Nous 元数据请求被网络服务拦截，请检查代理或网络后重试');
             throw new HermesNousError([401, 403].includes(response.status)
                 ? 'Nous 账号权限查询被拒绝，请检查登录状态'
                 : 'Nous 模型元数据查询失败，请稍后重试');

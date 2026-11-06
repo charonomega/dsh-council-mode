@@ -32,7 +32,9 @@ var __esDecorate = (this && this.__esDecorate) || function (ctor, descriptorIn, 
     if (target) Object.defineProperty(target, contextIn.name, descriptor);
     done = true;
 };
+import { DshSubagents } from "./dsh-subagents.js";
 import { readCliAccountBinding } from "./cli-account-binding.js";
+import { setTimeout as sleep } from 'node:timers/promises';
 import { SettingsCatalogCache } from "./settings-catalog-cache.js";
 import { resolveModel } from "../shared/models.js";
 import { visibleModelChoices } from "../shared/model-presentation.js";
@@ -49,28 +51,41 @@ import { projectExternalTurnAnswer } from "./harness-turn-answer.js";
 import { projectRequestState } from "./native-request-state.js";
 import { classifyHarnessTool, adoptNativeHarnessLease, createNativeHarnessTools, } from "./native-harness-tools.js";
 import { nativeHarnessToolCapability, nativeHarnessExecutionReady } from './native-harness-injection.mjs';
-import { installHarnessModelGuard, withinCliTool } from "./harness-model-guard.js";
-import { resolveHarnessAttachments } from "./harness-attachments.js";
+import { createNativeHarnessExecutor } from "./native-harness-executor.js";
+import { readNativeColdSessionState } from "./native-cold-session-state.js";
+import { installHarnessModelGuard, withinCliTool, publishSiblingOutsideTool } from "./harness-model-guard.js";
+import { readHarnessImage, resolveHarnessAttachments } from "./harness-attachments.js";
+import { nativeCliCapabilities, nativeCliMcpServers } from './cli-native-capabilities.mjs';
 import { ToolCallId } from '@deepseek-ai/dsh-llm';
 import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
 import { SubprocessExecutableNotFoundError } from '@deepseek-ai/dsh-subprocess';
-import { CLI_IDS, CLI_LABELS, cliOf, workerName, effortLabel, isUserInterrupted, LEGACY_ACCOUNT_RECORD_NOTICE, EFFORTS, } from "../shared/types.js";
+import { setApprovalPolicy } from '@deepseek-ai/dsh-user-approval';
+import { approvalPrompt, approvalQuestion, decideApproval, decisionFromAnswer, decisionFromOutcome, harnessApprovalRequest, outcomeFromDecision, runAccess, workerApproval, } from "./native-approval-policy.js";
+import { CLI_IDS, CLI_LABELS, cliOf, DSH_AGENT_NAME, workerName, effortLabel, EFFORTS, } from "../shared/types.js";
 import { agentNameSchema, readRoleAnswer, roleQuestion } from "./roles.js";
 import { DEFAULT_CONFIG, projectDirectory, ProcessCleanupUnconfirmedError, } from "./process.js";
 import { nativeProcessBackend } from "./native-process.js";
+import { hostProxyLookup, WindowsSystemProxySource } from "./windows-system-proxy.js";
+import { setHostProxy } from './host-fetch.mjs';
 import { validatePreference, configuredCliExecutable, resolveCliExecutable } from "./adapters.js";
 import { CliExecutablePathStore } from "./cli-executable-paths.js";
 import { RUNNING_MESSAGE_MODES } from "../shared/running-message.js";
-import { workerPermissionOptions } from "../shared/worker-permissions.js";
+import { askRunsAsPlan, runsUnderViewOnly, cliLevelOptions, effectiveLevel, levelName, workerLevelOptions, workerPlanSupported, } from "../shared/worker-permissions.js";
 import { WindowsCliInstallationError, WindowsCliNotFoundError } from "./windows-cli-installation.js";
 import { ACCOUNT_CHANGED, authorizedCatalog, authorizeSelection } from "./authorized-catalog.js";
+import { ownAccountBusy as accountBusy } from './own-account-lease.mjs';
 import { WorkerStorage } from "./storage.js";
 import { WorkerRuntime } from "./runtime.js";
+import { integrationReport, isolationGuidance, readResolutions } from "./isolated-merge-decisions.js";
 import { AccountManager } from "./accounts.js";
 import { CLI_DELEGATION_GUIDANCE, CLI_NAME_GUIDANCE, registerCliRouting, requireCliName, resolveCliName, isGenericQoderName, resolveAvailableCliName, } from "./routing.js";
+/** Catalog reads hold a busy Pi/OMP account for seconds; a run holds it longer. */
+const BUSY_ACCOUNT_WAIT_MS = 30_000;
+const BUSY_ACCOUNT_RETRY_MS = 1000;
+const EXCLUSIVE_ACCOUNT_CLIS = new Set(['omp', 'pi']);
 const preferenceSchema = validate.object({
     cli: validate.enum(CLI_IDS).optional(),
     model: validate.string().min(1),
@@ -115,6 +130,11 @@ let CliWorkerService = (() => {
     let _instanceExtraInitializers = [];
     let _ensureHarnessConversation_decorators;
     let _repairHarnessConversation_decorators;
+    let _listDshSubagents_decorators;
+    let _watchDshSubagents_decorators;
+    let _promptDshSubagent_decorators;
+    let _stopDshSubagent_decorators;
+    let _hideDshSubagent_decorators;
     let _watch_decorators;
     let _history_decorators;
     let _cliSettings_decorators;
@@ -131,15 +151,20 @@ let CliWorkerService = (() => {
     let _deleteWorker_decorators;
     let _restoreWorker_decorators;
     let _forkWorker_decorators;
+    let _generalSettings_decorators;
+    let _saveGeneralSettings_decorators;
     let _setCliEnabled_decorators;
     let _accountStatus_decorators;
+    let _recoverCliCleanup_decorators;
     let _cliExecutablePath_decorators;
     let _refreshCliExecutablePath_decorators;
     let _accountStart_decorators;
     let _accountStartForSource_decorators;
     let _accountStartForProvider_decorators;
+    let _accountStartWith_decorators;
     let _accountWatch_decorators;
     let _accountWrite_decorators;
+    let _accountRespond_decorators;
     let _accountResize_decorators;
     let _accountStop_decorators;
     let _catalog_decorators;
@@ -166,6 +191,11 @@ let CliWorkerService = (() => {
             const _metadata = typeof Symbol === "function" && Symbol.metadata ? Object.create(_classSuper[Symbol.metadata] ?? null) : void 0;
             _ensureHarnessConversation_decorators = [Remote('ensureHarnessConversation')];
             _repairHarnessConversation_decorators = [Remote('repairHarnessConversation')];
+            _listDshSubagents_decorators = [Remote('listDshSubagents')];
+            _watchDshSubagents_decorators = [Remote({ mode: 'stream' })];
+            _promptDshSubagent_decorators = [Remote('promptDshSubagent')];
+            _stopDshSubagent_decorators = [Remote('stopDshSubagent')];
+            _hideDshSubagent_decorators = [Remote('hideDshSubagent')];
             _watch_decorators = [Remote({ mode: 'stream' })];
             _history_decorators = [Remote('history')];
             _cliSettings_decorators = [Remote('cliSettings')];
@@ -182,15 +212,20 @@ let CliWorkerService = (() => {
             _deleteWorker_decorators = [Remote('deleteWorker')];
             _restoreWorker_decorators = [Remote('restoreWorker')];
             _forkWorker_decorators = [Remote('forkWorker')];
+            _generalSettings_decorators = [Remote('generalSettings')];
+            _saveGeneralSettings_decorators = [Remote('saveGeneralSettings')];
             _setCliEnabled_decorators = [Remote('setCliEnabled')];
             _accountStatus_decorators = [Remote('accountStatus')];
+            _recoverCliCleanup_decorators = [Remote('recoverCliCleanup')];
             _cliExecutablePath_decorators = [Remote('cliExecutablePath')];
             _refreshCliExecutablePath_decorators = [Remote('refreshCliExecutablePath')];
             _accountStart_decorators = [Remote('accountStart')];
             _accountStartForSource_decorators = [Remote('accountStartForSource')];
             _accountStartForProvider_decorators = [Remote('accountStartForProvider')];
+            _accountStartWith_decorators = [Remote('accountStartWith')];
             _accountWatch_decorators = [Remote({ mode: 'stream' })];
             _accountWrite_decorators = [Remote('accountWrite')];
+            _accountRespond_decorators = [Remote('accountRespond')];
             _accountResize_decorators = [Remote('accountResize')];
             _accountStop_decorators = [Remote('accountStop')];
             _catalog_decorators = [Remote('catalog')];
@@ -214,6 +249,11 @@ let CliWorkerService = (() => {
             _stop_decorators = [Remote('stop')];
             __esDecorate(this, null, _ensureHarnessConversation_decorators, { kind: "method", name: "ensureHarnessConversation", static: false, private: false, access: { has: obj => "ensureHarnessConversation" in obj, get: obj => obj.ensureHarnessConversation }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _repairHarnessConversation_decorators, { kind: "method", name: "repairHarnessConversation", static: false, private: false, access: { has: obj => "repairHarnessConversation" in obj, get: obj => obj.repairHarnessConversation }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _listDshSubagents_decorators, { kind: "method", name: "listDshSubagents", static: false, private: false, access: { has: obj => "listDshSubagents" in obj, get: obj => obj.listDshSubagents }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _watchDshSubagents_decorators, { kind: "method", name: "watchDshSubagents", static: false, private: false, access: { has: obj => "watchDshSubagents" in obj, get: obj => obj.watchDshSubagents }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _promptDshSubagent_decorators, { kind: "method", name: "promptDshSubagent", static: false, private: false, access: { has: obj => "promptDshSubagent" in obj, get: obj => obj.promptDshSubagent }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _stopDshSubagent_decorators, { kind: "method", name: "stopDshSubagent", static: false, private: false, access: { has: obj => "stopDshSubagent" in obj, get: obj => obj.stopDshSubagent }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _hideDshSubagent_decorators, { kind: "method", name: "hideDshSubagent", static: false, private: false, access: { has: obj => "hideDshSubagent" in obj, get: obj => obj.hideDshSubagent }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _watch_decorators, { kind: "method", name: "watch", static: false, private: false, access: { has: obj => "watch" in obj, get: obj => obj.watch }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _history_decorators, { kind: "method", name: "history", static: false, private: false, access: { has: obj => "history" in obj, get: obj => obj.history }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _cliSettings_decorators, { kind: "method", name: "cliSettings", static: false, private: false, access: { has: obj => "cliSettings" in obj, get: obj => obj.cliSettings }, metadata: _metadata }, null, _instanceExtraInitializers);
@@ -230,15 +270,20 @@ let CliWorkerService = (() => {
             __esDecorate(this, null, _deleteWorker_decorators, { kind: "method", name: "deleteWorker", static: false, private: false, access: { has: obj => "deleteWorker" in obj, get: obj => obj.deleteWorker }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _restoreWorker_decorators, { kind: "method", name: "restoreWorker", static: false, private: false, access: { has: obj => "restoreWorker" in obj, get: obj => obj.restoreWorker }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _forkWorker_decorators, { kind: "method", name: "forkWorker", static: false, private: false, access: { has: obj => "forkWorker" in obj, get: obj => obj.forkWorker }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _generalSettings_decorators, { kind: "method", name: "generalSettings", static: false, private: false, access: { has: obj => "generalSettings" in obj, get: obj => obj.generalSettings }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _saveGeneralSettings_decorators, { kind: "method", name: "saveGeneralSettings", static: false, private: false, access: { has: obj => "saveGeneralSettings" in obj, get: obj => obj.saveGeneralSettings }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _setCliEnabled_decorators, { kind: "method", name: "setCliEnabled", static: false, private: false, access: { has: obj => "setCliEnabled" in obj, get: obj => obj.setCliEnabled }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _accountStatus_decorators, { kind: "method", name: "accountStatus", static: false, private: false, access: { has: obj => "accountStatus" in obj, get: obj => obj.accountStatus }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _recoverCliCleanup_decorators, { kind: "method", name: "recoverCliCleanup", static: false, private: false, access: { has: obj => "recoverCliCleanup" in obj, get: obj => obj.recoverCliCleanup }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _cliExecutablePath_decorators, { kind: "method", name: "cliExecutablePath", static: false, private: false, access: { has: obj => "cliExecutablePath" in obj, get: obj => obj.cliExecutablePath }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _refreshCliExecutablePath_decorators, { kind: "method", name: "refreshCliExecutablePath", static: false, private: false, access: { has: obj => "refreshCliExecutablePath" in obj, get: obj => obj.refreshCliExecutablePath }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _accountStart_decorators, { kind: "method", name: "accountStart", static: false, private: false, access: { has: obj => "accountStart" in obj, get: obj => obj.accountStart }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _accountStartForSource_decorators, { kind: "method", name: "accountStartForSource", static: false, private: false, access: { has: obj => "accountStartForSource" in obj, get: obj => obj.accountStartForSource }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _accountStartForProvider_decorators, { kind: "method", name: "accountStartForProvider", static: false, private: false, access: { has: obj => "accountStartForProvider" in obj, get: obj => obj.accountStartForProvider }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _accountStartWith_decorators, { kind: "method", name: "accountStartWith", static: false, private: false, access: { has: obj => "accountStartWith" in obj, get: obj => obj.accountStartWith }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _accountWatch_decorators, { kind: "method", name: "accountWatch", static: false, private: false, access: { has: obj => "accountWatch" in obj, get: obj => obj.accountWatch }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _accountWrite_decorators, { kind: "method", name: "accountWrite", static: false, private: false, access: { has: obj => "accountWrite" in obj, get: obj => obj.accountWrite }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _accountRespond_decorators, { kind: "method", name: "accountRespond", static: false, private: false, access: { has: obj => "accountRespond" in obj, get: obj => obj.accountRespond }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _accountResize_decorators, { kind: "method", name: "accountResize", static: false, private: false, access: { has: obj => "accountResize" in obj, get: obj => obj.accountResize }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _accountStop_decorators, { kind: "method", name: "accountStop", static: false, private: false, access: { has: obj => "accountStop" in obj, get: obj => obj.accountStop }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _catalog_decorators, { kind: "method", name: "catalog", static: false, private: false, access: { has: obj => "catalog" in obj, get: obj => obj.catalog }, metadata: _metadata }, null, _instanceExtraInitializers);
@@ -296,6 +341,8 @@ let CliWorkerService = (() => {
             graceMs: z.natural().min(100).max(30000).default(DEFAULT_CONFIG.graceMs),
             maxLineBytes: z.natural().min(1024).default(DEFAULT_CONFIG.maxLineBytes),
             maxRunBytes: z.natural().min(1024).default(DEFAULT_CONFIG.maxRunBytes),
+            maxNativeLineBytes: z.natural().min(1024).max(67_108_864).default(DEFAULT_CONFIG.maxNativeLineBytes),
+            maxToolPreviewBytes: z.natural().min(1024).default(DEFAULT_CONFIG.maxToolPreviewBytes),
             maxTimelineItems: z.natural().min(10).default(DEFAULT_CONFIG.maxTimelineItems),
         });
         runtime = __runInitializers(this, _instanceExtraInitializers);
@@ -308,10 +355,17 @@ let CliWorkerService = (() => {
         messageSubmissions = new Map();
         selectionBindings = new WeakMap();
         selectionProjects = new WeakMap();
+        /** Turn origin by runId: the parent model's tool call, or the user in the Worker UI. */
+        runOrigins;
+        /** Exact per-turn question surface; attribution never controls lifecycle. */
+        runQuestionSessions;
+        /** DSH tool calls the tool bridge is executing, by their DSH call id. */
+        bridgeCalls = new Map;
         displayedBindings = new Map();
         settingsCatalogs;
         settingsInstance;
         settingsSourceRevisions;
+        dshSubagents;
         disposed = new AbortController();
         harnessConversation;
         harnessConversationStore;
@@ -326,9 +380,37 @@ let CliWorkerService = (() => {
             };
             const stateDirectory = config.stateDirectory ?? join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'cliworker-now');
             this.options.cliExecutablePaths = new CliExecutablePathStore(stateDirectory);
-            this.backend = nativeProcessBackend(ctx.subprocess);
+            // Windows: CLIs and the Host's own HTTPS reads follow the Internet Options proxy.
+            const raw = nativeProcessBackend(ctx.subprocess);
+            const systemProxy = process.platform === 'win32' ? new WindowsSystemProxySource((spec) => raw.spawn(spec)) : undefined;
+            this.backend = nativeProcessBackend(ctx.subprocess, process.platform, { systemProxy });
+            if (systemProxy) {
+                void systemProxy.refresh();
+                setHostProxy(hostProxyLookup(systemProxy));
+            }
             this.accounts = new AccountManager(this.backend, this.options, undefined, (cli, error) => this.runtime.blockCatalogOnCleanup(cli, error));
             this.runtime = new WorkerRuntime(new WorkerStorage(config.stateDirectory ?? join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'cliworker-now')), this.backend, this.options);
+            this.dshSubagents = new DshSubagents(stateDirectory, {
+                subagents: () => this.ctx.get('subagents'),
+                query: () => this.ctx.get('sessionQuery'),
+                ownedSessions: () => new Set([
+                    ...[...this.runtime.storage.workers.values()].flatMap((worker) => worker.harnessConversation ? [worker.harnessConversation.sessionId] : []),
+                    ...(this.harnessConversationStore?.list().map((entry) => entry.sessionId) ?? []),
+                ]),
+                subscribe: (notify) => {
+                    const offSession = this.ctx.on('session/event', (session, event) => {
+                        if (['subagent/catalog', 'subagent/descriptor', 'turn/start', 'turn/end', 'model/selection', 'request/header'].includes(event.type))
+                            notify(session.id);
+                    }, { global: true });
+                    // Worker registration/hiding can change exclusion without a native event.
+                    const offWorkers = this.runtime.subscribe(() => {
+                        for (const worker of this.runtime.storage.workers.values())
+                            notify(worker.parentSessionId);
+                    });
+                    return () => { offSession(); offWorkers(); };
+                },
+                log: (reason) => console.warn(`[CLI Worker / DSH] ${reason}`),
+            });
             this.ctx.inject(['sessionController', 'subagents', 'llm'], (scope) => {
                 const records = new HarnessConversationStore(this.runtime.storage.directory);
                 this.harnessConversationStore = records;
@@ -418,12 +500,11 @@ let CliWorkerService = (() => {
                         const worker = this.runtime.get(record.parentSessionId, record.workerId);
                         if (worker.harnessConversation?.sessionId !== record.sessionId)
                             throw new Error('CLI 子会话绑定已改变，未修改权限');
-                        if (mode !== undefined) {
-                            const saved = JSON.parse(await this.configureWorkerPermission(record.parentSessionId, record.workerId, mode, signal));
-                            return `当前 CLI 权限：${workerPermissionOptions(saved).find((option) => option.value === saved.mode)?.name ?? saved.mode}`;
-                        }
+                        if (mode !== undefined)
+                            await this.configureWorkerPermission(record.parentSessionId, record.workerId, mode, signal);
                         const state = JSON.parse(await this.permissionForWorker(record.parentSessionId, record.workerId, signal));
-                        return `当前 CLI 权限：${state.currentValue}。可用模式：${state.options.map((option) => `${option.value}（${option.name}）`).join('、')}${state.reason ? `。${state.reason}` : ''}`;
+                        const current = state.options.find((option) => option.value === state.currentValue)?.name ?? state.currentValue;
+                        return `当前 CLI 权限：${current}${state.plan.active ? '（规划模式）' : ''}。可用档位：${state.options.map((option) => `${option.value}（${option.name}）`).join('、')}${state.reason ? `。${state.reason}` : ''}`;
                     },
                     run: async (record, prompt, requestId, signal, messages = []) => {
                         const parent = await this.parent(record.parentSessionId);
@@ -469,11 +550,20 @@ let CliWorkerService = (() => {
                     const child = this.ctx.agents.get(binding.sessionId);
                     if (!child)
                         throw new Error('原生子 Agent 尚未就绪，未启动 CLI 工具桥');
-                    setSandboxMode(child.session, worker.mode === 'plan'
-                        ? 'read-only'
-                        : parent.ctx.get('sandboxPolicy').resolve({ session: parent.session }).mode);
+                    // DSH fallback tools in the child follow the run's level, not the parent's tier.
+                    const permission = this.childPermission(parent, worker);
+                    setSandboxMode(child.session, input.access ?? permission.sandbox);
                     child.ctx.get('planMode')?.set(child, worker.mode === 'plan');
-                    const support = nativeHarnessToolCapability(cli);
+                    // Delegation pins a child to `never`; a Worker-UI turn asks in this child.
+                    // Below full access it always asks. Direct log write: no model notice.
+                    const childApproval = child.ctx.get('approval');
+                    const policy = workerApproval(input.access ?? permission.sandbox, this.permissionState(parent));
+                    if (childApproval && childApproval.overrideOf(child.session) !== policy)
+                        setApprovalPolicy(child.session, policy);
+                    // Host tools act on the parent's project; an isolated run must not write there.
+                    const support = input.isolated
+                        ? { transport: false, reason: '本轮在隔离副本中运行，未接通 DSH 工具桥，避免写入原项目' }
+                        : nativeHarnessToolCapability(cli);
                     if (!support.transport) {
                         worker.harnessConversation = {
                             ...binding,
@@ -487,9 +577,9 @@ let CliWorkerService = (() => {
                         this.runtime.changed();
                         return undefined;
                     }
-                    // Public scoped presentation affects only this internal child. Tool policy
-                    // and inherited restrictions still run inside tools.execute.
-                    const resetPresentation = child.ctx.tools.presentAs('native');
+                    // Native per-call dispatch retains policy/approvals without replacing
+                    // the child's model executor (which may be PTC).
+                    const executor = await createNativeHarnessExecutor(child.ctx);
                     let lease;
                     try {
                         // The real child scope owns its tool/MCP catalog. Refresh for every
@@ -520,6 +610,11 @@ let CliWorkerService = (() => {
                             tools,
                             signal,
                             executionReady: nativeHarnessExecutionReady(cli),
+                            // Same inputs as the launch: overlapping DSH tools stay with the CLI.
+                            // A first item that runs as plan follows the launch, not the stored mode.
+                            native: nativeCliCapabilities({ cli, mode: input.access === 'read-only' && askRunsAsPlan(cli) ? 'plan' : worker.mode, access: input.access,
+                                mcpServers: await nativeCliMcpServers(cli, worker.project) }),
+                            resolveImage: (attachment, control) => readHarnessImage(child.ctx, attachment, control),
                             authorize: async (identity) => {
                                 signal.throwIfAborted();
                                 const current = this.runtime.get(parent.id, worker.id);
@@ -528,18 +623,28 @@ let CliWorkerService = (() => {
                                     this.ctx.agents.get(binding.sessionId) !== child ||
                                     !['queued', 'running'].includes(current.status))
                                     throw new Error('工具桥运行身份已失效');
-                                this.assertExecution(parent);
+                                this.assertExecution(parent, true);
                                 if (this.project(parent) !== worker.project)
                                     throw new Error('工具桥项目已变更');
                                 this.runtime.assertCliEnabled(cli);
                             },
-                            execute: async (call) => withinCliTool(worker.runId, async () => child.ctx.tools.execute({
-                                callId: ToolCallId(`cliworker:${call.callId}`),
-                                name: call.name,
-                                arguments: call.arguments,
-                                agent: child,
-                                signal: call.signal,
-                            })),
+                            execute: async (call) => {
+                                // An approval this call raises is matched to its Worker by call id.
+                                const callId = ToolCallId(`cliworker:${call.callId}`);
+                                this.bridgeCalls.set(callId, { worker, runId: call.binding.runId, child, name: call.name, arguments: call.arguments });
+                                try {
+                                    return await withinCliTool(worker.runId, async () => executor.execute({
+                                        callId,
+                                        name: call.name,
+                                        arguments: call.arguments,
+                                        agent: child,
+                                        signal: call.signal,
+                                    }));
+                                }
+                                finally {
+                                    this.bridgeCalls.delete(callId);
+                                }
+                            },
                             ...(skills
                                 ? {
                                     skills: {
@@ -559,11 +664,11 @@ let CliWorkerService = (() => {
                         });
                     }
                     catch (error) {
-                        resetPresentation();
+                        executor.dispose();
                         throw error;
                     }
                     const owned = lease;
-                    return adoptNativeHarnessLease(owned, resetPresentation, () => {
+                    return adoptNativeHarnessLease(owned, executor.dispose, () => {
                         if (worker.harnessConversation) {
                             worker.harnessConversation = {
                                 ...worker.harnessConversation,
@@ -575,7 +680,7 @@ let CliWorkerService = (() => {
                                 reasons: {
                                     ...worker.harnessConversation.reasons,
                                     tools: owned.capabilities.ready
-                                        ? '共享当前子 Agent 获准的 DSH 工具与 MCP；每次执行仍走宿主权限和审批链，未接通的模型辅助与递归派遣不可用'
+                                        ? 'CLI 原生工具优先；仅提供原生未覆盖的获准 DSH 工具与 MCP 作为备选，每次执行仍走宿主权限和审批链，未接通的模型辅助与递归派遣不可用'
                                         : owned.capabilities.reason,
                                     skills: owned.capabilities.ready
                                         ? '当前子 Agent 没有可供模型读取的 DSH 技能'
@@ -611,7 +716,8 @@ let CliWorkerService = (() => {
                 const agent = this.ctx.agents.get(worker.parentSessionId);
                 if (!agent)
                     throw new Error('父会话已关闭，请重新打开后继续发送');
-                this.assertExecution(agent);
+                this.assertExecution(agent, true);
+                this.assertAccessSupported(agent, cliOf(worker.preference), worker.level);
                 if (this.project(agent) !== worker.project)
                     throw new Error('项目已变更，请在原项目继续');
                 this.runtime.assertCliEnabled(cliOf(worker.preference));
@@ -620,12 +726,27 @@ let CliWorkerService = (() => {
             });
             ctx.effect(() => () => {
                 this.disposed.abort();
+                this.dshSubagents.dispose();
+                setHostProxy(undefined);
                 return Promise.all([
                     this.runtime.close(),
                     this.accounts.close(),
                     ...[...this.accountParents.values()].map((dispose) => dispose()),
                 ]);
             }, 'cliworker:lifetime');
+            ctx.effect(() => this.runtime.setApprovalHandler((worker, request, signal, mode) => this.decideNativeApproval(worker, request, signal, mode)), 'cliworker:approvals');
+            // Ahead of the Remote answerer, which would ask only in the Worker's child session.
+            ctx.on('approval/request', (request, next) => this.answerHarnessApproval(request, next), true);
+            ctx.effect(() => this.runtime.setAccessSnapshot((worker) => {
+                const parent = this.ctx.agents.get(worker.parentSessionId);
+                if (!parent)
+                    return undefined;
+                const state = this.permissionState(parent);
+                const access = runAccess(worker.mode, worker.level, state);
+                if (worker.mode === 'plan' || state.planMode)
+                    return { access, label: '规划模式' };
+                return { access, label: levelName(cliOf(worker.preference), effectiveLevel(worker.level, state.sandbox)) };
+            }), 'cliworker:access');
             this.registerTools();
             registerCliRouting(ctx);
             ctx.effect(() => ctx.systemPrompt.section({
@@ -647,34 +768,261 @@ let CliWorkerService = (() => {
                 throw new Error('此主对话没有工作目录，请先选择项目');
             return projectDirectory(agent.session.header.cwd);
         }
-        assertExecution(agent) {
+        /** Resolve ownership only; child status stays read-only even in plan mode. */
+        /** CLI Workers win; only an unmatched reference is tried against this conversation's DSH native subagents. */
+        async dshFallback(parent, args, signal, cli, prompt) {
+            try {
+                return cli();
+            }
+            catch (error) {
+                const name = args.worker_name?.trim();
+                if (name && !DSH_AGENT_NAME.test(name))
+                    throw error;
+                if (this.runtime.snapshot(parent).showDshSubagents === false)
+                    throw error;
+                const ref = { id: args.worker_id, name };
+                const found = prompt === undefined
+                    ? await this.dshSubagents.resolve(parent, ref, signal).then((child) => child && { kind: 'dsh-subagent', workerId: child.id, agentName: child.agentName, title: child.title, mode: child.mode })
+                    : await this.dshSubagents.followup(parent, ref, prompt, signal);
+                if (!found)
+                    throw error;
+                return found;
+            }
+        }
+        async dispatchSubject(caller) {
+            if (caller.session.header.origin !== 'subagent')
+                return caller;
+            const parentId = caller.session.header.parentSession;
+            // A background Worker can outlive its parent's resident Agent; load it the
+            // same way native Remote Agent parameters do before deciding it is gone.
+            if (parentId)
+                try {
+                    await this.ctx.typert.lookups.get('agent')?.resolve(parentId);
+                }
+                catch { /* reported below */ }
+            const parent = parentId && this.ctx.agents.get(parentId);
+            if (!parent)
+                throw new Error('无法解析子 Agent 所属主对话；任务尚未创建');
+            if (parent.id === caller.id || parent.session.header.origin === 'subagent' || parent.session.header.parentSession)
+                throw new Error('只允许主对话的直接子 Agent 同级派遣；第三层调用被拒绝');
+            return parent;
+        }
+        async siblingDispatch(caller, parent, signal) {
+            if (caller === parent)
+                return { questionAgent: parent };
+            this.runtime.assertSiblingCapacity(parent.id);
+            const worker = [...this.runtime.storage.workers.values()].find(row => row.parentSessionId === parent.id && row.harnessConversation?.sessionId === caller.id);
+            const surface = worker && (this.runQuestionSessions?.get(worker.runId)
+                ?? (this.runOrigins?.get(worker.runId) === 'agent' ? parent.id : caller.id));
+            const questionAgent = surface ? this.ctx.agents.get(surface) : parent;
+            if (!questionAgent)
+                throw new Error('发起者当前轮的询问会话不可用；任务尚未创建');
+            const label = worker ? workerName(worker)
+                : (await this.ctx.get('subagents')?.listChildren(parent.id, signal))?.find(row => row.id === caller.id)?.label;
+            return {
+                questionAgent,
+                initiator: { kind: worker ? 'worker' : 'subagent', id: worker?.id ?? caller.id, name: label || caller.id },
+            };
+        }
+        /**
+         * @param dispatch - A CLI run (or its control), which 仅可查看 admits in the
+         * CLI's native read-only mode. Other project or account writes (merging an
+         * isolated copy, account login) stay refused under read-only.
+         */
+        assertExecution(agent, dispatch = false) {
             if (agent.session.header.origin === 'subagent')
                 throw new Error('MVP 只支持主对话下的直接 CLI 子 Agent');
-            // agy's terminal sandbox cannot implement Harness's whole-process read-only
-            // policy (its native state is writable). Refuse rather than silently weaken it.
             if (agent.ctx.get('planMode')?.get(agent).active)
                 throw new Error('请先退出 Harness 规划模式，再运行外部 CLI；本插件不会绕过规划边界');
-            if (agent.ctx.get('sandboxPolicy').resolve({ session: agent.session }).mode === 'read-only')
-                throw new Error('Harness 当前为只读权限；外部 CLI 需要可写运行状态，请先明确切换项目权限');
+            if (!dispatch && agent.ctx.get('sandboxPolicy').resolve({ session: agent.session }).mode === 'read-only')
+                throw new Error('Harness 当前为只读权限；此操作会写入项目或账号状态，请先明确切换项目权限');
+        }
+        /**
+         * Under 仅可查看 a Worker without its own level runs at its first item: the
+         * CLI's native ask mode, or Pi's tool_call gate. A CLI whose first item
+         * cannot ask before a change is refused rather than silently weakened: agy's
+         * plan launch keeps its terminal sandbox state writable, Kimi's default
+         * auto-approves Git workspace edits, and Hermes offers no first item. A level
+         * the user picked in the Worker menu runs as picked.
+         */
+        assertAccessSupported(agent, cli, level) {
+            if (level !== undefined || this.permissionState(agent).sandbox !== 'read-only')
+                return;
+            if (cli === 'antigravity')
+                throw new Error('Harness 当前为仅可查看；Antigravity 无法把授权请求转给你，请切换权限预设或改用其他 CLI');
+            if (cli === 'hermes')
+                throw new Error('Harness 当前为仅可查看；Hermes 没有可询问的档位，请切换权限预设或改用其他 CLI');
+            if (!runsUnderViewOnly(cli))
+                throw new Error('Harness 当前为仅可查看；Kimi 的第一项会自动批准 Git 仓库内的编辑，请切换权限预设或改用其他 CLI');
+        }
+        /** The child session's DSH sandbox and approval policy for a Worker's plan switch and level. */
+        childPermission(parent, worker) {
+            const state = this.permissionState(parent);
+            const sandbox = runAccess(worker.mode, worker.level, state);
+            return { sandbox, approval: workerApproval(sandbox, state) };
+        }
+        /** The parent's DSH permission state now: plan mode, sandbox and approval policy. */
+        permissionState(agent) {
+            const approval = agent.ctx.get('approval');
+            return {
+                planMode: !!agent.ctx.get('planMode')?.get(agent).active,
+                sandbox: agent.ctx.get('sandboxPolicy').resolve({ session: agent.session }).mode,
+                // Without an approval service nothing can be asked; DSH fails closed.
+                approval: approval ? (approval.overrideOf(agent.session) ?? approval.config.policy ?? 'ask') : 'never',
+            };
+        }
+        /**
+         * Decide one native authorization request from the parent's current state.
+         * A parent-started turn asks on the parent page; a Worker-UI turn asks in the
+         * Worker's own native conversation. Any failure to ask is a denial.
+         */
+        async decideNativeApproval(worker, request, signal, 
+        /** The run's launch mode: a 仅可查看 run launched as plan denies. */
+        mode) {
+            const parent = this.ctx.agents.get(worker.parentSessionId);
+            if (!parent)
+                return { decision: 'deny', source: 'unavailable' };
+            const decided = decideApproval(mode, worker.level, this.permissionState(parent));
+            if (decided !== 'ask')
+                return decided;
+            const cli = cliOf(worker.preference);
+            const context = { worker: workerName(worker), cli: CLI_LABELS[cli], project: worker.project };
+            const control = AbortSignal.any([signal, this.disposed.signal]);
+            const surface = this.runQuestionSessions?.get(worker.runId);
+            if (surface === parent.id || (!surface && this.runOrigins?.get(worker.runId ?? '') === 'agent')) {
+                const response = await waitForInput(parent.ctx.get('userQuestions').ask({ agent: parent, signal: control, questions: [approvalQuestion(request, context)] }), control);
+                return decisionFromAnswer(request, response.answers.find((item) => item.id === 'cliworker_approval'));
+            }
+            const binding = worker.harnessConversation;
+            const child = this.ctx.agents.get((surface ?? binding?.sessionId));
+            const approval = child?.ctx.get('approval');
+            if (!child || !approval)
+                return { decision: 'deny', source: 'unavailable' };
+            // The parent may have switched presets since preparation: ask with its policy now.
+            if (approval.overrideOf(child.session) !== 'ask')
+                setApprovalPolicy(child.session, 'ask');
+            const outcome = await approval.request({
+                agent: child,
+                toolName: `cliworker:${cli}`,
+                reason: approvalPrompt(request, context),
+                signal: control,
+            });
+            return decisionFromOutcome(outcome);
+        }
+        /**
+         * Answer a DSH tool approval raised by a tool bridge call like a native
+         * request: a parent-started turn asks on the parent page, a Worker-UI turn
+         * keeps the child's own panel. Any other request is not ours.
+         */
+        async answerHarnessApproval(request, next) {
+            const call = request.callId === undefined ? undefined : this.bridgeCalls.get(request.callId);
+            if (!call || call.child !== request.agent)
+                return next();
+            const { worker, runId } = call;
+            const summary = harnessApprovalRequest(call.name, call.arguments, request);
+            const decision = await this.runtime.harnessApproval(worker, runId, summary, request.signal ?? this.disposed.signal, async (signal, mode) => {
+                if (this.runQuestionSessions?.has(runId) || this.runOrigins?.get(runId) === 'agent')
+                    return this.decideNativeApproval(worker, summary, signal, mode);
+                // The child's own panel answers, after the same plan and preset rules.
+                const parent = this.ctx.agents.get(worker.parentSessionId);
+                if (!parent)
+                    return { decision: 'deny', source: 'unavailable' };
+                const decided = decideApproval(mode, worker.level, this.permissionState(parent));
+                if (decided !== 'ask')
+                    return decided;
+                // A stop must not wait on a panel nobody may answer.
+                return decisionFromOutcome(await waitForInput(next(), signal));
+            });
+            return outcomeFromDecision(decision);
         }
         async queryCatalog(...args) {
             try {
-                return await authorizedCatalog(...args);
+                return await this.freshCatalog(...args);
             }
             catch (error) {
                 if (error instanceof ProcessCleanupUnconfirmedError)
                     this.runtime.blockCatalogOnCleanup(args[0], error);
+                if (accountBusy(error))
+                    return this.busyAccountCatalog(error, ...args);
                 throw error;
             }
         }
+        async freshCatalog(...args) {
+            const [cli, , , project] = args;
+            const revision = this.settingsCatalogs?.revision(cli);
+            const result = await authorizedCatalog(...args);
+            // Parallel dispatches waiting on this exclusive account read the fresh result.
+            if (EXCLUSIVE_ACCOUNT_CLIS.has(cli) && revision !== undefined)
+                try {
+                    this.settingsCatalogs?.remember(project, result, revision);
+                }
+                catch {
+                    // A source change during the read is caught by the next fresh check.
+                }
+            return result;
+        }
+        /**
+         * A Pi/OMP OAuth account is exclusive while another run or catalog read holds
+         * it. Dispatch only needs this account's choices to queue the task, and the run
+         * authorizes afresh once the account is free, so a busy account uses its last
+         * verified catalog. Without one, wait for the short catalog reads to finish.
+         */
+        async busyAccountCatalog(busy, ...args) {
+            const [cli, backend, config, project, signal, expected] = args;
+            const saved = async () => {
+                const binding = await readCliAccountBinding(cli, backend, config, project, signal);
+                if (expected && binding !== expected)
+                    throw new Error(ACCOUNT_CHANGED);
+                const catalog = this.settingsCatalogs?.display(project, cli, binding);
+                return catalog && { catalog, binding };
+            };
+            for (const deadline = Date.now() + BUSY_ACCOUNT_WAIT_MS;;) {
+                const hit = await saved();
+                if (hit)
+                    return hit;
+                if (Date.now() >= deadline)
+                    throw busy;
+                await sleep(BUSY_ACCOUNT_RETRY_MS, undefined, { signal });
+                // Another read may have finished while this one slept.
+                const later = await saved();
+                if (later)
+                    return later;
+                try {
+                    return await this.freshCatalog(...args);
+                }
+                catch (error) {
+                    if (!accountBusy(error))
+                        throw error;
+                }
+            }
+        }
+        async authorizeChoice(...args) {
+            try {
+                return await this.querySelection(...args);
+            }
+            catch (error) {
+                // A choice made under the previous account stands when the account signed in
+                // now offers it too; the change itself is not announced.
+                const [preference, backend, config, project, signal, expected] = args;
+                if (!expected || !(error instanceof Error) || error.message !== ACCOUNT_CHANGED)
+                    throw error;
+                signal.throwIfAborted();
+                return this.querySelection(preference, backend, config, project, signal);
+            }
+        }
         async querySelection(...args) {
+            const [preference, ...rest] = args;
             try {
                 return await authorizeSelection(...args);
             }
             catch (error) {
                 if (error instanceof ProcessCleanupUnconfirmedError)
-                    this.runtime.blockCatalogOnCleanup(cliOf(args[0]), error);
-                throw error;
+                    this.runtime.blockCatalogOnCleanup(cliOf(preference), error);
+                if (!accountBusy(error))
+                    throw error;
+                const result = await this.busyAccountCatalog(error, cliOf(preference), ...rest);
+                validatePreference(preference, result.catalog);
+                return { ...result, preference: resolveModel(preference, result.catalog.models) };
             }
         }
         /** Read installation paths without saving discovery or opening a native account/model process. */
@@ -710,7 +1058,7 @@ let CliWorkerService = (() => {
                 }
             });
         }
-        async chooseQoderVariant(agent, callerSignal, name) {
+        async chooseQoderVariant(agent, callerSignal, name, questionAgent = agent) {
             const signal = AbortSignal.any([callerSignal, this.disposed.signal]);
             signal.throwIfAborted();
             const project = this.project(agent);
@@ -731,15 +1079,15 @@ let CliWorkerService = (() => {
             this.runtime.changed();
             try {
                 await waitForInput(previous, signal);
-                this.assertExecution(agent);
+                this.assertExecution(agent, true);
                 const resolution = await this.resolveDispatchName(name, signal);
                 signal.throwIfAborted();
                 let cli;
                 if (resolution.status === 'resolved' && (resolution.cli === 'qoder' || resolution.cli === 'qodercn'))
                     cli = resolution.cli;
                 else if (resolution.status === 'ambiguous') {
-                    const response = await waitForInput(agent.ctx.get('userQuestions').ask({
-                        agent,
+                    const response = await waitForInput(questionAgent.ctx.get('userQuestions').ask({
+                        agent: questionAgent,
                         signal,
                         questions: [
                             {
@@ -761,7 +1109,7 @@ let CliWorkerService = (() => {
                 else
                     throw new Error('未找到 Qoder 或 Qoder CN 安装，请先安装或配置 CLI 路径；任务尚未启动');
                 signal.throwIfAborted();
-                this.assertExecution(agent);
+                this.assertExecution(agent, true);
                 if (this.project(agent) !== project)
                     throw new Error('项目已变更，请重新选择');
                 this.runtime.assertCliEnabled(cli);
@@ -777,138 +1125,178 @@ let CliWorkerService = (() => {
                 this.runtime.changed();
             }
         }
-        /** Serialize only this conversation's selection; a cancelled waiter never owns the question. */
-        async chooseDispatch(agent, callerSignal, cli) {
+        /**
+         * Serialize only this conversation's questions; a cancelled waiter never owns
+         * the question. A settled setup asks nothing, so its catalog check leaves the
+         * queue and parallel dispatches of one conversation start together.
+         */
+        async chooseDispatch(agent, callerSignal, cli, questionAgent = agent) {
             const signal = AbortSignal.any([callerSignal, this.disposed.signal]);
             signal.throwIfAborted();
             this.runtime.assertCliEnabled(cli);
             const project = this.project(agent);
             const key = JSON.stringify([agent.id, project, cli]);
             const waits = (this.dispatchWaits ??= new Map());
-            const previous = waits.get(key) ?? Promise.resolve();
-            let release;
-            const owned = new Promise((resolve) => {
-                release = resolve;
-            });
-            const tail = previous.then(() => owned);
-            waits.set(key, tail);
-            void tail.then(() => {
-                if (waits.get(key) === tail)
-                    waits.delete(key);
-            });
+            const turn = () => {
+                const previous = waits.get(key) ?? Promise.resolve();
+                let release;
+                const owned = new Promise((resolve) => {
+                    release = resolve;
+                });
+                const tail = previous.then(() => owned);
+                waits.set(key, tail);
+                void tail.then(() => {
+                    if (waits.get(key) === tail)
+                        waits.delete(key);
+                });
+                return { previous, release };
+            };
             this.pending.set(agent.id, (this.pending.get(agent.id) ?? 0) + 1);
             this.runtime.changed();
             try {
-                await waitForInput(previous, signal);
-                signal.throwIfAborted();
-                this.assertExecution(agent);
-                this.runtime.assertCliEnabled(cli);
-                this.settingsCatalogs ??= new SettingsCatalogCache(this.runtime.storage.directory);
-                const catalogRevision = this.settingsCatalogs.revision(cli);
-                const { catalog, binding } = await this.queryCatalog(cli, this.backend, this.options, project, signal);
-                signal.throwIfAborted();
-                this.runtime.assertCliEnabled(cli);
-                this.settingsCatalogs.remember(project, { catalog, binding }, catalogRevision);
-                const models = catalog.models;
-                const valid = (setup) => {
-                    if (!setup || setup.binding !== binding || cliOf(setup.preference) !== cli)
-                        return false;
+                for (let queued = false;; queued = true) {
+                    const { previous, release } = turn();
+                    let held = true;
                     try {
-                        validatePreference(setup.preference, catalog);
-                        return resolveModel(setup.preference, models).model === setup.preference.model;
+                        await waitForInput(previous, signal);
+                        signal.throwIfAborted();
+                        this.assertExecution(agent, true);
+                        this.runtime.assertCliEnabled(cli);
+                        if (!queued && this.runtime.storage.conversationSetup(agent.id, project, cli)) {
+                            release();
+                            held = false;
+                        }
+                        this.settingsCatalogs ??= new SettingsCatalogCache(this.runtime.storage.directory);
+                        const catalogRevision = this.settingsCatalogs.revision(cli);
+                        const queried = await this.queryCatalog(cli, this.backend, this.options, project, signal);
+                        const { catalog } = queried;
+                        let { binding } = queried;
+                        signal.throwIfAborted();
+                        this.runtime.assertCliEnabled(cli);
+                        this.settingsCatalogs.remember(project, { catalog, binding }, catalogRevision);
+                        const models = catalog.models;
+                        const valid = (setup) => {
+                            // A saved choice outlives an account change: the current account must still offer it,
+                            // and launch authorizes it again under that account.
+                            if (!setup || cliOf(setup.preference) !== cli)
+                                return false;
+                            try {
+                                validatePreference(setup.preference, catalog);
+                                return resolveModel(setup.preference, models).model === setup.preference.model;
+                            }
+                            catch {
+                                return false;
+                            }
+                        };
+                        let asked = false;
+                        const ask = async (questions) => {
+                            signal.throwIfAborted();
+                            asked = true;
+                            const response = await waitForInput(questionAgent.ctx.get('userQuestions').ask({ agent: questionAgent, signal, questions }), signal);
+                            signal.throwIfAborted();
+                            this.runtime.assertCliEnabled(cli);
+                            return response;
+                        };
+                        const current = this.runtime.storage.conversationSetup(agent.id, project, cli);
+                        let setup = valid(current) ? current : undefined;
+                        // The settled setup no longer fits this catalog: ask again in turn.
+                        if (!setup && !held)
+                            continue;
+                        let selected = false;
+                        // The only unasked start: the user turned asking off and the saved complete setup still checks out.
+                        if (!setup && this.runtime.storage.generalSettings().askBeforeDispatch === false) {
+                            const saved = this.runtime.storage.dispatchSetup(project, cli);
+                            if (valid(saved))
+                                setup = saved;
+                        }
+                        else if (!current) {
+                            const saved = this.runtime.storage.dispatchSetup(project, cli);
+                            if (valid(saved)) {
+                                const modelLabel = models.find((model) => model.id === saved.preference.model ||
+                                    Object.values(model.variants ?? {}).includes(saved.preference.model))?.label ?? saved.preference.model;
+                                const response = await ask([
+                                    {
+                                        id: 'cliworker_reuse',
+                                        header: '沿用设定',
+                                        question: `是否沿用 ${modelLabel} · ${effortLabel(saved.preference.effort)} · ${saved.role?.name ?? '不使用角色预设'}？`,
+                                        options: [{ label: '沿用' }, { label: '重新选择' }],
+                                    },
+                                ]);
+                                const answer = response.answers.find((item) => item.id === 'cliworker_reuse');
+                                if (answer?.custom !== undefined ||
+                                    answer?.selected.length !== 1 ||
+                                    !['沿用', '重新选择'].includes(answer.selected[0]))
+                                    throw new Error('请选择沿用或重新选择；任务尚未启动');
+                                if (answer.selected[0] === '沿用')
+                                    setup = saved;
+                            }
+                        }
+                        if (!setup) {
+                            const choices = visibleModelChoices(models);
+                            const response = await ask([
+                                {
+                                    id: 'cliworker_model',
+                                    header: `${CLI_LABELS[cli]} 模型`,
+                                    question: '选择模型',
+                                    options: choices.map((model) => ({ label: model.label })),
+                                },
+                            ]);
+                            const answer = response.answers.find((item) => item.id === 'cliworker_model');
+                            const chosen = answer?.custom === undefined && answer?.selected.length === 1
+                                ? choices.find((model) => model.label === answer.selected[0])
+                                : undefined;
+                            if (!chosen?.efforts?.length)
+                                throw new Error('请选择列表中的模型');
+                            const offered = structuredClone(this.runtime.storage.rolePresets());
+                            const questions = [];
+                            if (chosen.efforts.length > 1)
+                                questions.push({
+                                    id: 'cliworker_effort',
+                                    header: '思考强度',
+                                    question: `选择 ${chosen.label} 的思考强度`,
+                                    options: chosen.efforts.map((effort) => ({ label: effortLabel(effort) })),
+                                });
+                            questions.push(roleQuestion(offered));
+                            const selection = await ask(questions);
+                            const effortAnswer = selection.answers.find((item) => item.id === 'cliworker_effort');
+                            const effort = chosen.efforts.length === 1
+                                ? chosen.efforts[0]
+                                : effortAnswer?.custom === undefined && effortAnswer?.selected.length === 1
+                                    ? chosen.efforts.find((effort) => effortLabel(effort) === effortAnswer.selected[0])
+                                    : undefined;
+                            const preference = resolveModel(preferenceSchema.parse({ cli, model: chosen.id, effort }), models);
+                            setup = { preference, role: readRoleAnswer(offered, selection) ?? null, binding };
+                            selected = true;
+                        }
+                        // A remembered answer is never execution authority. Detect changes during any
+                        // question; an unasked setup was just checked, and launch checks it again.
+                        if (asked) {
+                            const checked = await this.authorizeChoice(setup.preference, this.backend, this.options, project, signal, binding);
+                            if (checked.preference.model !== setup.preference.model)
+                                throw new Error('模型与思考强度已变更，请重新选择');
+                            binding = checked.binding;
+                            setup = { ...setup, binding };
+                        }
+                        signal.throwIfAborted();
+                        this.assertExecution(agent, true);
+                        this.runtime.assertCliEnabled(cli);
+                        if (this.project(agent) !== project)
+                            throw new Error('项目已变更，请重新选择');
+                        if (selected)
+                            this.runtime.storage.setDispatchSetup(project, setup);
+                        if (current !== setup)
+                            this.runtime.storage.setConversationSetup(agent.id, project, setup);
+                        (this.selectionBindings ??= new WeakMap()).set(setup.preference, binding);
+                        (this.selectionProjects ??= new WeakMap()).set(setup.preference, project);
+                        return setup;
                     }
-                    catch {
-                        return false;
-                    }
-                };
-                const ask = async (questions) => {
-                    signal.throwIfAborted();
-                    const response = await waitForInput(agent.ctx.get('userQuestions').ask({ agent, signal, questions }), signal);
-                    signal.throwIfAborted();
-                    this.runtime.assertCliEnabled(cli);
-                    return response;
-                };
-                const current = this.runtime.storage.conversationSetup(agent.id, project, cli);
-                let setup = valid(current) ? current : undefined;
-                let selected = false;
-                if (!current) {
-                    const saved = this.runtime.storage.dispatchSetup(project, cli);
-                    if (valid(saved)) {
-                        const modelLabel = models.find((model) => model.id === saved.preference.model ||
-                            Object.values(model.variants ?? {}).includes(saved.preference.model))?.label ?? saved.preference.model;
-                        const response = await ask([
-                            {
-                                id: 'cliworker_reuse',
-                                header: '沿用设定',
-                                question: `是否沿用 ${modelLabel} · ${effortLabel(saved.preference.effort)} · ${saved.role?.name ?? '不使用角色预设'}？`,
-                                options: [{ label: '沿用' }, { label: '重新选择' }],
-                            },
-                        ]);
-                        const answer = response.answers.find((item) => item.id === 'cliworker_reuse');
-                        if (answer?.custom !== undefined ||
-                            answer?.selected.length !== 1 ||
-                            !['沿用', '重新选择'].includes(answer.selected[0]))
-                            throw new Error('请选择沿用或重新选择；任务尚未启动');
-                        if (answer.selected[0] === '沿用')
-                            setup = saved;
+                    finally {
+                        if (held)
+                            release();
                     }
                 }
-                if (!setup) {
-                    const choices = visibleModelChoices(models);
-                    const response = await ask([
-                        {
-                            id: 'cliworker_model',
-                            header: `${CLI_LABELS[cli]} 模型`,
-                            question: '选择模型',
-                            options: choices.map((model) => ({ label: model.label })),
-                        },
-                    ]);
-                    const answer = response.answers.find((item) => item.id === 'cliworker_model');
-                    const chosen = answer?.custom === undefined && answer?.selected.length === 1
-                        ? choices.find((model) => model.label === answer.selected[0])
-                        : undefined;
-                    if (!chosen?.efforts?.length)
-                        throw new Error('请选择列表中的模型');
-                    const offered = structuredClone(this.runtime.storage.rolePresets());
-                    const questions = [];
-                    if (chosen.efforts.length > 1)
-                        questions.push({
-                            id: 'cliworker_effort',
-                            header: '思考强度',
-                            question: `选择 ${chosen.label} 的思考强度`,
-                            options: chosen.efforts.map((effort) => ({ label: effortLabel(effort) })),
-                        });
-                    questions.push(roleQuestion(offered));
-                    const selection = await ask(questions);
-                    const effortAnswer = selection.answers.find((item) => item.id === 'cliworker_effort');
-                    const effort = chosen.efforts.length === 1
-                        ? chosen.efforts[0]
-                        : effortAnswer?.custom === undefined && effortAnswer?.selected.length === 1
-                            ? chosen.efforts.find((effort) => effortLabel(effort) === effortAnswer.selected[0])
-                            : undefined;
-                    const preference = resolveModel(preferenceSchema.parse({ cli, model: chosen.id, effort }), models);
-                    setup = { preference, role: readRoleAnswer(offered, selection) ?? null, binding };
-                    selected = true;
-                }
-                // A remembered answer is never execution authority. Detect changes during any question.
-                const checked = await this.querySelection(setup.preference, this.backend, this.options, project, signal, binding);
-                if (checked.preference.model !== setup.preference.model)
-                    throw new Error('模型与思考强度已变更，请重新选择');
-                signal.throwIfAborted();
-                this.assertExecution(agent);
-                this.runtime.assertCliEnabled(cli);
-                if (this.project(agent) !== project)
-                    throw new Error('项目已变更，请重新选择');
-                if (selected)
-                    this.runtime.storage.setDispatchSetup(project, setup);
-                if (current !== setup)
-                    this.runtime.storage.setConversationSetup(agent.id, project, setup);
-                (this.selectionBindings ??= new WeakMap()).set(setup.preference, binding);
-                (this.selectionProjects ??= new WeakMap()).set(setup.preference, project);
-                return setup;
             }
             finally {
-                release();
                 const pending = (this.pending.get(agent.id) ?? 1) - 1;
                 if (pending)
                     this.pending.set(agent.id, pending);
@@ -917,10 +1305,11 @@ let CliWorkerService = (() => {
                 this.runtime.changed();
             }
         }
-        async launch(agent, title, prompt, preference, mode, workerId, identity, signal = this.disposed.signal, restartSourceId, queuedAdmission, preparationId, submissionId, attachments) {
+        async launch(agent, title, prompt, preference, mode, workerId, identity, signal = this.disposed.signal, restartSourceId, queuedAdmission, preparationId, submissionId, attachments, origin = 'user', questionSessionId) {
             if (workerId && !preparationId)
-                return this.runtime.prepareFollowup(agent.id, workerId, signal, (control, id) => this.launch(agent, title, prompt, preference, mode, workerId, identity, control, restartSourceId, queuedAdmission, id, submissionId, attachments), queuedAdmission?.priority ? queuedAdmission.id : undefined);
-            this.assertExecution(agent);
+                return this.runtime.prepareFollowup(agent.id, workerId, signal, (control, id) => this.launch(agent, title, prompt, preference, mode, workerId, identity, control, restartSourceId, queuedAdmission, id, submissionId, attachments, origin, questionSessionId), queuedAdmission?.priority ? queuedAdmission.id : undefined);
+            this.assertExecution(agent, true);
+            this.assertAccessSupported(agent, cliOf(preference), workerId ? this.runtime.get(agent.id, workerId).level : undefined);
             this.runtime.assertCliEnabled(cliOf(preference));
             if (this.accounts.isBusy(cliOf(preference)))
                 throw new Error('此 CLI 正在管理账号，请先关闭账号终端再启动任务');
@@ -928,19 +1317,14 @@ let CliWorkerService = (() => {
             const selectedProject = this.selectionProjects?.get(preference);
             if (!workerId && selectedProject && selectedProject !== project)
                 throw new Error('项目已变更，请重新选择');
-            const expected = workerId
-                ? this.runtime.storage.accountBinding(workerId)
-                : this.selectionBindings?.get(preference);
-            if (workerId && !expected) {
-                const worker = this.runtime.get(agent.id, workerId);
-                if (worker.conversationId || !isUserInterrupted(worker))
-                    throw new Error(LEGACY_ACCOUNT_RECORD_NOTICE);
-            }
-            const { binding, preference: authorizedPreference } = await this.querySelection(preference, this.backend, this.options, project, signal, expected);
+            // An existing task continues under the own account signed in now; a new task's
+            // choice is authorized again under it when the account changed after the choice.
+            const expected = workerId ? undefined : this.selectionBindings?.get(preference);
+            const { binding, preference: authorizedPreference } = await this.authorizeChoice(preference, this.backend, this.options, project, signal, expected);
             if (authorizedPreference.model !== preference.model)
                 throw new Error('模型与思考强度不匹配，请重新选择');
             signal.throwIfAborted();
-            this.assertExecution(agent);
+            this.assertExecution(agent, true);
             this.runtime.assertCliEnabled(cliOf(preference));
             if (this.accounts.isBusy(cliOf(preference)))
                 throw new Error('请先关闭账号终端');
@@ -948,8 +1332,10 @@ let CliWorkerService = (() => {
                 throw new Error('项目已变更，请重新选择');
             if (restartSourceId)
                 this.runtime.assertLegacyRestart(agent.id, restartSourceId);
+            if (identity?.initiator && !workerId)
+                this.runtime.assertSiblingCapacity(agent.id);
             let submission;
-            const id = agent.ctx.get('jobs').start({
+            const publish = () => agent.ctx.get('jobs').start({
                 kind: 'cliworker',
                 owner: agent.id,
                 label: `${CLI_LABELS[cliOf(preference)]} · ${title} · ${workerId ? '续聊' : '新任务'}：${prompt.replace(/\s+/g, ' ').slice(0, 100)}`,
@@ -957,6 +1343,18 @@ let CliWorkerService = (() => {
                 run: () => {
                     const submitted = this.runtime.submit(agent.id, project, title, prompt, preference, mode, workerId, identity, binding, queuedAdmission, preparationId, submissionId, attachments);
                     submission = submitted;
+                    // Approvals of this exact turn surface where it was started.
+                    const runId = submitted.worker.runId;
+                    if (runId) {
+                        const origins = (this.runOrigins ??= new Map());
+                        origins.set(runId, origin);
+                        if (questionSessionId)
+                            (this.runQuestionSessions ??= new Map()).set(runId, questionSessionId);
+                        void submitted.done.finally(() => {
+                            origins.delete(runId);
+                            this.runQuestionSessions?.delete(runId);
+                        });
+                    }
                     return {
                         cancel: submitted.cancel,
                         done: submitted.done.then((worker) => ({
@@ -975,14 +1373,20 @@ let CliWorkerService = (() => {
                                 status: worker.status,
                                 response: worker.lastResult,
                                 error: worker.error,
-                                guidance: worker.status === 'uncertain'
-                                    ? '结果待核实；请先核查本轮输出和实际产物，不要自动重试。'
-                                    : undefined,
+                                ...(worker.status === 'completed' && worker.resultNotice ? { notice: worker.resultNotice } : {}),
+                                guidance: [
+                                    worker.status === 'uncertain' ? '结果待核实；请先核查本轮输出和实际产物，不要自动重试。' : undefined,
+                                    worker.status === 'completed' && worker.resultNotice ? worker.resultNotice : undefined,
+                                    isolationGuidance(worker),
+                                ]
+                                    .filter(Boolean)
+                                    .join(' ') || undefined,
                             }),
                         })),
                     };
                 },
             });
+            const id = identity?.initiator ? publishSiblingOutsideTool(publish) : publish();
             if (!submission)
                 throw new Error('Harness did not publish the worker job');
             this.nativeRunDone.set(submission.worker.runId, submission.done);
@@ -1122,7 +1526,7 @@ let CliWorkerService = (() => {
             })), 'cliworker:resolve');
             this.ctx.effect(() => this.ctx.tools.register(defineTool({
                 name: 'cliworker_start',
-                description: `用户明确要求“调用 agy cli”或“用 glm cli 完成任务”时，调用本工具打开 CLI Worker 的选型流程。只需提供 CLI、任务标题和任务内容；模型、思考强度与角色由插件收集，完成选型前不会启动任务，不要把它们当作调用本工具的前置输入。${CLI_NAME_GUIDANCE}。泛称 qoder 在双版本均安装时先通过原生询问选择版本。Host 在首次选择模型、思考强度与角色，或同项目新对话确认是否沿用时提问；同对话后续不重复。不要提前自行提问或增加确认，不代答。返回后台 job、worker ID 和 agentName。已有智能体续聊用 cliworker_followup；除泛称 qoder 的双版本选择外，其他歧义返回简短候选错误，不启动、不额外发问题卡。`,
+                description: `用户明确要求“调用 agy cli”或“用 glm cli 完成任务”时，调用本工具打开 CLI Worker 的选型流程。只需提供 CLI、任务标题和任务内容；模型、思考强度与角色由插件收集，完成选型前不会启动任务，不要把它们当作调用本工具的前置输入。${CLI_NAME_GUIDANCE}。泛称 qoder 在双版本均安装时先通过原生询问选择版本。Host 在首次选择模型、思考强度与角色，或同项目新对话确认是否沿用时提问；同对话后续不重复。不要提前自行提问或增加确认，不代答。返回后台 job、worker ID 和 agentName。主对话的直接子 Agent（包括 CLI Worker）可同级派遣，新 Worker 归属主对话并与发起者同级；发起者不提供模型、强度、角色或会话 ID，每个主对话最多 6 个未结束的子 Agent 派遣。主对话的已有智能体续聊用 cliworker_followup；除泛称 qoder 的双版本选择外，其他歧义返回简短候选错误，不启动、不额外发问题卡。`,
                 parameters: {
                     cli: {
                         type: 'string',
@@ -1146,16 +1550,18 @@ let CliWorkerService = (() => {
                 execute: async (args, exec) => {
                     if (!exec.agent)
                         throw new Error('A parent Agent is required');
-                    this.assertExecution(exec.agent);
+                    const parent = await this.dispatchSubject(exec.agent);
+                    this.assertExecution(parent, true);
+                    const { questionAgent, initiator } = await this.siblingDispatch(exec.agent, parent, exec.signal);
                     let cli = requireCliName(args.cli);
                     if (isGenericQoderName(args.cli))
-                        cli = await this.chooseQoderVariant(exec.agent, exec.signal, args.cli);
+                        cli = await this.chooseQoderVariant(parent, exec.signal, args.cli, questionAgent);
                     const agentName = args.agent_name === undefined ? undefined : agentNameSchema.parse(args.agent_name);
                     if (cli === 'kimi' && args.read_only)
                         throw new Error('Kimi 非交互模式不支持只读派遣');
-                    const setup = await this.chooseDispatch(exec.agent, AbortSignal.any([exec.signal, this.disposed.signal]), cli);
+                    const setup = await this.chooseDispatch(parent, AbortSignal.any([exec.signal, this.disposed.signal]), cli, questionAgent);
                     exec.signal.throwIfAborted();
-                    return this.launch(exec.agent, args.title, args.prompt, setup.preference, args.read_only ? 'plan' : 'accept-edits', undefined, { agentName, role: setup.role ?? undefined }, AbortSignal.any([exec.signal, this.disposed.signal]));
+                    return this.launch(parent, args.title, args.prompt, setup.preference, args.read_only ? 'plan' : 'accept-edits', undefined, { agentName, role: setup.role ?? undefined, ...(initiator ? { initiator } : {}) }, AbortSignal.any([exec.signal, this.disposed.signal]), undefined, undefined, undefined, undefined, undefined, 'agent', initiator ? questionAgent.id : undefined);
                 },
             })), 'cliworker:start');
             this.ctx.effect(() => this.ctx.tools.register(defineTool({
@@ -1167,19 +1573,29 @@ let CliWorkerService = (() => {
                 execute: async (args, exec) => {
                     if (!exec.agent)
                         throw new Error('A parent Agent is required');
+                    const parent = await this.dispatchSubject(exec.agent);
                     if (args.worker_id || args.worker_name) {
-                        const worker = this.runtime.resolveWorker(exec.agent.id, args.worker_id, args.worker_name);
-                        return JSON.stringify({ ...worker, agentName: workerName(worker) });
+                        const dsh = await this.dshFallback(parent.id, args, exec.signal, () => this.runtime.resolveWorker(parent.id, args.worker_id, args.worker_name));
+                        if ('kind' in dsh)
+                            return JSON.stringify(dsh);
+                        return JSON.stringify({ ...dsh, agentName: workerName(dsh), guidance: isolationGuidance(dsh) });
                     }
-                    return JSON.stringify(this.runtime.snapshot(exec.agent.id).workers.map((worker) => ({
-                        ...worker,
-                        agentName: workerName(worker),
-                    })));
+                    const dshRows = this.runtime.snapshot(parent.id).showDshSubagents === false ? []
+                        : (await this.dshSubagents.list(parent.id, exec.signal)).map((row) => ({ kind: 'dsh-subagent', workerId: row.id,
+                            agentName: row.agentName, title: row.name, status: row.stopped ? 'stopped' : row.status, model: row.model, mode: row.mode }));
+                    return JSON.stringify([
+                        ...this.runtime.snapshot(parent.id).workers.map((worker) => ({
+                            ...worker,
+                            agentName: workerName(worker),
+                            guidance: isolationGuidance(worker),
+                        })),
+                        ...dshRows,
+                    ]);
                 },
             })), 'cliworker:status');
             this.ctx.effect(() => this.ctx.tools.register(defineTool({
                 name: 'cliworker_followup',
-                description: 'Continue a specific idle CLI worker by worker_id or its exact agentName in worker_name. Retains its role, current model/effort and CLI conversation; never starts another worker.',
+                description: 'Continue a specific idle CLI worker by worker_id or its exact agentName in worker_name. Retains its role, current model/effort and CLI conversation; never starts another worker. A DSH native subagent listed in the CLI Worker window is continued the same way by its `dsh-N` name; its reply returns as a DSH subagent message.',
                 parameters: {
                     worker_id: { type: 'string' },
                     worker_name: { type: 'string' },
@@ -1190,8 +1606,11 @@ let CliWorkerService = (() => {
                 execute: async (args, exec) => {
                     if (!exec.agent)
                         throw new Error('A parent Agent is required');
-                    const worker = this.runtime.resolveWorker(exec.agent.id, args.worker_id, args.worker_name);
-                    return this.followup(exec.agent.id, worker.id, args.prompt, exec.signal);
+                    const agent = exec.agent;
+                    const target = await this.dshFallback(agent.id, args, exec.signal, () => this.runtime.resolveWorker(agent.id, args.worker_id, args.worker_name), args.prompt);
+                    if ('kind' in target)
+                        return JSON.stringify(target);
+                    return this.continueWorker(agent.id, target.id, args.prompt, exec.signal, 'agent');
                 },
             })), 'cliworker:followup');
             this.ctx.effect(() => this.ctx.tools.register(defineTool({
@@ -1207,6 +1626,111 @@ let CliWorkerService = (() => {
                     return JSON.stringify(await this.runtime.stop(exec.agent.id, worker.id));
                 },
             })), 'cliworker:stop');
+            this.ctx.effect(() => this.ctx.tools.register(defineTool({
+                name: 'cliworker_merge',
+                description: '把空闲 CLI 智能体隔离副本中的改动三方合并回当前项目，作为未提交改动写回，不会提交。隔离运行的智能体完成后，由你核查结果再调用本工具。只有一边改过的文件直接写回；两边都改过的文件不是错误，返回 needs_integration 及基线、项目、副本三个版本的文件路径，由你按各任务目标整合，再带 resolutions 调用本工具（use=content 附完整最终内容，或 use=copy / use=project）。只有两边目标相互矛盾时才用 ask_user_question 请用户选择。决定齐全前项目不变、副本保留。不要让 CLI 改到原目录重做。',
+                parameters: {
+                    worker_id: { type: 'string' },
+                    worker_name: { type: 'string' },
+                    resolutions: {
+                        type: 'array',
+                        description: 'Decisions for files a previous call returned in needs_integration. Each item: path, use (content | copy | project), and content (the complete final file text) when use is content.',
+                        items: {
+                            type: 'object',
+                            additionalProperties: false,
+                            properties: {
+                                path: { type: 'string', required: true },
+                                use: { type: 'string', enum: ['content', 'copy', 'project'], required: true },
+                                content: { type: 'string' },
+                            },
+                        },
+                    },
+                },
+                output,
+                isConcurrencySafe: () => false,
+                execute: async (args, exec) => {
+                    if (!exec.agent)
+                        throw new Error('A parent Agent is required');
+                    const worker = this.runtime.resolveWorker(exec.agent.id, args.worker_id, args.worker_name);
+                    const resolutions = readResolutions(args.resolutions);
+                    const result = await this.mergeIsolatedWorker(exec.agent, worker.id, exec.signal, resolutions);
+                    return JSON.stringify(result.status === 'merged'
+                        ? result
+                        : integrationReport(workerName(worker), result, resolutions && result.conflicts.map((item) => item.path)));
+                },
+            })), 'cliworker:merge');
+            this.ctx.effect(() => this.ctx.tools.register(defineTool({
+                name: 'cliworker_discard',
+                description: '丢弃空闲 CLI 智能体的隔离副本。执行前会向用户确认；确认后副本中的改动永久删除，主目录不变。用户未确认时副本保留。',
+                parameters: { worker_id: { type: 'string' }, worker_name: { type: 'string' } },
+                output,
+                isConcurrencySafe: () => false,
+                execute: async (args, exec) => {
+                    if (!exec.agent)
+                        throw new Error('A parent Agent is required');
+                    const agent = exec.agent;
+                    const worker = this.runtime.resolveWorker(agent.id, args.worker_id, args.worker_name);
+                    const signal = AbortSignal.any([exec.signal, this.disposed.signal]);
+                    const response = await waitForInput(agent.ctx.get('userQuestions').ask({
+                        agent,
+                        signal,
+                        questions: [
+                            {
+                                id: 'cliworker_discard',
+                                header: '丢弃副本',
+                                question: `丢弃 ${workerName(worker)} 的隔离副本？副本中的改动将永久删除，项目主目录不变。`,
+                                options: [{ label: '丢弃' }, { label: '保留' }],
+                            },
+                        ],
+                    }), signal);
+                    const answer = response.answers.find((item) => item.id === 'cliworker_discard');
+                    if (answer?.custom !== undefined || answer?.selected.length !== 1 || answer.selected[0] !== '丢弃')
+                        return JSON.stringify({ status: 'kept', message: '用户未确认，隔离副本已保留' });
+                    await this.runtime.discardIsolation(agent.id, worker.id);
+                    return JSON.stringify({ status: 'discarded' });
+                },
+            })), 'cliworker:discard');
+        }
+        /** @param parentSessionId - Main conversation. @param signal - Read lifetime. @returns Native direct children JSON. */
+        async listDshSubagents(parentSessionId, signal) {
+            return JSON.stringify(await this.dshSubagents.list(parentSessionId, signal));
+        }
+        /** @param parentSessionId - Main conversation. @param signal - Visible panel lifetime. @returns Native child snapshots. */
+        async *watchDshSubagents(parentSessionId, signal) {
+            yield* this.dshSubagents.watch(parentSessionId, signal);
+        }
+        /** @param parentSessionId - Main conversation. @param childSessionId - Direct child. @param prompt - Human message. @param requestId - Browser-minted prompt identity. @param signal - Admission lifetime. @returns Native inbox receipt JSON. */
+        async promptDshSubagent(parentSessionId, childSessionId, prompt, requestId, signal) {
+            try {
+                const text = validate.string().min(1).max(100000).parse(prompt);
+                validate.string().uuid().parse(requestId);
+                return JSON.stringify(await this.dshSubagents.prompt({
+                    parentSessionId: SessionId(parentSessionId), childSessionId: SessionId(childSessionId),
+                    requestId: requestId,
+                    mode: 'continuable', delivery: 'queue', content: [{ type: 'text', text }],
+                }, signal));
+            }
+            catch (error) {
+                throw failure(error);
+            }
+        }
+        /** @param parentSessionId - Main conversation. @param childSessionId - Direct child. @param signal - Stop confirmation lifetime. @returns JSON only after native settlement. */
+        async stopDshSubagent(parentSessionId, childSessionId, signal) {
+            try {
+                return JSON.stringify(await this.dshSubagents.stop(parentSessionId, childSessionId, signal));
+            }
+            catch (error) {
+                throw failure(error);
+            }
+        }
+        /** @param parentSessionId - Main conversation. @param childSessionId - Direct child. @param signal - Mutation lifetime. @returns Nothing; only plugin visibility changes. */
+        async hideDshSubagent(parentSessionId, childSessionId, signal) {
+            try {
+                await this.dshSubagents.hide(parentSessionId, childSessionId, signal);
+            }
+            catch (error) {
+                throw failure(error);
+            }
         }
         /** @param parentSessionId - Owning Harness session. @param workerId - Selected worker or empty string. @param signal - Stream lifetime. @returns JSON snapshots, initially and after changes. */
         async *watch(parentSessionId, workerId, signal) {
@@ -1498,6 +2022,36 @@ let CliWorkerService = (() => {
                 throw failure(error);
             }
         }
+        /** Writes into the parent's project, so the host's plan/read-only boundary applies. */
+        async mergeIsolatedWorker(agent, workerId, signal, resolutions) {
+            const worker = this.runtime.get(agent.id, workerId);
+            this.assertExecution(agent);
+            if (this.project(agent) !== worker.project)
+                throw new Error('项目已变更，请在原项目合并');
+            return this.runtime.mergeIsolation(agent.id, workerId, AbortSignal.any([signal, this.disposed.signal]), resolutions);
+        }
+        /** @param parentSessionId - Owning session. @param signal - Query lifetime. @returns Profile-wide general settings JSON. */
+        async generalSettings(parentSessionId, signal) {
+            try {
+                await this.parent(parentSessionId);
+                signal.throwIfAborted();
+                return JSON.stringify(this.runtime.generalSettings());
+            }
+            catch (error) {
+                throw failure(error);
+            }
+        }
+        /** @param parentSessionId - Owning session. @param patch - JSON object of changed fields; `null` restores a default. @param signal - Mutation admission lifetime. @returns Updated general settings JSON. */
+        async saveGeneralSettings(parentSessionId, patch, signal) {
+            try {
+                await this.parent(parentSessionId);
+                signal.throwIfAborted();
+                return JSON.stringify(this.runtime.setGeneralSettings(JSON.parse(validate.string().max(4096).parse(patch))));
+            }
+            catch (error) {
+                throw failure(error);
+            }
+        }
         /** @param parentSessionId - Owning session. @param cli - Selected CLI. @param enabled - Allow new CLI operations. @param signal - Mutation admission lifetime. @returns Updated profile-wide CLI enablement JSON. */
         async setCliEnabled(parentSessionId, cli, enabled, signal) {
             try {
@@ -1526,15 +2080,48 @@ let CliWorkerService = (() => {
                 queriedCli = id;
                 const project = this.project(await this.parent(parentSessionId));
                 signal.throwIfAborted();
+                const held = () => this.cleanupHeldStatus(id);
+                const before = held();
+                if (before)
+                    return JSON.stringify(before);
                 this.runtime.assertCliEnabled(id);
                 const status = await this.accounts.status(id, project, signal);
                 signal.throwIfAborted();
+                const after = held();
+                if (after)
+                    return JSON.stringify(after);
                 this.runtime.assertCliEnabled(id);
                 return JSON.stringify(status);
             }
             catch (error) {
                 if (queriedCli && error instanceof ProcessCleanupUnconfirmedError)
                     this.runtime.blockCatalogOnCleanup(queriedCli, error);
+                throw failure(error);
+            }
+        }
+        /** A CLI paused by its own unconfirmed cleanup reports that state instead of failing the read. */
+        cleanupHeldStatus(cli) {
+            const message = this.runtime.catalogCleanupMessage(cli);
+            if (!message)
+                return undefined;
+            // Shutdown and the unattributed global quarantine are not this CLI's to release.
+            this.runtime.assertHostOpen();
+            return { cli, installed: true, state: 'unavailable', summary: message, cleanupBlocked: true, actions: [] };
+        }
+        /** @param parentSessionId - Owning session. @param cli - CLI the user confirmed has no leftover process. @param signal - Mutation lifetime. @returns Fresh account status JSON. */
+        async recoverCliCleanup(parentSessionId, cli, signal) {
+            try {
+                const id = validate.enum(CLI_IDS).parse(cli);
+                await this.parent(parentSessionId);
+                signal.throwIfAborted();
+                // Both checks precede either release, so a refusal leaves the CLI paused as it was.
+                this.accounts.assertCleanupRecoverable(id);
+                this.runtime.recoverCatalogCleanup(id);
+                this.accounts.recoverCleanup(id);
+                this.invalidateSettingsDisplay(id);
+                return JSON.stringify({ cli: id, recovered: true });
+            }
+            catch (error) {
                 throw failure(error);
             }
         }
@@ -1646,7 +2233,31 @@ let CliWorkerService = (() => {
                 throw failure(error);
             }
         }
-        async startAccount(parentSessionId, cli, action, signal, source, provider) {
+        /**
+         * @param options - JSON `{ provider?, login? }`: a login provider of the window's picker, or
+         * one login (`AccountLogin.id`) to sign out. Host checks both against the installed CLI.
+         */
+        async accountStartWith(parentSessionId, cli, action, options, signal) {
+            try {
+                const parsed = JSON.parse(typeof options === 'string' && options.length <= 1024 ? options : 'null');
+                const value = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : undefined;
+                const name = (key) => {
+                    const item = value?.[key];
+                    if (item === undefined)
+                        return undefined;
+                    if (typeof item !== 'string' || !item || item.length > 160)
+                        throw new Error('无效的账号操作');
+                    return item;
+                };
+                if (!value || Object.keys(value).some((key) => key !== 'provider' && key !== 'login'))
+                    throw new Error('无效的账号操作');
+                return this.startAccount(parentSessionId, cli, action, signal, undefined, name('provider'), name('login'));
+            }
+            catch (error) {
+                throw failure(error);
+            }
+        }
+        async startAccount(parentSessionId, cli, action, signal, source, provider, login) {
             try {
                 const id = validate.enum(CLI_IDS).parse(cli);
                 const operation = validate.enum(['login', 'logout', 'manage']).parse(action);
@@ -1662,7 +2273,7 @@ let CliWorkerService = (() => {
                     this.accountParents.set(parent.id, dispose);
                 }
                 this.invalidateSettingsDisplay(id);
-                return JSON.stringify(await this.accounts.start(parent.id, id, operation, this.project(parent), signal, source, provider));
+                return JSON.stringify(await this.accounts.start(parent.id, id, operation, this.project(parent), signal, source, provider, login));
             }
             catch (error) {
                 throw failure(error);
@@ -1684,6 +2295,34 @@ let CliWorkerService = (() => {
             try {
                 this.assertExecution(await this.parent(parentSessionId));
                 await this.accounts.write(parentSessionId, accountId, data);
+                return true;
+            }
+            catch (error) {
+                throw failure(error);
+            }
+        }
+        /** @param parentSessionId - Owning session. @param accountId - Account terminal identity. @param response - The user's answer to the window's current step (JSON). @returns Answer accepted. */
+        async accountRespond(parentSessionId, accountId, response) {
+            try {
+                this.assertExecution(await this.parent(parentSessionId));
+                const parsed = JSON.parse(typeof response === 'string' && response.length <= 8192 ? response : 'null');
+                const value = parsed && typeof parsed === 'object' ? parsed : {};
+                const keys = Object.keys(value);
+                const text = (name) => keys.length === 1 && typeof value[name] === 'string';
+                let answer;
+                if (text('option'))
+                    answer = { option: value.option };
+                else if (text('code'))
+                    answer = { code: value.code };
+                else if (text('secret'))
+                    answer = { secret: value.secret };
+                else if (keys.length === 1 && (value.confirm === 'trust' || value.confirm === 'decline'))
+                    answer = { confirm: value.confirm };
+                else if (keys.length === 2 && value.agree === 'terms' && typeof value.share === 'boolean')
+                    answer = { agree: 'terms', share: value.share };
+                else
+                    throw new Error('无效的账号窗口操作');
+                await this.accounts.respond(parentSessionId, accountId, answer);
                 return true;
             }
             catch (error) {
@@ -1729,26 +2368,42 @@ let CliWorkerService = (() => {
                 const worker = this.runtime.get(agent.id, workerId);
                 const cli = cliOf(worker.preference);
                 queriedCli = cli;
-                const expected = this.runtime.storage.accountBinding(workerId);
-                if (!expected)
-                    throw new Error(LEGACY_ACCOUNT_RECORD_NOTICE);
                 this.runtime.assertCliEnabled(cli);
                 this.settingsCatalogs ??= new SettingsCatalogCache(this.runtime.storage.directory);
-                let catalog = this.settingsCatalogs.display(worker.project, cli, expected);
-                if (!catalog) {
-                    const result = await this.settingsCatalogs.get({
-                        cli,
-                        project: worker.project,
-                        signal: control,
-                        selfVerifiedDiscovery: cli === 'qoder' || cli === 'qodercn',
-                        binding: async () => {
-                            const current = await readCliAccountBinding(cli, this.backend, this.options, worker.project, control);
-                            if (current !== expected)
-                                throw new Error(ACCOUNT_CHANGED);
-                            return current;
-                        },
-                        discover: () => this.queryCatalog(cli, this.backend, this.options, worker.project, control, expected),
-                    });
+                // An isolated conversation's account was verified against its copy.
+                const directory = this.runtime.catalogDirectory(worker);
+                const saved = this.runtime.storage.accountBinding(workerId);
+                let catalog = saved ? this.settingsCatalogs.display(directory, cli, saved) : undefined;
+                // After an account change the choices come from the account signed in now.
+                let expected = catalog
+                    ? saved
+                    : await readCliAccountBinding(cli, this.backend, this.options, directory, control);
+                catalog ??= this.settingsCatalogs.display(directory, cli, expected);
+                for (let attempt = 0; !catalog; attempt++) {
+                    let result;
+                    try {
+                        result = await this.settingsCatalogs.get({
+                            cli,
+                            project: directory,
+                            signal: control,
+                            selfVerifiedDiscovery: cli === 'qoder' || cli === 'qodercn',
+                            binding: async () => {
+                                const current = await readCliAccountBinding(cli, this.backend, this.options, directory, control);
+                                if (current !== expected)
+                                    throw new Error(ACCOUNT_CHANGED);
+                                return current;
+                            },
+                            discover: () => this.queryCatalog(cli, this.backend, this.options, directory, control, expected),
+                        });
+                    }
+                    catch (error) {
+                        // The account changed during this read: show the one signed in now, silently.
+                        if (attempt > 0 || !(error instanceof Error) || error.message !== ACCOUNT_CHANGED)
+                            throw error;
+                        expected = await readCliAccountBinding(cli, this.backend, this.options, directory, control);
+                        catalog = this.settingsCatalogs.display(directory, cli, expected);
+                        continue;
+                    }
                     catalog = result.catalog;
                 }
                 control.throwIfAborted();
@@ -1801,7 +2456,7 @@ let CliWorkerService = (() => {
                 let preference = preferenceSchema.parse(JSON.parse(selection));
                 const project = this.project(agent);
                 this.runtime.assertCliEnabled(cliOf(preference));
-                const { catalog } = await this.querySelection(preference, this.backend, this.options, project, signal, this.displayedBindings?.get(JSON.stringify([parentSessionId, cliOf(preference)])));
+                const { catalog } = await this.authorizeChoice(preference, this.backend, this.options, project, signal, this.displayedBindings?.get(JSON.stringify([parentSessionId, cliOf(preference)])));
                 validatePreference(preference, catalog);
                 preference = resolveModel(preference, catalog.models);
                 signal.throwIfAborted();
@@ -1822,12 +2477,12 @@ let CliWorkerService = (() => {
                 const preference = preferenceSchema.parse(JSON.parse(selection));
                 if (cliOf(preference) !== cliOf(worker.preference))
                     throw new Error('已有会话不能切换 CLI');
-                const expected = this.runtime.storage.accountBinding(workerId);
-                if (!expected)
-                    throw new Error(LEGACY_ACCOUNT_RECORD_NOTICE);
                 this.runtime.assertCliEnabled(cliOf(preference));
                 this.settingsCatalogs ??= new SettingsCatalogCache(this.runtime.storage.directory);
-                const catalog = this.settingsCatalogs.display(worker.project, cliOf(preference), expected);
+                const directory = this.runtime.catalogDirectory(worker);
+                const saved = this.runtime.storage.accountBinding(workerId);
+                const catalog = (saved && this.settingsCatalogs.display(directory, cliOf(preference), saved)) ||
+                    this.settingsCatalogs.display(directory, cliOf(preference), await readCliAccountBinding(cliOf(preference), this.backend, this.options, directory, signal));
                 if (!catalog)
                     throw new Error('模型目录已失效，请重试读取或在设置中刷新');
                 validatePreference(preference, catalog);
@@ -1862,7 +2517,7 @@ let CliWorkerService = (() => {
                     control.throwIfAborted();
                     if (this.ctx.agents.get(parent.id) !== parent)
                         throw new Error('所属主对话已关闭，未修改权限');
-                    this.assertExecution(parent);
+                    this.assertExecution(parent, true);
                     const current = this.runtime.get(parent.id, worker.id);
                     const record = this.harnessConversation?.lookup(sessionId);
                     if (this.project(parent) !== current.project ||
@@ -1895,11 +2550,7 @@ let CliWorkerService = (() => {
                         inheritedEventCount: writer.inheritedEventCount,
                         eventState: read.eventState,
                     });
-                    const inbox = projections.stateOf(session, 'inbox');
-                    const turn = projections.stateOf(session, 'turnBoundary');
-                    const plan = projections.stateOf(session, 'plan');
-                    if (!inbox || !turn || !plan)
-                        throw new Error('原生历史会话投影尚未就绪，未修改权限');
+                    const { inbox, turn, plan } = readNativeColdSessionState(projections.stateOf(session, 'inbox'), projections.stateOf(session, 'turnBoundary'), projections.stateOf(session, 'plan'));
                     if (plan.running !== null)
                         throw new Error('原生规划命令尚未完成，未修改权限');
                     if (inbox['next-turn'].length || inbox['next-step'].length || turn.openTurnStartSeq !== null)
@@ -1923,14 +2574,13 @@ let CliWorkerService = (() => {
                     sessions.announce(session);
                     validateCurrent();
                     const saved = this.runtime.configureWorkerPermission(parent.id, worker.id, selected, preparationId);
-                    const sandbox = selected === 'plan' ? 'read-only' :
-                        parent.ctx.get('sandboxPolicy').resolve({ session: parent.session }).mode;
+                    const { sandbox } = this.childPermission(parent, saved);
                     if (parent.ctx.get('sandboxPolicy').resolve({ session }).mode !== sandbox)
                         setSandboxMode(session, sandbox);
                     // This is the native persisted collaboration event. There is no
                     // Agent to queue a pending intent or inject a synthetic user message.
-                    if (plan.active !== (selected === 'plan') || plan.wanted !== null)
-                        session.append('plan/mode', { active: selected === 'plan' });
+                    if (plan.active !== (saved.mode === 'plan') || plan.wanted !== null)
+                        session.append('plan/mode', { active: saved.mode === 'plan' });
                     if (!(await sessions.flush(session)))
                         throw new Error('原生会话权限持久化服务不可用，请重新读取当前状态');
                     return saved;
@@ -1957,7 +2607,7 @@ let CliWorkerService = (() => {
                     throw new Error('项目已变更，请在原项目继续');
                 let reason;
                 try {
-                    this.assertExecution(parent);
+                    this.assertExecution(parent, true);
                     this.assertNativeWorkerSettingsIdle(worker);
                     const snapshot = this.runtime.snapshot(parent.id, worker.id);
                     if (snapshot.selectedBusy)
@@ -1969,7 +2619,11 @@ let CliWorkerService = (() => {
                     reason = error instanceof Error ? error.message : String(error);
                 }
                 const state = {
-                    currentValue: worker.mode, options: workerPermissionOptions(worker), writable: !reason, ...(reason ? { reason } : {}),
+                    currentValue: effectiveLevel(worker.level, this.permissionState(parent).sandbox),
+                    options: workerLevelOptions(worker),
+                    plan: { supported: workerPlanSupported(worker), active: worker.mode === 'plan' },
+                    writable: !reason,
+                    ...(reason ? { reason } : {}),
                 };
                 return JSON.stringify(state);
             }
@@ -1982,12 +2636,15 @@ let CliWorkerService = (() => {
             try {
                 const parent = await this.parent(parentSessionId);
                 signal.throwIfAborted();
-                this.assertExecution(parent);
+                this.assertExecution(parent, true);
                 const worker = this.runtime.get(parent.id, workerId);
                 if (this.project(parent) !== worker.project)
                     throw new Error('项目已变更，请在原项目继续');
-                const selected = validate.enum(['plan', 'accept-edits']).parse(mode);
-                if (!workerPermissionOptions(worker).some((option) => option.value === selected))
+                const selected = validate.enum(['plan', 'accept-edits', 'ask', 'auto', 'full']).parse(mode);
+                if (selected === 'plan' && !workerPlanSupported(worker))
+                    throw new Error('当前 CLI 不支持规划模式');
+                if (selected !== 'plan' && selected !== 'accept-edits' &&
+                    !cliLevelOptions(cliOf(worker.preference)).some((option) => option.value === selected))
                     throw new Error('当前 CLI 通路不支持此权限模式');
                 this.assertNativeWorkerSettingsIdle(worker);
                 const binding = worker.harnessConversation;
@@ -2005,13 +2662,11 @@ let CliWorkerService = (() => {
                 const saved = this.runtime.configureWorkerPermission(parent.id, worker.id, selected);
                 if (child) {
                     // Keep the real session projection and tool policy aligned with the
-                    // saved CLI mode while idle; the next run rechecks the same parent policy.
-                    const sandbox = selected === 'plan'
-                        ? 'read-only'
-                        : parent.ctx.get('sandboxPolicy').resolve({ session: parent.session }).mode;
+                    // saved setting while idle; the next run rechecks the same parent policy.
+                    const { sandbox } = this.childPermission(parent, saved);
                     if (child.ctx.get('sandboxPolicy').resolve({ session: child.session }).mode !== sandbox)
                         setSandboxMode(child.session, sandbox);
-                    child.ctx.get('planMode')?.set(child, selected === 'plan');
+                    child.ctx.get('planMode')?.set(child, saved.mode === 'plan');
                 }
                 return JSON.stringify(saved);
             }
@@ -2048,7 +2703,7 @@ let CliWorkerService = (() => {
                     const agent = await this.parent(parentSessionId);
                     control.throwIfAborted();
                     reservation.assertCurrent();
-                    this.assertExecution(agent);
+                    this.assertExecution(agent, true);
                     const worker = this.runtime.get(agent.id, workerId);
                     if (this.project(agent) !== worker.project)
                         throw new Error('项目已变更，请在原项目继续');
@@ -2085,7 +2740,7 @@ let CliWorkerService = (() => {
             try {
                 const agent = await this.parent(parentSessionId);
                 signal.throwIfAborted();
-                this.assertExecution(agent);
+                this.assertExecution(agent, true);
                 const worker = this.runtime.get(agent.id, workerId);
                 if (this.project(agent) !== worker.project)
                     throw new Error('项目已变更，请在原项目继续');
@@ -2111,17 +2766,19 @@ let CliWorkerService = (() => {
                 const control = AbortSignal.any([signal, this.disposed.signal]);
                 const agent = await this.parent(parentSessionId);
                 control.throwIfAborted();
-                this.assertExecution(agent);
+                this.assertExecution(agent, true);
                 const worker = this.runtime.get(agent.id, workerId);
                 if (this.project(agent) !== worker.project)
                     throw new Error('项目已变更，请在原项目继续');
                 if (this.accounts.isBusy(cliOf(worker.preference)))
                     throw new Error('请先关闭账号终端');
-                await this.runtime.steerMessage(agent.id, workerId, prompt, expectedRunId, requestId, control);
+                // After an account switch the message is queued for the next turn instead.
+                const queued = await this.runtime.steerMessage(agent.id, workerId, prompt, expectedRunId, requestId, control);
                 return JSON.stringify({
                     accepted: true,
                     requestId,
                     runId: expectedRunId,
+                    ...(queued ? { queued } : {}),
                     revision: this.runtime.revision,
                 });
             }
@@ -2134,7 +2791,7 @@ let CliWorkerService = (() => {
             try {
                 const agent = await this.parent(parentSessionId);
                 signal.throwIfAborted();
-                this.assertExecution(agent);
+                this.assertExecution(agent, true);
                 const worker = this.runtime.get(agent.id, workerId);
                 if (this.project(agent) !== worker.project)
                     throw new Error('项目已变更，请在原项目继续');
@@ -2152,7 +2809,7 @@ let CliWorkerService = (() => {
             try {
                 const agent = await this.parent(parentSessionId);
                 signal.throwIfAborted();
-                this.assertExecution(agent);
+                this.assertExecution(agent, true);
                 const worker = this.runtime.get(agent.id, workerId);
                 if (this.project(agent) !== worker.project)
                     throw new Error('项目已变更，请在原项目继续');
@@ -2169,7 +2826,7 @@ let CliWorkerService = (() => {
             try {
                 const agent = await this.parent(parentSessionId);
                 signal.throwIfAborted();
-                this.assertExecution(agent);
+                this.assertExecution(agent, true);
                 const worker = this.runtime.get(agent.id, workerId);
                 if (this.project(agent) !== worker.project)
                     throw new Error('项目已变更，请在原项目继续');
@@ -2198,7 +2855,7 @@ let CliWorkerService = (() => {
             try {
                 const agent = await this.parent(parentSessionId);
                 signal.throwIfAborted();
-                this.assertExecution(agent);
+                this.assertExecution(agent, true);
                 const worker = this.runtime.get(agent.id, workerId);
                 if (this.project(agent) !== worker.project)
                     throw new Error('项目已变更，请在原项目继续');
@@ -2210,13 +2867,17 @@ let CliWorkerService = (() => {
         }
         /** @param parentSessionId - Parent session identity. @param workerId - Worker to continue. @param prompt - New task. @param signal - Admission lifetime. @returns Published background receipt. */
         async followup(parentSessionId, workerId, prompt, signal) {
+            return this.continueWorker(parentSessionId, workerId, prompt, signal, 'user');
+        }
+        /** Shared follow-up admission; `origin` decides where this turn's approvals appear. */
+        async continueWorker(parentSessionId, workerId, prompt, signal, origin) {
             try {
                 const agent = await this.parent(parentSessionId);
                 signal.throwIfAborted();
-                this.assertExecution(agent);
+                this.assertExecution(agent, true);
                 const worker = this.runtime.get(agent.id, workerId);
                 this.runtime.assertCliEnabled(cliOf(worker.preference));
-                return this.launch(agent, worker.title, prompt, worker.preference, worker.mode, workerId, undefined, signal);
+                return this.launch(agent, worker.title, prompt, worker.preference, worker.mode, workerId, undefined, signal, undefined, undefined, undefined, undefined, undefined, origin);
             }
             catch (error) {
                 throw failure(error);
@@ -2227,7 +2888,7 @@ let CliWorkerService = (() => {
             try {
                 const agent = await this.parent(parentSessionId);
                 signal.throwIfAborted();
-                this.assertExecution(agent);
+                this.assertExecution(agent, true);
                 const worker = this.runtime.assertLegacyRestart(agent.id, workerId);
                 if (this.project(agent) !== worker.project)
                     throw new Error('项目已变更，请在原项目新建对话');

@@ -7,8 +7,10 @@ import { useHarnessSessionBinding, } from "./harness-binding-registry.js";
 import { shadowHarnessSlot } from "./harness-slot-shadow.js";
 import { useWorkers, value } from "./workers.js";
 import { harnessGoalEditor } from "./harness-goal-editor.js";
+import { t, useT } from "./i18n.js";
 /** Plugin state and CAS only: never reaches Harness goals or its automatic round driver. */
 export function WorkerGoalBar({ api, binding, bindings, }) {
+    useT();
     const { snapshot, connecting, error } = useWorkers(api, binding.parentSessionId, binding.workerId);
     const worker = snapshot.selected?.id === binding.workerId ? snapshot.selected : undefined;
     const baseline = JSON.stringify(worker?.goal);
@@ -42,7 +44,7 @@ export function WorkerGoalBar({ api, binding, bindings, }) {
     useEffect(() => () => request.current?.abort(), [binding.sessionId, binding.workerId]);
     const reason = harnessFeatureReason(binding, 'goal') ||
         error ||
-        (connecting || !worker ? '正在读取当前 CLI 目标' : undefined);
+        (connecting || !worker ? t('正在读取当前 CLI 目标') : undefined);
     const run = async (action) => {
         if (reason || request.current || !worker)
             return;
@@ -54,17 +56,17 @@ export function WorkerGoalBar({ api, binding, bindings, }) {
             let next;
             if (action === 'edit') {
                 if (!api.cliworker.setWorkerGoal)
-                    throw new Error('Host 尚未提供 CLI 目标设置');
+                    throw new Error(t('Host 尚未提供 CLI 目标设置'));
                 next = JSON.parse(value(await api.cliworker.setWorkerGoal(binding.parentSessionId, worker.id, draft.trim(), revision, controller.signal)));
             }
             else if (action === 'clear') {
                 if (!api.cliworker.clearWorkerGoal)
-                    throw new Error('Host 尚未提供 CLI 目标设置');
+                    throw new Error(t('Host 尚未提供 CLI 目标设置'));
                 value(await api.cliworker.clearWorkerGoal(binding.parentSessionId, worker.id, revision, controller.signal));
             }
             else {
                 if (!api.cliworker.setWorkerGoalStatus)
-                    throw new Error('Host 尚未提供 CLI 目标设置');
+                    throw new Error(t('Host 尚未提供 CLI 目标设置'));
                 next = JSON.parse(value(await api.cliworker.setWorkerGoalStatus(binding.parentSessionId, worker.id, action, revision, controller.signal)));
             }
             if (controller.signal.aborted)
@@ -87,14 +89,14 @@ export function WorkerGoalBar({ api, binding, bindings, }) {
     if (!goal && !editing)
         return null;
     const locked = !!reason || pending;
-    const action = (label, Icon, onClick, disabled = locked) => (_jsx(Tooltip, { label: reason || label, side: "bottom", portal: true, children: _jsx("span", { tabIndex: disabled ? 0 : undefined, "aria-label": disabled ? reason : undefined, children: _jsx("button", { type: "button", className: "cwn-goal-icon", "aria-label": label, disabled: disabled, onClick: onClick, children: _jsx(Icon, { size: 14 }) }) }) }));
-    return (_jsx("div", { className: "cwn-goal-dock", "data-goal-bar": true, "data-cliworker-goal": true, children: _jsxs("div", { className: `cwn-goal-bar${editing ? ' cwn-goal-edit' : ''}`, children: [editing ? (_jsx(InlineEditor, { value: draft, label: "\u76EE\u6807", onChange: setDraft, onSave: () => {
+    const action = (key, Icon, onClick, disabled = locked) => (_jsx(Tooltip, { label: reason || t(key), side: "bottom", portal: true, children: _jsx("span", { tabIndex: disabled ? 0 : undefined, "aria-label": disabled ? reason : undefined, children: _jsx("button", { type: "button", className: "cwn-goal-icon", "aria-label": t(key), disabled: disabled, onClick: onClick, children: _jsx(Icon, { size: 14 }) }) }) }));
+    return (_jsx("div", { className: "cwn-goal-dock", "data-goal-bar": true, "data-cliworker-goal": true, children: _jsxs("div", { className: `cwn-goal-bar${editing ? ' cwn-goal-edit' : ''}`, children: [editing ? (_jsx(InlineEditor, { value: draft, label: t('目标'), onChange: setDraft, onSave: () => {
                         if (!locked)
                             void run('edit');
                     }, onCancel: () => {
                         if (!pending)
                             closeEditor();
-                    } })) : (_jsxs(_Fragment, { children: [_jsx("span", { className: "cwn-goal-glyph", children: _jsx(IconGoalOutlineRegular, { size: 14 }) }), _jsx("span", { className: "cwn-goal-label", children: goal?.status === 'paused' ? '已暂停的目标' : '进行中的目标' }), _jsx("span", { className: "cwn-goal-objective", children: goal?.objective })] })), failure && (_jsx("span", { className: "cwn-goal-error", role: "alert", children: failure })), _jsx("div", { className: "cwn-goal-actions", children: editing ? (_jsxs(_Fragment, { children: [action('保存目标', IconCheckOutlineRegular, () => {
+                    } })) : (_jsxs(_Fragment, { children: [_jsx("span", { className: "cwn-goal-glyph", children: _jsx(IconGoalOutlineRegular, { size: 14 }) }), _jsx("span", { className: "cwn-goal-label", children: goal?.status === 'paused' ? t('已暂停的目标') : t('进行中的目标') }), _jsx("span", { className: "cwn-goal-objective", children: goal?.objective })] })), failure && (_jsx("span", { className: "cwn-goal-error", role: "alert", children: failure })), _jsx("div", { className: "cwn-goal-actions", children: editing ? (_jsxs(_Fragment, { children: [action('保存目标', IconCheckOutlineRegular, () => {
                                 void run('edit');
                             }, locked || !draft.trim() || draft.trim().length > GOAL_OBJECTIVE_LIMIT), action('取消', IconCloseOutlineRegular, closeEditor, pending)] })) : (_jsxs(_Fragment, { children: [goal?.status === 'paused'
                                 ? action('恢复目标', IconPlayOutlineRegular, () => {

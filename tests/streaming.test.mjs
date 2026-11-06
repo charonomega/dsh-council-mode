@@ -11,23 +11,53 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
 
 // Exercise the production hook with one mounted effect and a controlled stream.
 function mountStream(stream, history) {
-  const states = [], effects = [];
+  const states = [], refs = [], effects = [];
+  let stateIndex = 0, refIndex = 0;
   const React = {
     useState(initial) {
-      const i = states.length;
-      states.push(initial);
+      const i = stateIndex++;
+      if (!(i in states)) states[i] = initial;
       return [initial, (value) => { states[i] = typeof value === 'function' ? value(states[i]) : value; }];
     },
-    useRef(value) { return { current: value }; },
+    useRef(value) { return refs[refIndex++] ??= { current: value }; },
     useEffect(fn) { effects.push(fn); },
   };
-  const api = { cliworker: { watch() {}, history }, remote: { $stream() { return stream; } } };
+  const apiOf = (currentStream, currentHistory) => ({
+    cliworker: { watch() {}, history: currentHistory },
+    remote: { $stream() { return currentStream; } },
+  });
+  const api = apiOf(stream, history);
   const context = vm.createContext({ React, mergeTimelineItems, api, members: [member] });
   vm.runInContext(stateSource, context);
-  vm.runInContext("useMemberStreams(api, 'parent', members, true)", context);
-  const cleanup = effects[0]();
-  return { snapshot: () => states[0][member.workerId], cleanup };
+  let cleanup;
+  const render = () => {
+    stateIndex = 0;
+    refIndex = 0;
+    effects.length = 0;
+    vm.runInContext("useMemberStreams(api, 'parent', members, true)", context);
+    cleanup = effects[0]();
+  };
+  render();
+  return {
+    snapshot: () => states[0][member.workerId],
+    error: () => states[1][member.workerId],
+    cleanup: () => cleanup?.(),
+    reconnect(nextStream, nextHistory, { replaceApi = false } = {}) {
+      cleanup?.();
+      const nextApi = apiOf(nextStream, nextHistory);
+      if (replaceApi) context.api = nextApi;
+      else Object.assign(context.api, nextApi);
+      render();
+    },
+  };
 }
+
+const oneSnapshot = (timeline, truncated = true) => ({
+  async *[Symbol.asyncIterator]() {
+    yield { value: JSON.stringify({ timeline, truncated }), accept() {} };
+  },
+  async dispose() {},
+});
 
 function room(snapshot, roster) {
   return mergeRoom({ members: [member], timelines: { [member.workerId]: snapshot }, roster });
@@ -97,6 +127,88 @@ test('late history cannot roll back a growing live row or lose it on the next ro
   try {
     await done;
     assert.deepEqual(Array.from(hook.snapshot().timeline, (row) => [row.id, row.text]), [['older', undefined], ['a', 'complete'], ['b', 'new run']]);
+  } finally { hook.cleanup(); }
+});
+
+test('reconnection starts its own history load while the disposed request is pending', async () => {
+  let finishOldHistory;
+  const oldHistory = new Promise((resolve) => { finishOldHistory = resolve; });
+  const hook = mountStream(oneSnapshot([{ id: 'live', text: 'current' }]), () => oldHistory);
+  let newRequests = 0;
+  try {
+    await tick();
+    hook.reconnect(oneSnapshot([{ id: 'live', text: 'newer' }]), async () => {
+      newRequests++;
+      return { ok: true, value: JSON.stringify({ items: [{ id: 'older', text: 'correct history' }], hasOlder: false }) };
+    });
+    await tick();
+    assert.equal(newRequests, 1);
+    assert.deepEqual(Array.from(hook.snapshot().timeline, (row) => row.id), ['older', 'live']);
+
+    finishOldHistory({ ok: true, value: JSON.stringify({ items: [{ id: 'disposed', text: 'stale history' }], hasOlder: false }) });
+    await tick();
+    // Reconnect again to read the shared cache after the stale callback settles.
+    hook.reconnect(oneSnapshot([{ id: 'next', text: 'next run' }]));
+    await tick();
+    assert.deepEqual(Array.from(hook.snapshot().timeline, (row) => row.id), ['older', 'live', 'next']);
+    assert.equal(hook.snapshot().timeline.find((row) => row.id === 'live').text, 'newer');
+  } finally { hook.cleanup(); }
+});
+
+test('a replacement CLI Worker API starts with its current row identities', async () => {
+  const hook = mountStream(oneSnapshot([{ id: 'legacy-step-row', text: 'answer' }], false));
+  try {
+    await tick();
+    hook.reconnect(oneSnapshot([{ id: 'native-response-row', text: 'answer' }], false), undefined, { replaceApi: true });
+    await tick();
+    assert.deepEqual(Array.from(hook.snapshot().timeline, (row) => row.id), ['native-response-row']);
+  } finally { hook.cleanup(); }
+});
+
+test('a disposed history completion cannot clear the new generation loading state', async () => {
+  let finishOld, finishNew;
+  const oldHistory = new Promise((resolve) => { finishOld = resolve; });
+  const newHistory = new Promise((resolve) => { finishNew = resolve; });
+  let nextSnapshot, newCalls = 0;
+  const continueStream = new Promise((resolve) => { nextSnapshot = resolve; });
+  const hook = mountStream(oneSnapshot([{ id: 'live' }]), () => oldHistory);
+  try {
+    await tick();
+    hook.reconnect({
+      async *[Symbol.asyncIterator]() {
+        yield { value: JSON.stringify({ timeline: [{ id: 'live' }], truncated: true }), accept() {} };
+        await continueStream;
+        yield { value: JSON.stringify({ timeline: [{ id: 'next' }], truncated: true }), accept() {} };
+      },
+      async dispose() {},
+    }, () => { newCalls++; return newHistory; });
+    await tick();
+    assert.equal(newCalls, 1);
+    finishOld({ ok: true, value: JSON.stringify({ items: [{ id: 'stale' }], hasOlder: false }) });
+    await tick();
+    nextSnapshot();
+    await tick();
+    assert.equal(newCalls, 1);
+    finishNew({ ok: true, value: JSON.stringify({ items: [{ id: 'older' }], hasOlder: false }) });
+    await tick();
+    assert.deepEqual(Array.from(hook.snapshot().timeline, (row) => row.id), ['older', 'live', 'next']);
+  } finally { hook.cleanup(); }
+});
+
+test('missing history is visible and an API reconnect can recover the truncated timeline', async () => {
+  const hook = mountStream(oneSnapshot([{ id: 'live' }]));
+  let historyCalls = 0;
+  try {
+    await tick();
+    assert.match(hook.error(), /不提供历史接口/);
+    hook.reconnect(oneSnapshot([{ id: 'live' }]), async () => {
+      historyCalls++;
+      return { ok: true, value: JSON.stringify({ items: [{ id: 'older' }], hasOlder: false }) };
+    });
+    await tick();
+    assert.equal(historyCalls, 1);
+    assert.deepEqual(Array.from(hook.snapshot().timeline, (row) => row.id), ['older', 'live']);
+    assert.equal(hook.error(), undefined);
   } finally { hook.cleanup(); }
 });
 

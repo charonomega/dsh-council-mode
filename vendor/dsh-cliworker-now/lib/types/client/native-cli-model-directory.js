@@ -1,7 +1,9 @@
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store';
-import { cliOf, CLI_LABELS, effortLabel, } from "../shared/types.js";
+import { cliOf, CLI_LABELS, } from "../shared/types.js";
 import { visibleModelChoices } from "../shared/model-presentation.js";
 import { value } from "./workers.js";
+import { effortLabel, t } from "./i18n.js";
+import { hostText } from "./operation-error.js";
 export class NativeCliModelDirectory {
     api;
     parentId;
@@ -62,7 +64,7 @@ export class NativeCliModelDirectory {
             if (catalog.cli !== cliOf(this.worker.preference) ||
                 !Array.isArray(catalog.models) ||
                 !catalog.models.length)
-                throw new Error(catalog.notice || '当前 CLI 未返回可用的模型目录');
+                throw new Error(hostText(catalog.notice) || t('当前 CLI 未返回可用的模型目录'));
             this.models = catalog.models;
             const current = this.selection(this.worker.preference);
             const groups = [
@@ -104,9 +106,9 @@ export class NativeCliModelDirectory {
             error: Object.assign(new Error(message), { code: 'gateway/bad-request', details: {}, isDSHRemoteError: true }),
         });
         if (this.closed || this.locked)
-            return fail('请等待本轮结束，并发送或移除待发消息后再修改模型');
+            return fail(t('请等待本轮结束，并发送或移除待发消息后再修改模型'));
         if (this.store.getSnapshot().status === 'selecting')
-            return fail('正在保存模型设置，请等待完成');
+            return fail(t('正在保存模型设置，请等待完成'));
         const cli = cliOf(this.worker.preference);
         const model = this.models.find((item) => item.id === selection.model);
         const effort = selection.reasoningEffort ?? model?.efforts?.[0];
@@ -114,7 +116,7 @@ export class NativeCliModelDirectory {
             !model ||
             !effort ||
             !model.efforts?.includes(effort))
-            return fail('只能选择当前 CLI 真实目录中的模型和思考强度');
+            return fail(t('只能选择当前 CLI 真实目录中的模型和思考强度'));
         const generation = ++this.generation;
         const observation = this.selectionObservation;
         this.request?.abort();
@@ -123,11 +125,11 @@ export class NativeCliModelDirectory {
         try {
             const saved = JSON.parse(value(await this.api.cliworker.configureWorker(this.parentId, this.worker.id, JSON.stringify({ cli, model: model.id, effort }), request.signal)));
             if (this.closed || generation !== this.generation)
-                return fail('会话已切换，请重新核对模型设置');
+                return fail(t('会话已切换，请重新核对模型设置'));
             if (saved.id !== this.worker.id ||
                 saved.parentSessionId !== this.parentId ||
                 cliOf(saved.preference) !== cli)
-                throw new Error('收到不匹配的 Worker 设置');
+                throw new Error(t('收到不匹配的 Worker 设置'));
             // A later watch value can win while this older save's receipt is in
             // flight (another native occurrence or command may have saved it).
             if (observation === this.selectionObservation)

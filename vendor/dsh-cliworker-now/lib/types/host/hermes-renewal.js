@@ -4,9 +4,9 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { validateHermesHomeDirectory } from "./hermes-adapter.js";
 import { hermesAccountEnvironment } from "./hermes-account-context.js";
-import { assertHermesOwnAccounts, hermesPoolEntryUnavailable, readHermesAccountMaterial, } from "./hermes-models.js";
+import { assertHermesOwnAccounts, HermesAccountSourceError, hermesPoolEntryUnavailable, readHermesAccountMaterial, } from "./hermes-models.js";
 import { hermesNativeCommand } from "./hermes-installation.js";
-import { HermesNousError, hermesNousMinimumTtl, selectHermesNousSource, } from "./hermes-nous.js";
+import { HermesNousError, hermesNousMinimumTtl, projectHermesNousSource, selectHermesNousSource, } from "./hermes-nous.js";
 import { projectHermesUnsuppressedAuth, hermesUnsuppressedEnvironment } from "./hermes-suppression.js";
 import { ProcessCleanupUnconfirmedError } from "./process.js";
 const messages = {
@@ -76,8 +76,13 @@ async function snapshot(home, signal) {
     // Suppressed/deleted credentials never become a renewal source.
     if (!material.auth.providers?.nous)
         return;
-    const source = selectHermesNousSource(material, { allowExpired: true });
     const ttl = hermesNousMinimumTtl(material.env);
+    // A healthy singleton already proves local login, even before native pool initialization.
+    // Leave it alone; an actual renewal still requires the full runtime source below.
+    const local = projectHermesNousSource(material.auth, 0, { allowExpired: true });
+    if (local.expires > Date.now() + ttl * 1000 && !material.auth.credential_pool?.nous?.length)
+        return;
+    const source = selectHermesNousSource(material, { allowExpired: true });
     const state = material.auth.providers.nous;
     return {
         material,
@@ -226,7 +231,9 @@ export async function ensureHermesNousFresh(input) {
             .catch((error) => {
             if (error instanceof ProcessCleanupUnconfirmedError)
                 state.poisoned = true;
-            if (error instanceof HermesNousError || error instanceof ProcessCleanupUnconfirmedError)
+            if (error instanceof HermesNousError ||
+                error instanceof HermesAccountSourceError ||
+                error instanceof ProcessCleanupUnconfirmedError)
                 throw error;
             controller.signal.throwIfAborted();
             throw new HermesRenewalError('unavailable');

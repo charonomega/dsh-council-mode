@@ -83,6 +83,9 @@ export class MimoMetadataCache {
         }
         return sources;
     }
+    clear() {
+        this.entries.clear();
+    }
     set(key, sources, own) {
         if (!key || !sources.length)
             return;

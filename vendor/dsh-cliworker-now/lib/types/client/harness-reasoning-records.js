@@ -2,6 +2,7 @@ import { jsx as _jsx } from "react/jsx-runtime";
 import { createElement, useMemo } from 'react';
 import { CLI_IDS } from "../shared/types.js";
 import { useHarnessSessionBinding } from "./harness-binding-registry.js";
+import { useT } from "./i18n.js";
 /** The native ReasoningRow stays INSIDE its Turn process and in tool-step order.
  * Only its label and expanded body's scrolling change. Native public blocks own
  * content, streaming previews, disclosure/reset state and historical persistence.
@@ -14,11 +15,12 @@ export function HarnessReasoningRecords({ Native, bindings, props }) {
         && !!cli && CLI_IDS.some(id => id === cli)
         && binding.sessionId === props.sessionId && binding.parentSessionId !== props.sessionId
         && address?.childSessionId === binding.sessionId && address.parentSessionId === binding.parentSessionId;
-    const t = useMemo(() => (key, ...args) => key === 'message.think' ? '思考记录' : props.t(key, ...args), [props.t]);
+    const own = useT();
+    const t = useMemo(() => (key, ...args) => key === 'message.think' ? own('思考记录') : props.t(key, ...args), [props.t, own]);
     const renderSlot = useMemo(() => (name, owner, ...args) => {
         const content = props.renderSlot(name, owner, ...args);
         return name === 'conversation.chat.reasoning.body'
-            ? _jsx("div", { className: "cwn-reasoning-records-body", "data-reasoning-records": true, role: "region", "aria-label": "\u601D\u8003\u8BB0\u5F55", children: content })
+            ? _jsx("div", { className: "cwn-reasoning-records-body", "data-reasoning-records": true, role: "region", "aria-label": own('思考记录'), children: content })
             : content;
     }, [props.renderSlot]);
     return createElement(Native, enabled ? { ...props, t, renderSlot } : props);

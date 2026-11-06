@@ -204,7 +204,7 @@ test('F10: deadline bounds roster, admission, stream read and broken stream clea
   const keepAlive = setInterval(() => {}, 10);
   try {
     for (const stage of ['roster', 'followup', 'stream']) {
-      const worker = { id: 'a', mode: 'plan' }; let reads = 0;
+      const worker = { id: 'a', mode: 'plan', runId: 'old', status: 'completed' }; let reads = 0;
       const never = () => new Promise(() => {});
       const adapter = {
         listWorkers: () => stage === 'roster' ? never() : Promise.resolve({ workers: [worker] }),

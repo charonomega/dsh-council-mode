@@ -1,11 +1,13 @@
 import { jsx as _jsx } from "react/jsx-runtime";
 import { createElement, useSyncExternalStore } from 'react';
-import { IconBranchOutlineRegular, MenuItemButton, Toast, Tooltip, } from '@deepseek-ai/dsh-client-ui-primitives';
+import { IconBranchOutlineRegular, MenuItemButton, Toast, } from '@deepseek-ai/dsh-client-ui-primitives';
 import { active } from "../shared/types.js";
+import { HarnessReasonTooltip } from "./harness-native-tooltip.js";
 import { harnessFeatureReason } from "./harness-feature-support.js";
 import { useHarnessSessionBinding } from "./harness-binding-registry.js";
 import { shadowHarnessSlot } from "./harness-slot-shadow.js";
 import { value } from "./workers.js";
+import { t, useT } from "./i18n.js";
 /** Only completed assistant turn boundaries can be addressed. Latest uses the wire sentinel. */
 export function workerForkCut(turns, target) {
     if (!target)
@@ -13,7 +15,7 @@ export function workerForkCut(turns, target) {
     const latest = turns.at(-1);
     const selected = turns.find((turn) => target.turn !== undefined ? turn.turn === target.turn : turn.seq === target.seq);
     if (!selected)
-        return { atMessageId: '', reason: '只能从已完成的助手轮次分支' };
+        return { atMessageId: '', reason: t('只能从已完成的助手轮次分支') };
     return { atMessageId: selected === latest ? '' : selected.messageId };
 }
 export class HarnessWorkerFork {
@@ -72,7 +74,7 @@ export class HarnessWorkerFork {
     reason(sessionId, cut = { atMessageId: '' }) {
         const binding = this.bindings.get(sessionId);
         if (!binding?.workerId)
-            return '正在读取当前 CLI 会话';
+            return t('正在读取当前 CLI 会话');
         const unsupported = harnessFeatureReason(binding, 'fork');
         if (unsupported)
             return unsupported;
@@ -86,11 +88,11 @@ export class HarnessWorkerFork {
             snapshot?.selectedBusy ||
             snapshot?.configuring ||
             (snapshot?.selected && active(snapshot.selected.status)))
-            return '请等待当前运行结束后再分支';
+            return t('请等待当前运行结束后再分支');
         if (snapshot?.queuedFollowups?.length || inbox?.['next-turn']?.length || inbox?.['next-step']?.length)
-            return '请发送或移除待发消息后再分支';
+            return t('请发送或移除待发消息后再分支');
         if (!snapshot?.selected)
-            return '正在读取当前 CLI 状态';
+            return t('正在读取当前 CLI 状态');
         return cut.reason || (cut.atMessageId ? harnessFeatureReason(binding, 'forkEarlier') : undefined);
     }
     /** Unsupported/busy paths settle without a request or an error notification. */
@@ -104,7 +106,7 @@ export class HarnessWorkerFork {
         this.changed();
         try {
             if (!this.api.cliworker.forkWorker)
-                throw new Error('Host 尚未提供 CLI 会话分支');
+                throw new Error(t('Host 尚未提供 CLI 会话分支'));
             const result = JSON.parse(value(await this.api.cliworker.forkWorker(binding.parentSessionId, binding.workerId, cut.atMessageId, request.signal)));
             if (request.signal.aborted)
                 return;
@@ -177,6 +179,7 @@ export function installHarnessForkMenu(ctx, bindings, forks) {
     });
 }
 function WorkerForkMenu({ forks, sessionId, useMenuOpenState, useShortcuts, }) {
+    useT();
     const menu = useMenuOpenState?.();
     const shortcut = useShortcuts?.((rows) => rows.find((row) => row.id === 'session.fork'));
     const reason = forks.reason(sessionId);
@@ -185,8 +188,9 @@ function WorkerForkMenu({ forks, sessionId, useMenuOpenState, useShortcuts, }) {
                 return;
             menu?.[1](false);
             void forks.fork(sessionId);
-        }, children: "\u5206\u652F" }));
-    return reason ? (_jsx(Tooltip, { label: reason, side: "top", portal: true, children: _jsx("span", { tabIndex: 0, "aria-label": reason, children: row }) })) : (row);
+        }, children: t('分支') }));
+    // Below, like the native message branch button's tooltip.
+    return reason ? (_jsx(HarnessReasonTooltip, { label: reason, side: "bottom", children: row })) : (row);
 }
 export function HarnessForkNotice({ forks }) {
     useSyncExternalStore(forks.subscribe, forks.getSnapshot);

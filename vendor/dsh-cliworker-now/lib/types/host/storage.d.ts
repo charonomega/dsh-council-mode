@@ -1,4 +1,5 @@
-import type { CliSettings } from '../shared/cli-settings.ts';
+import { z } from 'zod';
+import { type CliSettings } from '../shared/cli-settings.ts';
 import { type RunningMessageMode, type RunningMessageSettings } from '../shared/running-message.ts';
 import { type CliId, type Preference, type RolePreset, type RoleSnapshot, type Worker, type WorkerEvent } from '../shared/types.ts';
 /** Complete dispatch choices stay Host-private; public preferences omit role and binding. */
@@ -7,6 +8,27 @@ export interface DispatchSetup {
     role: RoleSnapshot | null;
     binding: string;
 }
+/** Every field is optional: an absent value keeps the deployment default. */
+declare const generalSettingsSchema: z.ZodObject<{
+    maxConcurrent: z.ZodOptional<z.ZodInt>;
+    language: z.ZodOptional<z.ZodEnum<{
+        follow: "follow";
+        zh: "zh";
+        en: "en";
+    }>>;
+    isolatedParallelWrites: z.ZodOptional<z.ZodBoolean>;
+    askBeforeDispatch: z.ZodOptional<z.ZodBoolean>;
+    showDshSubagents: z.ZodOptional<z.ZodBoolean>;
+    taskTimeLimitMs: z.ZodOptional<z.ZodInt>;
+    idleTimeLimitMs: z.ZodOptional<z.ZodUnion<readonly [z.ZodLiteral<0>, z.ZodInt]>>;
+}, z.core.$strip>;
+export type StoredGeneralSettings = z.infer<typeof generalSettingsSchema>;
+/**
+ * A tool command is display text. An over-long one (a long inline script) is
+ * clipped rather than rejected, so it can never stop the Host from loading its
+ * own event log.
+ */
+export declare const TOOL_COMMAND_LIMIT = 32768;
 export declare function atomicJSON(path: string, value: unknown): void;
 /** One host owns a private store; a live second host cannot resume the same CLI session. */
 export declare class WorkerStorage {
@@ -17,6 +39,7 @@ export declare class WorkerStorage {
     private lock;
     private candidate;
     private enabled;
+    private general;
     private presets;
     /** Account epochs live outside public Worker records and event/history responses. */
     accountBinding(id: string): string | undefined;
@@ -25,6 +48,8 @@ export declare class WorkerStorage {
     cleanupBlockState(cli?: CliId): 'none' | 'blocked' | 'invalid';
     /** No automatic clearing: only trustworthy process-exit recovery can release a quarantine. */
     blockCleanup(cli?: CliId): void;
+    /** The user's confirmed release of one CLI's metadata quarantine; the unattributed global record has none. */
+    clearCleanupBlock(cli: CliId): void;
     private cleanupBlockPath;
     constructor(directory: string);
     /** Explicitly authorized one-time native-capability reset; later manual choices use policy 2. */
@@ -33,6 +58,9 @@ export declare class WorkerStorage {
     /** Only the former CLI-default format and unnamed histories establish legacy automatic names. */
     private migrateAutomaticNames;
     cliSettings(): CliSettings;
+    generalSettings(): StoredGeneralSettings;
+    /** Merges one validated patch; `null` restores that field's deployment default. */
+    setGeneralSettings(patch: unknown): StoredGeneralSettings;
     rolePresets(): RolePreset[];
     saveRolePreset(input: unknown): RolePreset;
     deleteRolePreset(id: string): void;
@@ -62,3 +90,4 @@ export declare class WorkerStorage {
     private acquireLock;
     close(): void;
 }
+export {};

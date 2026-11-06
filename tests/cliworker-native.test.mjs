@@ -3,31 +3,27 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { replay, frame, item, finish, answer, failed, success } from './fixtures/cliworker/native-replay.mjs';
-import { progressPreview, createProgressPreviews } from '../vendor/dsh-cliworker-now/lib/codex-progress-preview.mjs';
-import { createNativeIO } from '../vendor/dsh-cliworker-now/lib/native-transport.mjs';
+import { cutBytes, createEventBudget, createNativeIO } from '../vendor/dsh-cliworker-now/lib/native-transport.mjs';
 
-test('CLI Worker: UTF-8 previews stay within 4 KiB and preserve small output', () => {
+test('CLI Worker: UTF-8 preview prefixes stay within their budget', () => {
   for (const text of ['small\n', '汉字😀'.repeat(2000)]) {
-    const output = progressPreview(text);
+    const output = cutBytes(text, 4096);
     assert(Buffer.byteLength(output) <= 4096);
     assert(!output.includes('\ufffd'));
     if (Buffer.byteLength(text) <= 4096) assert.equal(output, text);
-    else assert(output.startsWith('[预览已截断'));
+    else assert(text.startsWith(output));
   }
 });
 
-test('CLI Worker: previews coalesce, suppress duplicates, and flush the final update once', () => {
-  let now = 0;
-  const events = [], previews = createProgressPreviews(event => events.push(event), () => now);
-  const event = detail => ({ kind: 'tool', state: 'RUNNING', detail, toolCall: { output: detail } });
-  previews.update('a', event('first')); now = 100;
-  previews.update('a', event('second')); previews.update('a', event('third'));
-  assert.equal(events.length, 1);
-  now = 251; previews.update('a', event('fourth')); assert.equal(events.length, 2);
-  now = 300; previews.update('a', event('last')); previews.finish('a'); previews.flush();
-  assert.equal(events.length, 3); assert.equal(events.at(-1).detail, 'last');
-  previews.update('b', event('same')); now = 600; previews.update('b', event('same')); previews.finish('b');
-  assert.equal(events.length, 4);
+test('CLI Worker: exhausted display budgets preserve final replies and emit one notice', () => {
+  const notices = [];
+  const budget = createEventBudget({ maxRunBytes: 8, maxLineBytes: 1024, maxToolPreviewBytes: 8 }, event => notices.push(event));
+  const first = budget({ kind: 'tool', step: 1, delta: 'abcdefgh', state: 'RUNNING' });
+  assert.equal(first.delta, 'abcdefgh');
+  assert.equal(budget({ kind: 'tool', step: 2, delta: 'next', state: 'RUNNING' }).truncated, true);
+  assert.equal(budget({ kind: 'tool', step: 3, delta: 'later', state: 'RUNNING' }), undefined);
+  assert.equal(notices.length, 1);
+  assert.equal(budget({ kind: 'assistant', text: 'complete answer', state: 'COMPLETED' }).text, 'complete answer');
 });
 
 test('CLI Worker: 10,000 native deltas retain full results without cumulative-output amplification', async () => {
@@ -48,16 +44,21 @@ test('CLI Worker: 10,000 native deltas retain full results without cumulative-ou
   assert.equal(result.result.response, answer.text);
   assert.equal(result.native.filter(value => value.method === 'item/commandExecution/outputDelta').length, 10000);
   assert.equal(result.observed.findLast(value => value.kind === 'tool').toolCall.output, full);
-  assert.equal(result.native.findLast(value => value.method === 'item/completed' && value.params.item.type === 'commandExecution').params.item.aggregatedOutput, full);
+  const mirror = result.native.findLast(value => value.method === 'item/completed' && value.params.item.type === 'commandExecution');
+  assert.deepEqual(mirror.params.item.aggregatedOutput, { cliworkerOmitted: true, bytes: Buffer.byteLength(full) });
+  assert(result.native.filter(value => value.method === 'item/commandExecution/outputDelta')
+    .every(value => value.params.delta.cliworkerOmitted === true && value.params.delta.bytes === 16));
+  assert.equal(result.observed.filter(value => value.kind === 'tool' && value.delta).map(value => value.delta).join(''), full);
   assert.equal(result.observed.findLast(value => value.kind === 'reasoning').detail, summary);
   assert(result.bytes < 8 * 1048576, `Expected bounded progress traffic, got ${result.bytes} bytes`);
 });
 
-test('CLI Worker: frame and total-output limits still reject real oversize', () => {
+test('CLI Worker: reply frames stay bounded while native records become size summaries', () => {
   const single = createNativeIO({ maxRunBytes: 1024, maxLineBytes: 1024 }, () => {});
-  assert.throws(() => single.native({ text: 'x'.repeat(1100) }), /frame exceeds/);
-  const total = createNativeIO({ maxRunBytes: 2048, maxLineBytes: 1024 }, () => {});
-  assert.throws(() => { for (let i = 0; i < 10; i++) total.native({ text: 'x'.repeat(500) }); }, /output exceeds run limit/);
+  assert.throws(() => single.event({ kind: 'assistant', text: 'x'.repeat(1100) }), /frame exceeds/);
+  const lines = [], native = createNativeIO({ maxRunBytes: 2048, maxLineBytes: 1024 }, line => lines.push(JSON.parse(line)));
+  native.native({ text: 'x'.repeat(2000) });
+  assert.deepEqual(lines[0].record.text, { cliworkerOmitted: true, bytes: 2000 });
 });
 
 test('CLI Worker: start and resume preserve first-line directives and the requested sandbox', async () => {
@@ -100,7 +101,7 @@ test('CLI Worker: recovered command failure remains visible without poisoning a 
   assert.equal(result.result.response, answer.text);
   assert.equal(result.observed.filter(value => value.kind === 'tool' && value.state === 'FAILED').length, 1);
   assert.equal(result.observed.find(value => value.state === 'FAILED').toolCall.exitCode, 7);
-  assert.equal(result.observed.filter(value => value.kind === 'diagnostic').length, 1);
+  assert.match(result.result.notice, /1 个工具步骤失败/);
 });
 
 test('CLI Worker: an unresolved tool issue stays visible in the final answer and error event', async () => {
@@ -125,7 +126,13 @@ test('CLI Worker: duplicate completion counts a failed tool once', async () => {
   const result = await replay([item(failed), item(failed), finish('completed', [failed, answer])]);
   assert.equal(result.result.status, 'SUCCESS');
   assert.equal(result.observed.filter(value => value.kind === 'tool').length, 1);
-  assert.match(result.observed.find(value => value.kind === 'diagnostic').text, /1 次/);
+  assert.match(result.result.notice, /1 个工具步骤失败/);
+});
+
+test('CLI Worker: a last failed tool with no later recovery produces UNCERTAIN', async () => {
+  const result = await replay([item(failed), finish()]);
+  assert.equal(result.result.status, 'UNCERTAIN');
+  assert.match(result.result.error, /最后的工具步骤失败/);
 });
 
 test('CLI Worker: a clean success emits no tool-failure diagnostic', async () => {
@@ -152,8 +159,14 @@ test('CLI Worker: a recoverable native notification can complete successfully', 
   assert.equal(result.result.status, 'SUCCESS');
 });
 
-test('CLI Worker: unsupported approval stays denied and fails the turn', async () => {
+test('CLI Worker: native approval denial remains denied and the native turn can complete', async () => {
   const result = await replay([{ ...frame('item/fileChange/requestApproval', {}), id: 'approval' }, item(answer), finish()]);
-  assert.equal(result.result.status, 'ERROR');
+  assert.equal(result.result.status, 'SUCCESS');
   assert(result.replies.some(value => value.result?.decision === 'decline'));
+});
+
+test('CLI Worker: unsupported interactive input fails the turn', async () => {
+  const result = await replay([{ ...frame('item/userInput/request', {}), id: 'input' }, item(answer), finish()]);
+  assert.equal(result.result.status, 'ERROR');
+  assert(result.replies.some(value => value.error?.code === -32601));
 });

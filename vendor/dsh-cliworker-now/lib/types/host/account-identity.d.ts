@@ -6,6 +6,8 @@ export type AccountIdentitySource = (cli: CliId, signal: AbortSignal) => Promise
 export declare function accountEmail(value: unknown): string | undefined;
 /** Local expiry is negative evidence only; an unsigned claim never proves login. */
 export declare function localTokenExpired(value: unknown, now?: number): boolean;
+/** Shared by the Linux token file and the macOS keychain item: both hold the same native JSON. */
+export declare function agyIdentityFromCredential(value: Record<string, unknown>): AccountIdentity;
 /**
  * This format/path is verified from the installed AGY CLI. Reading is
  * bounded and ephemeral. No credential leaves this function; ID tokens are decoded

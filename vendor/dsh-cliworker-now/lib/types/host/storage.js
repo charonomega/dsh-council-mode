@@ -1,10 +1,12 @@
 import { GOAL_OBJECTIVE_LIMIT } from "../shared/conversation-features.js";
-import { appendFileSync, closeSync, constants, chmodSync, existsSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, writeFileSync, } from 'node:fs';
+import { appendFileSync, closeSync, constants, chmodSync, existsSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync, } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { z } from 'zod';
-import { conversationTelemetrySchema, lastRunUsageSnapshotSchema } from "./conversation-telemetry.js";
+import { conversationTelemetrySchema, lastRunUsageSnapshotSchema, sessionUsageSchema } from "./conversation-telemetry.js";
 import { contextTelemetrySchema } from "./context-telemetry.js";
+import { LANGUAGE_PREFERENCES, MAX_CONCURRENT_LIMIT, MAX_TASK_TIME_LIMIT_MS } from "../shared/cli-settings.js";
 import { parseNativeResponse } from './native-response.mjs';
 import { RUNNING_MESSAGE_MODES, defaultRunningMessageMode, supportsNativeSteering, } from "../shared/running-message.js";
 import { BUILTIN_ROLE_PRESETS } from "../shared/builtin-presets.js";
@@ -42,6 +44,19 @@ const conversationSetupSchema = z.object({
 const storedCliSchema = z.enum([...CLI_IDS, 'harness']);
 const storedPreferenceSchema = preferenceSchema.extend({ cli: storedCliSchema.optional() });
 const cliSettingsSchema = z.object({ enabled: z.partialRecord(storedCliSchema, z.boolean()) });
+// Same bounds as the plugin config `timeoutMs`, so its value can also be chosen explicitly.
+const taskTimeLimitSchema = z.int().min(1000).max(MAX_TASK_TIME_LIMIT_MS);
+const idleTimeLimitSchema = z.union([z.literal(0), z.int().min(60_000).max(MAX_TASK_TIME_LIMIT_MS)]);
+/** Every field is optional: an absent value keeps the deployment default. */
+const generalSettingsSchema = z.object({
+    maxConcurrent: z.int().min(1).max(MAX_CONCURRENT_LIMIT).optional(),
+    language: z.enum(LANGUAGE_PREFERENCES).optional(),
+    isolatedParallelWrites: z.boolean().optional(),
+    askBeforeDispatch: z.boolean().optional(),
+    showDshSubagents: z.boolean().optional(),
+    taskTimeLimitMs: taskTimeLimitSchema.optional(),
+    idleTimeLimitMs: idleTimeLimitSchema.optional(),
+});
 const enabledByDefault = () => Object.fromEntries(CLI_IDS.map((cli) => [cli, true]));
 const runningMessageSchema = z
     .object({
@@ -52,6 +67,7 @@ const runningMessageSchema = z
 })
     .strict();
 const workerSchema = z.object({
+    initiator: z.object({ kind: z.enum(['worker', 'subagent']), id: z.string().min(1), name: z.string().min(1) }).optional(),
     id: z.uuid(),
     parentSessionId: z.string().min(1),
     project: z.string().min(1),
@@ -63,9 +79,14 @@ const workerSchema = z.object({
     role: roleSnapshotSchema.optional(),
     preference: storedPreferenceSchema,
     mode: z.enum(['plan', 'accept-edits']),
+    level: z.enum(['ask', 'auto', 'full']).optional().catch(undefined),
     conversationId: z.string().optional(),
+    previousConversationIds: z.array(z.string().min(1)).max(64).optional().catch(undefined),
+    reboundConversationId: z.string().min(1).max(1024).optional().catch(undefined),
+    carryoverRunId: z.uuid().optional().catch(undefined),
     // Bad optional telemetry must not make an otherwise valid conversation unreadable.
     conversationTelemetry: conversationTelemetrySchema.optional().catch(undefined),
+    previousSessionUsage: sessionUsageSchema.optional().catch(undefined),
     lastRunUsageSnapshot: lastRunUsageSnapshotSchema.optional().catch(undefined),
     contextTelemetry: contextTelemetrySchema.optional().catch(undefined),
     contextInvalidatedRunId: z.uuid().optional().catch(undefined),
@@ -101,7 +122,31 @@ const workerSchema = z.object({
     interruptionReason: z.literal('user').optional(),
     observedModel: z.string().optional(),
     lastResult: z.string().optional(),
+    isolation: z
+        .object({
+        state: z.enum(['preparing', 'ready', 'merging', 'conflict', 'released']),
+        path: z.string().min(1),
+        createdAt: z.string().optional(),
+        conflicts: z.array(z.object({ path: z.string(), reason: z.string() })).max(200).optional(),
+        skippedLinks: z.number().int().nonnegative().optional(),
+        message: z.string().max(2000).optional(),
+    })
+        .optional(),
+    isolationNotice: z.string().max(2000).optional(),
+    resultNotice: z.string().max(2000).optional(),
 });
+/**
+ * A tool command is display text. An over-long one (a long inline script) is
+ * clipped rather than rejected, so it can never stop the Host from loading its
+ * own event log.
+ */
+export const TOOL_COMMAND_LIMIT = 32768;
+function clipToolCommand(command) {
+    if (command.length <= TOOL_COMMAND_LIMIT)
+        return command;
+    const end = /[\uD800-\uDBFF]/.test(command[TOOL_COMMAND_LIMIT - 1]) ? TOOL_COMMAND_LIMIT - 1 : TOOL_COMMAND_LIMIT;
+    return command.slice(0, end);
+}
 const eventSchema = z.object({
     requestState: z.object({
         nativeRunId: z.string().regex(/^[\w-]{1,256}$/),
@@ -121,6 +166,10 @@ const eventSchema = z.object({
     step: z.number().optional(),
     state: z.string().optional(),
     detail: z.string().optional(),
+    delta: z.string().optional(),
+    truncated: z.literal(true).optional(),
+    outputBytes: z.number().int().safe().positive().optional(),
+    notice: z.literal(true).optional(),
     response: z.unknown().transform((value, context) => {
         if (value === undefined)
             return undefined;
@@ -139,7 +188,8 @@ const eventSchema = z.object({
         name: z.string().min(1).max(1024).optional(),
         input: z.unknown().optional(),
         output: z.unknown().optional(),
-        command: z.string().max(32768).optional(),
+        // Logs written before append clipped commands may hold longer ones; they still load.
+        command: z.string().transform(clipToolCommand).optional(),
         exitCode: z.number().int().safe().optional(),
     })
         .optional(),
@@ -193,6 +243,59 @@ function processAlive(pid) {
         return error.code !== 'ESRCH';
     }
 }
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+/** Start time (ms since epoch) of a running process, or undefined when the OS does not say. */
+function processStartedAt(pid) {
+    try {
+        if (process.platform === 'win32') {
+            // CIM reports every process's creation time, including services Get-Process may not open.
+            const script = "$p=Get-CimInstance Win32_Process -Filter ('ProcessId=' + [int]$env:CWN_LOCK_PID); if($p){[DateTimeOffset]::new($p.CreationDate.ToUniversalTime()).ToUnixTimeMilliseconds()}";
+            const output = execFileSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], {
+                encoding: 'utf8',
+                env: { ...process.env, CWN_LOCK_PID: String(pid) },
+                stdio: ['ignore', 'pipe', 'ignore'],
+                timeout: 15_000,
+                windowsHide: true,
+            });
+            const started = Number(output.trim());
+            return Number.isSafeInteger(started) && started > 0 ? started : undefined;
+        }
+        const output = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+            encoding: 'utf8',
+            env: { ...process.env, LC_ALL: 'C' },
+            stdio: ['ignore', 'pipe', 'ignore'],
+            timeout: 5_000,
+        });
+        const match = /^\s*\w{3}\s+(\w{3})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})\s*$/.exec(output);
+        const month = match ? MONTHS.indexOf(match[1]) : -1;
+        if (!match || month < 0)
+            return undefined;
+        return new Date(+match[6], month, +match[2], +match[3], +match[4], +match[5]).getTime();
+    }
+    catch {
+        return undefined;
+    }
+}
+/** Lock mtimes and process start times may be truncated to whole seconds. */
+const LOCK_CLOCK_SLACK_MS = 2_000;
+/**
+ * A Host starts before it writes its lock, so a live PID whose process started
+ * after the lock was written is a reused PID and the Host behind the lock has
+ * exited (Windows reuses PIDs quickly). An unknown start time counts as live.
+ */
+function lockOwnerAlive(pid, path, startedAt) {
+    if (!processAlive(pid))
+        return false;
+    let written;
+    try {
+        written = statSync(path).mtimeMs;
+    }
+    catch {
+        return true;
+    }
+    const started = startedAt(pid);
+    return started === undefined || started <= written + LOCK_CLOCK_SLACK_MS;
+}
 /** One host owns a private store; a live second host cannot resume the same CLI session. */
 export class WorkerStorage {
     directory;
@@ -202,6 +305,7 @@ export class WorkerStorage {
     lock;
     candidate;
     enabled = enabledByDefault();
+    general = {};
     presets = [];
     /** Account epochs live outside public Worker records and event/history responses. */
     accountBinding(id) {
@@ -276,6 +380,23 @@ export class WorkerStorage {
     blockCleanup(cli) {
         atomicJSON(this.cleanupBlockPath(cli), { policy: 1, state: 'cleanup-unconfirmed' });
     }
+    /** The user's confirmed release of one CLI's metadata quarantine; the unattributed global record has none. */
+    clearCleanupBlock(cli) {
+        const path = this.cleanupBlockPath(z.enum(CLI_IDS).parse(cli));
+        let entry;
+        try {
+            entry = lstatSync(path);
+        }
+        catch (error) {
+            if (error.code === 'ENOENT')
+                return;
+            throw error;
+        }
+        // A damaged record is released the same way; a directory is never ours to remove.
+        if (entry.isDirectory())
+            throw new Error('清理隔离记录不是文件，无法解除');
+        rmSync(path, { force: true });
+    }
     cleanupBlockPath(cli) {
         // Only a known read-only query boundary may choose this narrower scope.
         // Old unattributed/task markers retain their original global meaning.
@@ -311,6 +432,11 @@ export class WorkerStorage {
                         this.enabled[cli] = settings.enabled[cli];
                 }
                 chmodSync(settingsPath, 0o600);
+            }
+            const generalPath = join(directory, 'general-settings.json');
+            if (existsSync(generalPath)) {
+                this.general = generalSettingsSchema.parse(JSON.parse(readFileSync(generalPath, 'utf8')));
+                chmodSync(generalPath, 0o600);
             }
             for (const file of readdirSync(directory).filter((name) => name.endsWith('.worker.json'))) {
                 const worker = workerSchema.parse(JSON.parse(readFileSync(join(directory, file), 'utf8')));
@@ -434,6 +560,35 @@ export class WorkerStorage {
     }
     cliSettings() {
         return { enabled: { ...this.enabled } };
+    }
+    generalSettings() {
+        return { ...this.general };
+    }
+    /** Merges one validated patch; `null` restores that field's deployment default. */
+    setGeneralSettings(patch) {
+        const changes = z
+            .object({
+            maxConcurrent: z.int().min(1).max(MAX_CONCURRENT_LIMIT).nullable().optional(),
+            language: z.enum(LANGUAGE_PREFERENCES).nullable().optional(),
+            isolatedParallelWrites: z.boolean().nullable().optional(),
+            askBeforeDispatch: z.boolean().nullable().optional(),
+            showDshSubagents: z.boolean().nullable().optional(),
+            taskTimeLimitMs: taskTimeLimitSchema.nullable().optional(),
+            idleTimeLimitMs: idleTimeLimitSchema.nullable().optional(),
+        })
+            .strict()
+            .parse(patch);
+        const next = { ...this.general };
+        for (const [key, value] of Object.entries(changes)) {
+            if (value === null)
+                delete next[key];
+            else if (value !== undefined)
+                next[key] = value;
+        }
+        const parsed = generalSettingsSchema.parse(next);
+        atomicJSON(join(this.directory, 'general-settings.json'), parsed);
+        this.general = parsed;
+        return this.generalSettings();
     }
     rolePresets() {
         return structuredClone(this.presets);
@@ -630,6 +785,9 @@ export class WorkerStorage {
     }
     append(worker, event) {
         const rows = this.history(worker.id);
+        const command = event.toolCall?.command;
+        if (command !== undefined && command.length > TOOL_COMMAND_LIMIT)
+            event = { ...event, toolCall: { ...event.toolCall, command: clipToolCommand(command) } };
         const row = { ...event, seq: rows.length + 1, runId: worker.runId, time: new Date().toISOString() };
         appendFileSync(join(this.directory, `${worker.id}.events.jsonl`), JSON.stringify(row) + '\n', {
             mode: 0o600,
@@ -648,6 +806,13 @@ export class WorkerStorage {
      */
     acquireLock() {
         const body = JSON.stringify({ pid: process.pid, token: this.token });
+        // Asked only for live PIDs; one query per PID covers every retry.
+        const starts = new Map();
+        const startedAt = (pid) => {
+            if (!starts.has(pid))
+                starts.set(pid, processStartedAt(pid));
+            return starts.get(pid);
+        };
         for (let attempt = 0;; attempt++) {
             const temp = join(this.directory, `.host.lock.${this.token}.tmp`);
             try {
@@ -668,7 +833,7 @@ export class WorkerStorage {
                     continue;
                 if (owner === 'invalid')
                     conflict = { invalid: name };
-                else if (processAlive(owner.pid))
+                else if (lockOwnerAlive(owner.pid, path, startedAt))
                     conflict ??= 'live';
                 else if (name !== 'host.lock')
                     stale.push(path);
@@ -700,7 +865,7 @@ export class WorkerStorage {
                 const owner = readLockOwner(this.lock);
                 if (owner === 'invalid')
                     throw new Error('Invalid store lock; inspect host.lock before recovery');
-                if (owner !== 'missing' && processAlive(owner.pid))
+                if (owner !== 'missing' && lockOwnerAlive(owner.pid, this.lock, startedAt))
                     throw new Error('CLI Worker store is already owned by another Harness host');
                 rmSync(this.lock, { force: true });
                 writeFileSync(this.lock, body, { mode: 0o600, flag: 'wx' });

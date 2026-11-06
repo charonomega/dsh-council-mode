@@ -1,8 +1,10 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useEffect, useRef, useState } from 'react';
 import { Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives';
+import { useT } from "./i18n.js";
 /** Independent name action: copying never activates the neighboring conversation button. */
 export function NameCopy({ name, disabled = false }) {
+    const t = useT();
     const [feedback, setFeedback] = useState('');
     const [busy, setBusy] = useState(false);
     const alive = useRef(true);
@@ -55,7 +57,7 @@ export function NameCopy({ name, disabled = false }) {
             clearTimer();
         };
     }, []);
-    return (_jsxs("span", { className: "cwn-name-copy", children: [_jsx(Tooltip, { label: feedback || '点击复制名称', side: "bottom", portal: true, children: _jsx("button", { type: "button", className: "cwn-worker-name", "aria-label": `复制名称 ${name}`, title: name, "data-copied": feedback === '已复制', disabled: disabled || !name, "aria-busy": busy, onMouseEnter: () => {
+    return (_jsxs("span", { className: "cwn-name-copy", children: [_jsx(Tooltip, { label: feedback ? t(feedback) : t('点击复制名称'), side: "bottom", portal: true, children: _jsx("button", { type: "button", className: "cwn-worker-name", "aria-label": t('复制名称 {name}', { name }), title: name, "data-copied": feedback === '已复制', disabled: disabled || !name, "aria-busy": busy, onMouseEnter: () => {
                         hovered.current = true;
                         clearTimer();
                     }, onMouseLeave: () => {
@@ -102,6 +104,6 @@ export function NameCopy({ name, disabled = false }) {
                             if (copied)
                                 restoreAfterLeaving();
                         })();
-                    }, children: _jsx("span", { children: feedback === '已复制' ? '已复制' : name }) }) }), feedback && (_jsx("span", { role: "status", className: feedback === '已复制' ? 'cwn-sr-only' : 'cwn-name-copy-failure', children: feedback }))] }));
+                    }, children: _jsx("span", { children: feedback === '已复制' ? t('已复制') : name }) }) }), feedback && (_jsx("span", { role: "status", className: feedback === '已复制' ? 'cwn-sr-only' : 'cwn-name-copy-failure', children: t(feedback) }))] }));
 }
 //# sourceMappingURL=name-copy.js.map

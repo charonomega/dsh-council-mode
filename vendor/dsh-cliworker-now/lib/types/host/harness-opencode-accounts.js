@@ -1,11 +1,12 @@
 import { lstatSync, rmSync } from 'node:fs';
+import { parseAccountLoginId } from "../shared/account-links.js";
 import { mkdtemp } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openCodeAuthDirectory, openCodeEnvironment } from "./opencode-adapter.js";
 import { privateDirectory } from "./extended-adapters.js";
 import { inspectPiOmpNativeAccount } from "./pi-omp-native.js";
-import { assertOpenCodeManagedAuth, inspectOpenCodeProfile, } from "./opencode-native.js";
+import { assertOpenCodeManagedAuth, inspectOpenCodeProfile, readOpenCodeProfile, } from "./opencode-native.js";
 export async function readPiOmpAccount(cli, config, signal, options = {}) {
     const native = await inspectPiOmpNativeAccount(cli, config.stateDirectory, signal, options);
     return native;
@@ -20,7 +21,7 @@ export async function readOpenCodeAccount(config, signal, options = {}) {
     return native;
 }
 /** User-operated native terminal. No task prompt, slash command, login or logout is injected. */
-export async function prepareOpenCodeAccount(executable, action, config, signal) {
+export async function prepareOpenCodeAccount(executable, action, config, signal, target = {}) {
     signal.throwIfAborted();
     if (!['login', 'logout', 'manage'].includes(action))
         throw new Error('不支持的 OpenCode 账号操作');
@@ -61,7 +62,32 @@ export async function prepareOpenCodeAccount(executable, action, config, signal)
             permission: { '*': 'deny' },
         }, data, false);
         signal.throwIfAborted();
-        const argv = [executable, ...(action === 'manage' ? [] : ['auth', action])];
+        // A provider or one login chosen in the account window skips OpenCode's own picker.
+        const removed = target.login ? parseAccountLoginId(target.login) : undefined;
+        if (target.login && (action !== 'logout' || removed?.cli !== 'opencode' || removed.entry))
+            throw new Error('不支持单独退出该 OpenCode 账号');
+        if (action === 'logout' && removed) {
+            const profile = await readOpenCodeProfile(data, { signal });
+            const directory = profile.removableAuth[removed.provider];
+            if (!directory && Object.hasOwn(profile.auth, removed.provider))
+                throw new Error('该 OpenCode 服务商存在多处凭据或配置凭据，请在原生配置中管理');
+            if (directory) {
+                await assertOpenCodeManagedAuth(directory, signal);
+                // Keep runtime/config private; only native auth logout targets the original store.
+                // Do not create, chmod, copy, or snapshot the user's native account directory.
+                env.XDG_DATA_HOME = directory;
+            }
+        }
+        const argv = [
+            executable,
+            ...(action === 'manage'
+                ? []
+                : action === 'login' && target.provider
+                    ? ['auth', 'login', '-p', target.provider]
+                    : action === 'logout' && removed?.cli === 'opencode'
+                        ? ['auth', 'logout', removed.provider]
+                        : ['auth', action]),
+        ];
         return {
             argv: [process.execPath, fileURLToPath(new URL('./private-launch.mjs', import.meta.url)), ...argv],
             env: { ...env, ELECTRON_RUN_AS_NODE: '1' },

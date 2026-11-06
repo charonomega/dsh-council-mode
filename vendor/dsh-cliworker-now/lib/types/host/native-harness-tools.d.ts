@@ -1,3 +1,4 @@
+import type { NativeCliCapabilities } from './cli-native-capabilities.mjs';
 /** Host-private identity. Never accept an identity supplied by the CLI as authority. */
 export interface NativeHarnessBinding {
     parentSessionId: string;
@@ -12,6 +13,8 @@ export interface NativeHarnessConnection {
     binding: NativeHarnessBinding;
     /** Native permissions have explicitly admitted this exact managed bridge. */
     executionReady?: boolean;
+    /** Tool names offered when the run started, for the native-first note. */
+    tools?: string[];
 }
 export interface NativeHarnessTool {
     name: string;
@@ -62,10 +65,17 @@ export interface NativeHarnessToolsOptions {
     maxBytes?: number;
     maxCalls?: number;
     executionReady?: boolean;
+    /** The CLI's native capability table; DSH tools it covers are not offered. */
+    native?: NativeCliCapabilities;
+    /** Inline bytes for a host image result, when the CLI's MCP accepts images. */
+    resolveImage?(attachment: unknown, signal: AbortSignal): Promise<{
+        data: string;
+        mimeType: string;
+    } | undefined>;
 }
 /**
  * The scoped registry establishes availability; a familiar name or MCP prefix
- * establishes nothing. Effects and approvals still belong to tools.execute.
+ * establishes nothing. Effects and approvals still belong to the Harness tool pipeline.
  * Auxiliary model calls are additionally rejected by withinCliTool's guard.
  */
 export declare function classifyHarnessTool(name: string, visibleSchemas?: readonly {
@@ -85,12 +95,12 @@ export declare function createNativeHarnessTools(options: NativeHarnessToolsOpti
 /**
  * A lease is owned from the moment it is created. Until the caller receives the
  * returned handle, any publication failure closes the listening bridge and
- * restores the child presentation before the original error is reported.
+ * releases the executor adapter before the original error is reported.
  */
 export declare function adoptNativeHarnessLease<T extends {
     connection: unknown;
     close(): Promise<void>;
-}>(lease: T, resetPresentation: () => void, publish: () => void): Promise<{
+}>(lease: T, disposeExecutor: () => void, publish: () => void): Promise<{
     connection: T['connection'];
     close(): Promise<void>;
 }>;

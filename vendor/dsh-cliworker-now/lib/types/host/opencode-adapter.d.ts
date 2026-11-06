@@ -37,6 +37,7 @@ export declare function openCodeEnvironment(stateDirectory: string, config: Reco
     XDG_CACHE_HOME: string;
     XDG_STATE_HOME: string;
     TMPDIR: string;
+    OPENCODE_TEST_HOME: string;
     OPENCODE_DB: string;
     OPENCODE_CONFIG: string;
     OPENCODE_CONFIG_DIR: string;

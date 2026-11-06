@@ -4,13 +4,34 @@ import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { accountEmail, localTokenExpired } from "./account-identity.js";
+import { hostFetch } from './host-fetch.mjs';
 import { EFFORTS } from "../shared/types.js";
 export const GROK_MODELS_URL = 'https://cli-chat-proxy.grok.com/v1/models';
 export const GROK_SETTINGS_URL = 'https://cli-chat-proxy.grok.com/v1/settings';
 const object = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const text = (v) => typeof v === 'string' && !!v && v.length <= 32768 && !/[\x00-\x20\x7f]/.test(v);
+const READ_MESSAGES = {
+    missing: '尚未登录 Grok，请在账号终端登录',
+    format: 'Grok 凭据格式不受支持，请在账号终端重新登录',
+    unsafe: 'Grok 凭据文件未通过安全检查',
+    read: 'Grok 凭据读取失败，请刷新',
+    expired: 'Grok 登录已过期，请在账号终端重新登录',
+};
 export class GrokModelsError extends Error {
+    reason;
+    constructor(message, reason) {
+        super(message);
+        this.reason = reason;
+    }
 }
+export class GrokAccountReadError extends GrokModelsError {
+    constructor(reason) {
+        super(READ_MESSAGES[reason], reason);
+    }
+}
+/** Renew this many milliseconds before expiry; Grok itself treats an expiring token as due. */
+export const GROK_RENEW_MARGIN_MS = 5 * 60_000;
+const GROK_MIN_ACCESS_MS = 30_000;
 /** This adapter supports the fixed first-party route, not ambient provider overrides. */
 export function assertGrokNativeEnvironment(home = homedir()) {
     if (process.env.GROK_HOME?.trim() && resolve(process.env.GROK_HOME) !== resolve(home, '.grok'))
@@ -63,19 +84,39 @@ export async function readGrokOwnAccount(options = {}) {
     assertGrokNativeEnvironment(options.home);
     const buffer = Buffer.alloc(65537);
     let file;
+    const fail = (reason) => {
+        throw new GrokAccountReadError(reason);
+    };
+    const missing = (error) => error?.code === 'ENOENT';
     try {
         const root = join(await realpath(options.home ?? homedir()), '.grok');
-        const directory = await lstat(root);
+        let directory;
+        try {
+            directory = await lstat(root);
+        }
+        catch (error) {
+            if (missing(error))
+                fail('missing');
+            throw error;
+        }
         if (!directory.isDirectory() || directory.isSymbolicLink() || (await realpath(root)) !== root)
-            throw new Error();
+            fail('unsafe');
         const path = join(root, 'auth.json');
-        const location = await lstat(path);
+        let location;
+        try {
+            location = await lstat(path);
+        }
+        catch (error) {
+            if (missing(error))
+                fail('missing');
+            throw error;
+        }
         if (location.isSymbolicLink() || !location.isFile())
-            throw new Error();
+            fail('unsafe');
         file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
         const stat = await file.stat();
         if (!stat.isFile() || stat.dev !== location.dev || stat.ino !== location.ino || stat.nlink !== 1 || stat.size > 65536)
-            throw new Error();
+            fail('unsafe');
         let size = 0;
         while (size < buffer.length) {
             options.signal?.throwIfAborted();
@@ -84,27 +125,40 @@ export async function readGrokOwnAccount(options = {}) {
                 break;
             size += bytesRead;
         }
-        if (!size || size > 65536)
-            throw new Error();
+        if (size > 65536)
+            fail('unsafe');
+        if (!size)
+            fail('format');
         const current = await lstat(path);
         const after = await file.stat();
         if (current.isSymbolicLink() || current.dev !== stat.dev || current.ino !== stat.ino || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs)
-            throw new Error();
+            fail('unsafe');
         const bytes = buffer.subarray(0, size);
-        const account = selectGrokOwnAccount(JSON.parse(bytes.toString('utf8')));
-        if (!account || (!account.active && !account.refresh))
-            throw new Error();
+        let parsed;
+        try {
+            parsed = JSON.parse(bytes.toString('utf8'));
+        }
+        catch {
+            fail('format');
+        }
+        const account = selectGrokOwnAccount(parsed);
+        if (!account)
+            fail('format');
+        if (!account.active && !account.refresh)
+            fail('expired');
         options.signal?.throwIfAborted();
         const currentDirectory = await lstat(root);
         if (currentDirectory.isSymbolicLink() ||
             currentDirectory.dev !== directory.dev ||
             currentDirectory.ino !== directory.ino)
-            throw new Error();
+            fail('unsafe');
         return { ...account, fingerprint: createHash('sha256').update(bytes).digest('hex') };
     }
-    catch {
+    catch (error) {
         options.signal?.throwIfAborted();
-        throw new GrokModelsError('请先登录 Grok');
+        if (error instanceof GrokAccountReadError)
+            throw error;
+        throw new GrokAccountReadError('read');
     }
     finally {
         buffer.fill(0);
@@ -228,19 +282,36 @@ async function readPayload(response, signal) {
         reader.releaseLock();
     }
 }
-/** Fixed official Build endpoint; no redirect, OAuth refresh, fallback, or generation. */
+/** Fixed official Build endpoint; no redirect, plugin-side OAuth refresh, fallback, or generation. */
 export async function discoverGrokAccountModels(native, options = {}) {
     options.signal?.throwIfAborted();
-    const source = await readGrokOwnAccount(options);
-    if (!source.active || source.expires <= Date.now() + 30000)
-        throw new GrokModelsError('登录需要续期，请打开 Grok');
+    let source = await readGrokOwnAccount(options);
+    if (source.refresh && options.renew && (!source.active || source.expires <= Date.now() + GROK_RENEW_MARGIN_MS)) {
+        try {
+            await options.renew(options.signal ?? new AbortController().signal);
+        }
+        catch (error) {
+            options.signal?.throwIfAborted();
+            // A still valid token may carry this query; a changed or rejected account may not.
+            const usable = source.active && source.expires > Date.now() + GROK_MIN_ACCESS_MS;
+            if (!usable || !(error instanceof GrokModelsError) || ['changed', 'relogin'].includes(String(error.state)))
+                throw error;
+        }
+        options.signal?.throwIfAborted();
+        const renewed = await readGrokOwnAccount(options);
+        if (renewed.userId !== source.userId || renewed.clientId !== source.clientId)
+            throw new GrokModelsError('账号已改变，请刷新');
+        source = renewed;
+    }
+    if (!source.active || source.expires <= Date.now() + GROK_MIN_ACCESS_MS)
+        throw new GrokModelsError('Grok 登录需要续期，请在账号终端重新登录');
     const controller = new AbortController();
     const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
     const timer = setTimeout(() => controller.abort(), Math.max(50, Math.min(options.timeoutMs ?? 8000, 10000)));
     try {
         // Native 1.0.0-era remote/client.rs:715-787, xai-grok-http/src/lib.rs:247-261.
         const request = async (target) => {
-            const response = await (options.fetch ?? fetch)(target, {
+            const response = await (options.fetch ?? hostFetch)(target, {
                 method: 'GET',
                 redirect: 'error',
                 signal,

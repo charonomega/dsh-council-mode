@@ -2,12 +2,16 @@ import { replaceNativeArguments, runNativeAcp } from './native-acp.mjs'
 import { GrokResponseTracker, grokResponseUsage, grokPromptUsage, grokModelContext, grokContextStatus } from './grok-response.mjs'
 import { GrokDurableContextObserver } from './grok-durable-context.mjs'
 
+// `grok agent stdio` ignores the global permission flags before `agent`; the
+// permission rules live in the run's private config (prepareGrok). Installed
+// 1.0.62's ACP lists no modes. Full access uses the subcommand's --always-approve.
 export const grokAcpArgv = (config) =>
   replaceNativeArguments(
     config.argv,
-    ['--output-format', '--resume', '--single', '--tools'],
-    [],
-    ['agent', '--no-leader', 'stdio'],
+    ['--output-format', '--resume', '--single', '--tools', '--permission-mode'],
+    ['--always-approve', '--yolo'],
+    ['agent',
+      ...(config.mode !== 'plan' && config.access === 'danger-full-access' ? ['--always-approve'] : []), '--no-leader', 'stdio'],
   )
 
 export const runNativeGrok = (config, io) => {
@@ -19,8 +23,10 @@ export const runNativeGrok = (config, io) => {
     argv: grokAcpArgv,
     effortId: 'reasoning_effort',
     off: 'none',
-    // acceptEdits is retained in the native global argv. Never invent an ACP mode id.
+    // Ask and auto-review are set by the private config (prepareGrok); never invent an ACP mode id.
     editMode: undefined,
+    // Read-only is set by the private config; an ACP that lists modes must still confirm plan.
+    launchModes: ['plan'],
     // Installed 1.0.50 accepts the ACP scalar string. Its bundled guide still
     // shows { value }, which the live SessionConfigOptionValue decoder rejects.
     encode: (value) => value,

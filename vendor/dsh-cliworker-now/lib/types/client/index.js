@@ -1,8 +1,10 @@
 import { jsx as _jsx, Fragment as _Fragment, jsxs as _jsxs } from "react/jsx-runtime";
+import { DshConversation } from "./dsh-subagents.js";
 import { useEffect, useLayoutEffect, useRef, useSyncExternalStore } from 'react';
 import { Button, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives';
 import remoteContribution from 'dsh-cliworker-now/remote';
 import { active } from "../shared/types.js";
+import { ApprovalSessionRetention } from "./approval-session-retention.js";
 import { Panel } from "./panel.js";
 import { NativePresentationProvider } from "./native-presentation.js";
 import { HarnessConversation, readHarnessConversationBinding } from "./harness-conversation.js";
@@ -23,6 +25,8 @@ import { BrandIcon } from "./icons.js";
 import { installNativeJobOverlay } from "./native-job-overlay.js";
 import { workerManagementStyles } from "./management-styles.js";
 import { renameCopyStyles } from "./rename-copy-styles.js";
+import { installClientLocale, t, useT } from "./i18n.js";
+import { browserRootRecoveryEnv, installRootRecovery } from "./root-recovery.js";
 const ID = 'dsh-cliworker-now';
 export const inject = [
     'slots',
@@ -36,6 +40,9 @@ export const inject = [
     'uiSession',
 ];
 export function apply(ctx) {
+    installClientLocale(ctx);
+    // A live enable/disable swaps the native UI sources and can blank the page; see root-recovery.ts.
+    ctx.effect(() => installRootRecovery(browserRootRecoveryEnv(() => t('CLI Worker 刚刚启用或停用，DeepSeek Harness 需要完全退出后重新打开才能恢复界面。'), ctx)), 'cliworker:root-recovery');
     ctx.effect(() => ctx.remote.$mount(remoteContribution), 'cliworker:remote');
     ctx.inject(['remote.cliworker'], (scope) => {
         const remote = scope.remote, worker = remote.cliworker;
@@ -97,9 +104,11 @@ export function apply(ctx) {
             });
         });
         function WorkerPanel(props) {
+            useT();
+            const { tab: { visible: panelVisible } } = props.useTabInfo();
             const address = props.useSession((session) => session.subagent?.address);
             const parentSessionId = address?.parentSessionId ?? props.sessionId;
-            return (_jsx(NativePresentationProvider, { source: nativeChatSettings, children: _jsx(Panel, { ...props, sessionId: parentSessionId, activeHarnessSessionId: address?.childSessionId, renderHarnessConversation: (worker) => (_jsx(HarnessConversation, { services: harnessServices, bindings: bindings, attachProjections: nativeTelemetry.attach, api: api, parentSessionId: parentSessionId, worker: worker, renderConversation: (reference) => (_jsx(props.SessionProvider, { session: reference, children: props.renderSlot('cliworker.native.sidebar', { composerPresentation: 'main', commandSource: HARNESS_COMMAND_SOURCE,
+            return (_jsx(NativePresentationProvider, { source: nativeChatSettings, children: _jsx(Panel, { ...props, sessionId: parentSessionId, visible: panelVisible, activeHarnessSessionId: address?.childSessionId, renderSessionRetention: (workers) => (_jsx(ApprovalSessionRetention, { services: harnessServices, parentSessionId: parentSessionId, workers: workers })), renderDshConversation: (child) => (_jsx(DshConversation, { services: scope, child: child, api: api, renderConversation: (reference) => (_jsx(props.SessionProvider, { session: reference, children: props.renderSlot('cliworker.native.sidebar', { composerPresentation: 'main' }) })) }, child.id)), renderHarnessConversation: (worker) => (_jsx(HarnessConversation, { services: harnessServices, bindings: bindings, attachProjections: nativeTelemetry.attach, api: api, parentSessionId: parentSessionId, worker: worker, renderConversation: (reference) => (_jsx(props.SessionProvider, { session: reference, children: props.renderSlot('cliworker.native.sidebar', { composerPresentation: 'main', commandSource: HARNESS_COMMAND_SOURCE,
                                 childImageUploads: worker.harnessConversation?.capabilities.attachments === true }) })) }, worker.id)) }) }));
         }
         let nativeSettingsOpen;
@@ -168,7 +177,7 @@ export function apply(ctx) {
                     id: 'cliworker',
                     order: 25,
                     title: () => 'CLI Worker',
-                    description: () => '查看各 CLI 子 Agent 的实时工作',
+                    description: () => t('查看各 CLI 子 Agent 的实时工作'),
                     icon: () => _jsx(BrandIcon, {}),
                 },
             ],
@@ -181,13 +190,14 @@ export function apply(ctx) {
                 api,
                 openNativeSettings: () => {
                     if (!nativeSettingsOpen)
-                        throw new Error('Harness 原生设置入口暂不可用');
+                        throw new Error(t('Harness 原生设置入口暂不可用'));
                     nativeSettingsOpen();
                 },
             }),
         }, WorkerPanel)));
         scope.effect(() => installHarnessNativeContent(scope));
         function Header({ sessionId, useSession }) {
+            useT();
             const workerForks = useSyncExternalStore(subscribeForks, getForks);
             const address = useSession((session) => session.subagent?.address);
             const parentSessionId = address?.parentSessionId ?? sessionId;
@@ -225,7 +235,7 @@ export function apply(ctx) {
                     open();
                 }
             }, [snapshot, address]);
-            return (_jsxs(_Fragment, { children: [_jsx(HarnessNativeSessionSupports, { bindings: bindings, conversation: scope.conversation, forks: workerForks, api: api }), workerForks && _jsx(HarnessForkNotice, { forks: workerForks }), _jsx(Tooltip, { label: "\u6253\u5F00 CLI Worker", side: "bottom", portal: true, children: _jsx(Button, { variant: "ghost", size: "sm", "aria-label": "\u6253\u5F00 CLI Worker", className: "cwn-entry", icon: _jsx(BrandIcon, { size: 16 }), onClick: open }) })] }));
+            return (_jsxs(_Fragment, { children: [_jsx(HarnessNativeSessionSupports, { bindings: bindings, conversation: scope.conversation, forks: workerForks, api: api }), workerForks && _jsx(HarnessForkNotice, { forks: workerForks }), _jsx(Tooltip, { label: t('打开 CLI Worker'), side: "bottom", portal: true, children: _jsx(Button, { variant: "ghost", size: "sm", "aria-label": t('打开 CLI Worker'), className: "cwn-entry", icon: _jsx(BrandIcon, { size: 16 }), onClick: open }) })] }));
         }
         scope.effect(() => scope.slots.inject('conversation.session.header.utilities', () => scope.slots.register({ name: 'conversation.session.header.utilities', id: ID, order: -20 }, Header)));
     });

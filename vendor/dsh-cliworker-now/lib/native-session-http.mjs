@@ -1,9 +1,12 @@
+import { summarizeNativeRecord } from './native-transport.mjs'
 import { randomBytes } from 'node:crypto'
 import { resolve } from 'node:path'
 import { realpath } from 'node:fs/promises'
 import { nativeHttpEndpoint, startHttpContextRelay } from './http-context-relay.mjs'
 import { NativeBlockResponses, sessionHttpResponseUsage, sessionHttpSessionUsage } from './http-rpc-response.mjs'
-import { HARNESS_MCP_SERVER } from './native-harness-injection.mjs'
+import { HARNESS_MCP_SERVER, nativeHarnessGuidance } from './native-harness-injection.mjs'
+import { createToolOutcomes } from './native-tool-outcomes.mjs'
+import { nativeSkillPaths } from './cli-native-capabilities.mjs'
 import { readNativeHarnessConnection } from './native-harness-mcp.mjs'
 import {
   deferred,
@@ -24,22 +27,39 @@ function selection(config) {
     modelID: config.preference.model.slice(slash + 1),
   }
 }
-function serverConfiguration(config, cli) {
+const HTTP_KINDS = { bash: 'command', edit: 'file', write: 'file', webfetch: 'network', websearch: 'network' }
+/** Public summary of one permission.asked event for the DSH prompt. */
+export function sessionHttpApprovalRequest(properties) {
+  const permission = string(properties.permission) ? properties.permission : '工具调用'
+  const patterns = Array.isArray(properties.patterns) ? properties.patterns.filter(string) : []
+  return {
+    kind: HTTP_KINDS[permission] ?? 'tool',
+    summary: permission.slice(0, 500),
+    ...(patterns.length ? { detail: patterns.join('\n').slice(0, 4000) } : {}),
+    allowSession: false,
+  }
+}
+export function serverConfiguration(config, cli) {
   const name = cli === 'mimo' ? 'MIMOCODE' : 'OPENCODE'
   const environment = config.env ?? process.env
   const raw = environment[`${name}_CONFIG_CONTENT`]
   const previous = raw ? JSON.parse(raw) : {}
   if (!object(previous)) throw new Error('原生 HTTP 配置无效')
+  // Full access allows every native tool; task/question stay off. A skill only loads
+  // the user's own instructions, so it is allowed in every tier.
+  const full = config.mode !== 'plan' && config.access === 'danger-full-access'
   const permission = {
-    '*': 'ask',
+    '*': full ? 'allow' : 'ask',
     read: 'allow',
     glob: 'allow',
     grep: 'allow',
     list: 'allow',
-    edit: config.mode === 'plan' ? 'deny' : 'allow',
-    bash: config.mode === 'plan' ? 'deny' : 'ask',
+    // MiMo starts from ask rules; only its verified native skip-all enables auto.
+    edit: config.mode === 'plan' ? 'deny' : full || (cli === 'opencode' && config.access !== 'read-only') ? 'allow' : 'ask',
+    bash: config.mode === 'plan' ? 'deny' : full ? 'allow' : 'ask',
+    ...(config.mode !== 'plan' ? { external_directory: full ? 'allow' : 'ask' } : {}),
     task: 'deny',
-    skill: 'deny',
+    skill: 'allow',
     question: 'deny',
     ...(readNativeHarnessConnection(environment)?.executionReady === true ? { [`${HARNESS_MCP_SERVER}_*`]: 'allow' } : {}),
   }
@@ -47,16 +67,74 @@ function serverConfiguration(config, cli) {
     ...config,
     env: {
       ...environment,
+      // Instance switches below are the only source of MiMo runtime auto-allow.
+      ...(cli === 'mimo' ? { MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS: '0', MIMOCODE_AUTO_APPROVE_DELETE: '0' } : {}),
       [`${name}_CONFIG_CONTENT`]: JSON.stringify({
         ...previous,
         model: config.preference.model,
         small_model: config.preference.model,
         enabled_providers: [selection(config).providerID],
+        // OpenCode's Host launch already lists the roots; MiMo keeps the user's config dirs.
+        ...(cli === 'mimo' ? { skills: { paths: nativeSkillPaths('mimo', { env: environment, project: config.project }) } } : {}),
         permission,
       }),
       [`${name}_PERMISSION`]: JSON.stringify(permission),
     },
   }
+}
+
+async function configureMimoPermissions(config, request, query, io) {
+  const full = config.mode !== 'plan' && config.access === 'danger-full-access'
+  const auto = config.mode !== 'plan' && config.access === 'workspace-write'
+  const missing = (error) => error?.status === 404 || error?.status === 405
+  const setSwitch = async (name, enabled) => {
+    const path = `/permission/${name}${query}`
+    let receipt
+    try { receipt = await request(path, 'POST', { enabled }) }
+    catch (error) {
+      if (missing(error)) return false
+      throw error
+    }
+    if (receipt !== enabled) throw new Error(`MiMo ${name} 设置回执不一致`)
+    let state
+    try { state = await request(path) }
+    catch (error) {
+      // Older builds may expose only the setter; its boolean receipt is required.
+      if (missing(error)) return true
+      throw error
+    }
+    if (state !== enabled) throw new Error(`MiMo ${name} 状态回读不一致`)
+    return true
+  }
+  if (full) {
+    for (const name of ['skip-all', 'auto-approve-delete']) {
+      try {
+        if (await setSwitch(name, true)) continue
+      } catch { /* Full access keeps its native allow rules if an extra switch fails. */ }
+      io.event({ kind: 'diagnostic', text: `MiMo 原生 ${name} 不可用，保留全部 allow 规则；仍可能出现原生确认。` })
+    }
+    return
+  }
+  // Every owned instance starts with both environment bypasses disabled. A
+  // missing route cannot enable it; an existing route must confirm the reset.
+  try {
+    await setSwitch('auto-approve-delete', false)
+    await setSwitch('skip-all', false)
+  } catch {
+    throw new Error('MiMo 原生审批开关无法确认关闭，不能安全按询问或规划运行')
+  }
+  if (!auto) return
+  let mayBeEnabled = true
+  try {
+    if (await setSwitch('skip-all', true)) return
+    mayBeEnabled = false
+  } catch { /* Reset before falling back, including an ambiguous enable receipt. */ }
+  try {
+    if (!await setSwitch('skip-all', false) && mayBeEnabled) throw new Error('MiMo skip-all 关闭未确认')
+  } catch {
+    throw new Error('MiMo 原生自动审批不可用且无法确认关闭，不能安全降级为询问')
+  }
+  io.event({ kind: 'diagnostic', text: 'MiMo 原生自动审批不可用，本轮按询问运行。' })
 }
 function assertModel(catalog, selected, effort) {
   if (!object(catalog) || !Array.isArray(catalog.all)) throw new Error('原生 HTTP 模型目录无效')
@@ -142,7 +220,8 @@ export async function runNativeSessionHttp(original, io, cli) {
   let activeResponse
   let active = false,
     terminal = false,
-    toolFailed = false,
+    unfinishedTool = false,
+    toolOutcomes = createToolOutcomes(),
     permissionDenied = false,
     step = 0
   const abortRun = () =>
@@ -180,6 +259,7 @@ export async function runNativeSessionHttp(original, io, cli) {
       responses.event(part.messageID, part.id, { kind: 'assistant', step: assistantSteps.get(key), text: delta,
         ...(Number.isFinite(part.time?.end) ? { state: 'COMPLETED' } : { state: 'RUNNING' }) })
     response += delta
+    if (delta.trim()) toolOutcomes.succeeded()
   }
   const reasoning = (part) => {
     const current = reasoningText.get(part.id) ?? ''
@@ -189,8 +269,10 @@ export async function runNativeSessionHttp(original, io, cli) {
     reasoningText.set(part.id, detail)
     if (!detail) return
     if (!reasoningSteps.has(part.id)) reasoningSteps.set(part.id, ++step)
+    // Growth since the last shown text is an increment; completion sends one snapshot.
     responses.event(part.messageID, part.id, {
-      kind: 'reasoning', step: reasoningSteps.get(part.id), text: '原生公开思考', detail,
+      kind: 'reasoning', step: reasoningSteps.get(part.id), text: '原生公开思考',
+      ...(Number.isFinite(part.time?.end) ? { detail } : { delta: detail.slice(current.length) }),
       state: Number.isFinite(part.time?.end) ? 'COMPLETED' : 'RUNNING',
     })
   }
@@ -198,17 +280,22 @@ export async function runNativeSessionHttp(original, io, cli) {
     const state = part.state
     if (!object(state) || !['pending', 'running', 'completed', 'error'].includes(state.status))
       throw new Error('原生工具状态无效')
-    if (state.status === 'error') toolFailed = true
     if (previous?.type === 'tool' && JSON.stringify(previous.state) === JSON.stringify(state)) return
+    if (state.status === 'error') toolOutcomes.failed(part.id)
+    else if (state.status === 'completed' && previous?.state?.status !== 'completed') toolOutcomes.succeeded()
     if (!toolSteps.has(part.id)) toolSteps.set(part.id, ++step)
+    const { input: _input, output, ...metadata } = state
+    const prior = previous?.state?.output ?? ''
+    const increment = ['pending', 'running'].includes(state.status) && typeof output === 'string' && typeof prior === 'string' && output.startsWith(prior)
     responses.event(part.messageID, part.id, {
       kind: 'tool', text: part.tool ?? '工具', step: toolSteps.get(part.id),
       state: state.status === 'completed' ? 'COMPLETED' : state.status === 'error' ? 'FAILED' : 'RUNNING',
-      detail: JSON.stringify(state),
+      detail: JSON.stringify(metadata),
+      ...(increment ? { delta: output.slice(prior.length) } : {}),
       toolCall: { callId: typeof part.callID === 'string' ? part.callID : part.id,
         ...(typeof part.tool === 'string' ? { name: part.tool } : {}),
         ...(Object.hasOwn(state, 'input') ? { input: state.input } : {}),
-        ...(Object.hasOwn(state, 'output') ? { output: state.output } : {}),
+        ...(!increment && Object.hasOwn(state, 'output') ? { output } : {}),
         ...(typeof state.input?.command === 'string' ? { command: state.input.command } : {}) },
     })
   }
@@ -219,6 +306,16 @@ export async function runNativeSessionHttp(original, io, cli) {
     if (event.type === 'permission.asked' || event.type === 'question.asked') {
       if (terminal || !submitted) throw new Error('轮次之外收到原生审批请求')
       if (!string(properties.id)) throw new Error('原生审批身份缺失')
+      if (event.type === 'permission.asked') {
+        // The Host decides from the DSH preset and user. `always` outlives this
+        // session in some builds, so only a one-time allow is sent.
+        const answer = await io.approval(sessionHttpApprovalRequest(properties))
+        if (answer.decision !== 'deny') {
+          io.event({ kind: 'diagnostic', text: '原生额外授权已批准' })
+          await request(`/permission/${encodeURIComponent(properties.id)}/reply${query}`, 'POST', { reply: 'once' })
+          return
+        }
+      }
       permissionDenied = true
       io.event({ kind: 'diagnostic', text: '原生额外授权已拒绝', detail: JSON.stringify(properties) })
       await request(
@@ -227,7 +324,7 @@ export async function runNativeSessionHttp(original, io, cli) {
           : `/question/${encodeURIComponent(properties.id)}/reject${query}`,
         'POST',
         event.type === 'permission.asked'
-          ? { reply: 'reject', message: 'CLI Worker 尚未提供此额外授权交互。' }
+          ? { reply: 'reject', message: 'DSH 未批准此授权。' }
           : {},
       )
       return
@@ -293,7 +390,7 @@ export async function runNativeSessionHttp(original, io, cli) {
               kind: 'reasoning',
               step: reasoningSteps.get(properties.partID),
               text: '原生公开思考',
-              detail,
+              delta: properties.delta,
               state: 'RUNNING',
             })
           }
@@ -319,8 +416,9 @@ export async function runNativeSessionHttp(original, io, cli) {
         // Only the explicitly public text/time identity enters our raw stream.
         io.native(part.type === 'reasoning' ? { type: event.type, properties: {
           part: { id: part.id, messageID: part.messageID, sessionID: part.sessionID,
-            type: part.type, text: part.text, ...(part.time ? { time: part.time } : {}) },
-        } } : event)
+            type: part.type, text: summarizeNativeRecord(part.text, 0), ...(part.time ? { time: part.time } : {}) },
+        } } : part.type === 'tool' && part.state?.output !== undefined
+          ? { ...event, properties: { ...properties, part: { ...part, state: { ...part.state, output: summarizeNativeRecord(part.state.output, 0) } } } } : event)
       }
       return
     }
@@ -410,6 +508,9 @@ export async function runNativeSessionHttp(original, io, cli) {
     if (Number.isSafeInteger(model.limit?.context) && model.limit.context > 0)
       io.native({ type: 'cliworker.model_context', scope: 'model',
         source: `${cli}.provider.limit.context`, ...selected, contextCapacity: model.limit.context })
+    // Apply to the final owned instance after optional context-relay restarts,
+    // before creating or resuming a session and before sending any prompt.
+    if (cli === 'mimo') await configureMimoPermissions(config, request, query, io)
     let initialSession
     if (config.conversationId) {
       if (!/^ses_[A-Za-z0-9]+$/.test(config.conversationId)) throw new Error('原生会话身份格式无效')
@@ -445,11 +546,14 @@ export async function runNativeSessionHttp(original, io, cli) {
     streamTask.catch((error) => finished.reject(error))
     io.signal?.throwIfAborted()
     submitted = true
+    const guidance = nativeHarnessGuidance({ ...config, cli })
     const accepted = await request(`/session/${encodeURIComponent(sessionID)}/prompt_async${query}`, 'POST', {
       messageID: userID,
       model: selected,
       agent: config.mode === 'plan' ? 'plan' : 'build',
       ...(config.preference.effort === 'default' ? {} : { variant: config.preference.effort }),
+      // Added after the native agent prompt; MiMo keeps the first turn's value.
+      ...(guidance ? { system: guidance, ...(cli === 'mimo' ? { systemMode: 'append' } : {}) } : {}),
       parts: inputParts,
     })
     if (accepted !== undefined) throw new Error('原生 HTTP 没有返回预期的任务受理回执')
@@ -494,23 +598,24 @@ export async function runNativeSessionHttp(original, io, cli) {
         parts.set(part.id, part)
       }
       responses.finish(info.id, sessionHttpResponseUsage(info.tokens))
-      if (row.parts.some((part) => part.type === 'tool' && part.state?.status !== 'completed'))
-        toolFailed = true
+      if (row.parts.some((part) => part.type === 'tool' && !['completed', 'error'].includes(part.state?.status)))
+        unfinishedTool = true
       io.native({ type: 'message.updated', properties: { info } })
     }
     const last = current.at(-1)
     if (last.info.finish !== 'stop') throw new Error('原生轮次未正常完成')
-    if ([...parts.values()].some((part) => part.type === 'tool' && part.state?.status !== 'completed'))
-      toolFailed = true
+    if ([...parts.values()].some((part) => part.type === 'tool' && !['completed', 'error'].includes(part.state?.status)))
+      unfinishedTool = true
+
     // The run aggregate is the exact concatenation of public segments. Message
     // boundaries live in their steps; synthetic separators must not enter them.
     const finalText = current.map((row) => textParts(row.parts)).join('')
     response = finalText || response
     await readSessionUsage()
     signal.throwIfAborted()
-    if (toolFailed || permissionDenied || failure)
-      throw new Error(failure ?? (permissionDenied ? '原生额外授权已拒绝' : '原生工具执行失败'))
-    io.result('SUCCESS', response, undefined, 'run')
+    if (failure) throw new Error(failure)
+    if (unfinishedTool) throw new Error('原生轮次结束时仍有未完成工具')
+    toolOutcomes.settle(io, response, 'run', permissionDenied)
   } catch (error) {
     if (submitted && !terminal && !stopped) await abortRun()
     throw error

@@ -2,21 +2,26 @@ import { StringDecoder } from 'node:string_decoder';
 import { pickPublicToolCall } from "./public-tool-projection.js";
 import { parseNativeResponse } from './native-response.mjs';
 import { parseRequestState } from "./native-request-state.js";
+import { parseNativeApprovalRequest } from "./native-approval-policy.js";
 /** Internal framing for owned native transports; never accepts arbitrary event kinds. */
 export class BridgeProtocol {
     emit;
     identify;
     maxLineBytes;
+    approval;
     decoder = new StringDecoder('utf8');
     pending = '';
     requestSequence = 0;
     nativeRunId;
     conversationId;
     result;
-    constructor(emit, identify, maxLineBytes) {
+    constructor(emit, identify, maxLineBytes, 
+    /** Host relay for native authorization requests; absent runs keep the runner's denial. */
+    approval) {
         this.emit = emit;
         this.identify = identify;
         this.maxLineBytes = maxLineBytes;
+        this.approval = approval;
     }
     feed(chunk) {
         this.pending += typeof chunk === 'string' ? chunk : this.decoder.write(chunk);
@@ -76,11 +81,21 @@ export class BridgeProtocol {
                 ...(Number.isInteger(e.step) ? { step: e.step } : {}),
                 ...(typeof e.state === 'string' ? { state: e.state } : {}),
                 ...(typeof e.detail === 'string' ? { detail: e.detail } : {}),
+                ...((e.kind === 'tool' || e.kind === 'reasoning') && typeof e.delta === 'string' && e.delta ? { delta: e.delta } : {}),
+                ...(e.truncated === true ? { truncated: true } : {}),
+                ...(Number.isSafeInteger(e.outputBytes) && e.outputBytes > 0 ? { outputBytes: e.outputBytes } : {}),
                 ...(typeof e.observedModel === 'string' ? { observedModel: e.observedModel } : {}),
+                ...(e.kind === 'diagnostic' && e.notice === true ? { notice: true } : {}),
                 ...(e.response === undefined ? {} : { response: parseNativeResponse(e.response) }),
                 ...(e.kind === 'tool' && pickPublicToolCall(e.toolCall)
                     ? { toolCall: pickPublicToolCall(e.toolCall) } : {}),
             });
+        }
+        else if (v.type === 'approval') {
+            if (typeof v.id !== 'string' || !/^approval-\d{1,6}$/.test(v.id))
+                throw new Error('Invalid approval frame');
+            const request = parseNativeApprovalRequest(v.request);
+            this.approval?.(v.id, request);
         }
         else if (v.type === 'result') {
             if (!this.conversationId && v.status === 'ERROR' && typeof v.error === 'string')
@@ -94,6 +109,8 @@ export class BridgeProtocol {
                 status: v.status,
                 response: v.response,
                 error: typeof v.error === 'string' ? v.error : undefined,
+                ...(v.status === 'SUCCESS' && typeof v.notice === 'string' && v.notice
+                    ? { notice: v.notice.slice(0, 2000) } : {}),
             };
             this.emit({ kind: 'result', text: v.response, state: v.status,
                 ...(v.resultScope === 'run' || v.resultScope === 'response' ? { resultScope: v.resultScope } : {}),

@@ -3,19 +3,23 @@
 import { NativeBlockResponses, piOmpResponseUsage, piOmpReportedUsage } from './http-rpc-response.mjs'
 import { OmpContextInspection } from './omp-context-inspection.mjs'
 import { PI_CONTEXT_ENV, preparePiContextObserver, readPiContextObservation } from './pi-context-observer.mjs'
+import { PI_GATE_ENV, preparePiPermissionGate, readPiGateConfirm } from './pi-permission-gate.mjs'
+import { createEventBudget, summarizeNativeRecord } from './native-transport.mjs'
 import { spawnNativeProcess } from './native-spawn.mjs'
+import { createToolOutcomes, LAST_TOOL_FAILED, recoveredNotice } from './native-tool-outcomes.mjs'
 import { createHash, randomBytes } from 'node:crypto'
 import { mkdir, writeFile, rename, realpath, unlink, rmdir, lstat, open, rm } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
-import { ompConfigurationEnvironment } from './pi-omp-environment.mjs'
+import { ompConfigurationEnvironment, ompPermissionSettings, probeOmpApprovalModes, OMP_APPROVAL_UNAVAILABLE } from './pi-omp-environment.mjs'
 import { readFile } from 'node:fs/promises'
 import { nativeLaunchArgv } from './native-launch.mjs'
 import { ownsOwnAccountLease, OWN_ACCOUNT_BUSY } from './own-account-lease.mjs'
 import { assertPiOmpRefreshSources, assertPiOmpRefreshCache } from './pi-omp-refresh.mjs'
-import { receivePiOmpControl, receiveNativeStopControl } from './pi-omp-control.mjs'
+import { receivePiOmpControl, receiveNativeStopControl, receiveNativeApprovalControl } from './pi-omp-control.mjs'
 import { HARNESS_CONNECTION_ENV, readNativeHarnessConnection } from './native-harness-mcp.mjs'
 import { prepareNativeHarnessExtension } from './native-harness-extension.mjs'
+import { nativeFirstGuidance, piOmpNativeTools } from './cli-native-capabilities.mjs'
 import {
   queryNativeCandidates,
   snapshotNativeCandidates,
@@ -23,14 +27,19 @@ import {
 } from './pi-native-catalog.mjs'
 
 process.umask(0o077)
-const output = (value) => process.stdout.write(JSON.stringify(value) + '\n')
-const event = (value) => output({ type: 'event', event: value })
+const output = (value) => process.stdout.write(JSON.stringify(value.type === 'native' ? { ...value, record: summarizeNativeRecord(value.record) } : value) + '\n')
+let eventBudget
+const event = (value) => {
+  const shown = eventBudget ? eventBudget(value) : value
+  if (shown) output({ type: 'event', event: shown })
+}
 const safeErrors = new Set([
   '任务已停止',
   '所选模型或强度不在原生可用目录中',
   '无法读取 Pi/OMP 原生模型目录，请检查本机配置',
   OWN_ACCOUNT_BUSY,
   '账号配置已变化，请重新刷新模型',
+  OMP_APPROVAL_UNAVAILABLE,
 ])
 const errorMessage = (error) =>
   error instanceof Error && safeErrors.has(error.message)
@@ -100,12 +109,39 @@ let child,
   finalized = false,
   controlReceiver,
   stopReceiver,
+  approvalReceiver,
+  approvalSequence = 0,
+  permissionDenied = false,
+  /** Pi's tool_call gate for this run: prepared, `false` when the install cannot ask, or unused. */
+  permissionGate,
   nativeStop,
   closeGuidance = () => {}
+const toolOutcomes = createToolOutcomes()
+// Pending OMP and Pi gate approvals relayed to the Host, by bridge id; each settles exactly once.
+const approvals = new Map()
+/**
+ * OMP 16.4.4 asks for write/edit/bash approval as an RPC `select` titled "Allow tool: <name>"
+ * with exactly Approve/Deny. Anything else stays an unanswerable interactive request.
+ */
+function ompApprovalRequest(value) {
+  if (config?.cli !== 'omp' || value.method !== 'select' || typeof value.title !== 'string') return
+  const options = Array.isArray(value.options) ? value.options : []
+  if (options.length !== 2 || !options.includes('Approve') || !options.includes('Deny')) return
+  const [first, ...rest] = value.title.split('\n')
+  const tool = /^Allow tool: (.+)$/.exec(first)?.[1]?.trim()
+  if (!tool) return
+  return {
+    kind: tool === 'bash' ? 'command' : ['write', 'edit'].includes(tool) ? 'file' : 'tool',
+    summary: first.slice(0, 500),
+    ...(rest.join('\n').trim() ? { detail: rest.join('\n').trim().slice(0, 4000) } : {}),
+    allowSession: false,
+  }
+}
 const metadataController = new AbortController()
 const stop = (reason) => {
   failure ??= reason
   closeGuidance()
+  for (const settle of [...approvals.values()]) settle('deny')
   const terminate = () => {
     child?.stdin?.end()
     child?.kill('SIGTERM')
@@ -160,10 +196,17 @@ try {
   const harnessTools = readNativeHarnessConnection()
   const requestPath = process.argv[2]
   config = JSON.parse(await privateFile(requestPath, true))
+  config.maxLineBytes ??= 1_048_576
+  config.maxRunBytes ??= 16_777_216
+  config.maxNativeLineBytes ??= config.maxLineBytes
+  eventBudget = createEventBudget(config, value => output({ type: 'event', event: value }))
+  const inboundError = `原生 CLI 单个入站协议帧超过上限（${config.maxNativeLineBytes} 字节），已停止运行`
+  safeErrors.add(inboundError)
   await unlink(requestPath)
   if (!config.controlNonce) await rmdir(dirname(requestPath))
   if (
     !['pi', 'omp'].includes(config.cli) ||
+    (config.access !== undefined && !['read-only', 'workspace-write', 'danger-full-access'].includes(config.access)) ||
     typeof config.executable !== 'string' ||
     !isAbsolute(config.stateDirectory)
   )
@@ -176,6 +219,17 @@ try {
       metadataController.abort()
       await stop('任务已停止')
     })
+  if (config.approvalNonce) {
+    if (config.approvalDirectory !== join(dirname(requestPath), 'approval'))
+      throw new Error('Unbound native approval control')
+    approvalReceiver = await receiveNativeApprovalControl(config.approvalDirectory, config.approvalNonce, async (message, id) => {
+      const settle = approvals.get(id)
+      if (!settle) throw new Error('Unknown native approval')
+      let value
+      try { value = JSON.parse(message) } catch {}
+      settle(['allow-once', 'allow-session', 'deny'].includes(value?.decision) ? value.decision : 'deny')
+    })
+  }
   if (config.leaseDirectory) {
     if (typeof config.nativeRoot !== 'string' || dirname(config.nativeRoot) !== config.leaseDirectory)
       throw new Error('Invalid shared account directory')
@@ -250,6 +304,13 @@ try {
   // Pi's SDK is loaded in this process and consults process.env itself. Apply
   // the same own-source environment before importing it, not only at spawn.
   process.env = env
+  const ompPermissions = config.cli === 'omp'
+    ? ompPermissionSettings(config.access, config.discover || config.metadataPhase
+      ? ['always-ask', 'write', 'yolo']
+      : await probeOmpApprovalModes(config.executable, metadataController.signal))
+    : undefined
+  if (stopped) throw new Error('任务已停止')
+  if (ompPermissions?.notice) event({ kind: 'status', text: ompPermissions.notice })
   const isolated =
     config.cli === 'pi'
       ? [
@@ -268,7 +329,7 @@ try {
           '--no-lsp',
           '--no-pty',
           '--approval-mode',
-          'write',
+          ompPermissions.mode,
           '--config',
           join(nativeRoot, 'config.yml'),
         ]
@@ -279,7 +340,7 @@ try {
     await writePrivateFile(
       join(nativeRoot, 'config.yml'),
       JSON.stringify({
-        ...nativeAuth,
+        ...Object.fromEntries(Object.entries(nativeAuth).filter(([key]) => key !== 'tools' && !key.startsWith('tools.'))),
         startup: { setupWizard: false, checkUpdate: false, showSplash: false },
         disabledProviders: [
           'native',
@@ -296,13 +357,17 @@ try {
         ],
         mcp: { enableProjectConfig: false },
         retry: { modelFallback: false },
+        // OMP rebuilds its memory files from this private agent.db (which holds
+        // the account): a shared directory would be overwritten by each store.
         memory: { backend: 'off' },
-        tools: { approvalMode: 'write' },
+        tools: ompPermissions.tools,
       }),
     )
   }
   let resume
   let catalog
+  // Counts only: how many credentials the provider rejected. No IDs or secrets.
+  const scopeReport = { authenticationDenied: 0 }
   if (config.metadataPhase === 'native-candidates') {
     const candidates = await queryNativeCandidates(
       config.cli,
@@ -343,6 +408,7 @@ try {
     }
     catalog = await accountSupportedChoices(config.cli, nativeRoot, candidates, env, {
       signal: metadataController.signal,
+      report: scopeReport,
     })
   } else {
     catalog = config.confirmedCatalog
@@ -351,7 +417,10 @@ try {
   if (stopped || failure) throw new Error('任务已停止')
   if (finalized) {
     // Candidate phase has no account networking or model execution.
-  } else if (config.discover || config.metadataPhase === 'account-scope') {
+  } else if (config.metadataPhase === 'account-scope') {
+    output({ phase: 'account-scope', models: catalog, authenticationDenied: scopeReport.authenticationDenied })
+    finalized = true
+  } else if (config.discover) {
     output(catalog)
     finalized = true
   } else {
@@ -402,15 +471,29 @@ try {
       ? await nativeAttachmentInput('pi', config.prompt, config.attachments, metadataController.signal)
       : { message: await nativeAttachmentInput('text', config.prompt, config.attachments, metadataController.signal) }
     const harnessExtension = await prepareNativeHarnessExtension(harnessTools, { signal: metadataController.signal })
-    const tools = config.cli === 'pi' ? ['read', 'grep', 'find', 'ls'] : ['read', 'grep', 'glob']
-    if (config.mode === 'accept-edits') tools.push('write', 'edit')
-    tools.push(...harnessExtension.tools)
+    // Pi asks through the plugin's tool_call gate. An install without that hook
+    // runs stricter: 询问 reads only, 自动批准编辑 edits without commands.
+    delete env[PI_GATE_ENV]
+    permissionGate = config.cli === 'pi' && config.mode === 'accept-edits' && config.access !== 'danger-full-access'
+      ? (await preparePiPermissionGate(config.executable, config.access, harnessExtension.tools)) ?? false
+      : undefined
+    if (permissionGate) Object.assign(env, permissionGate.env)
+    else if (permissionGate === false) {
+      if (config.access === 'read-only') config.mode = 'plan'
+      event({ kind: 'status', text: config.access === 'read-only'
+        ? 'Pi 当前安装版不支持工具确认，本轮按只读运行'
+        : 'Pi 当前安装版不支持工具确认，本轮只自动批准编辑，不执行命令' })
+    }
+    const tools = [...piOmpNativeTools(config.cli, config.mode, config.access, permissionGate !== false), ...harnessExtension.tools]
+    // Pi's addendum keeps its native preamble; the note names the extension tools Pi sees.
+    const guidance = nativeFirstGuidance(harnessExtension.tools)
     const nativeArgs = [
       '--mode',
       'rpc',
       ...isolated,
       ...harnessExtension.argv,
       ...contextObserver.argv,
+      ...(permissionGate ? permissionGate.argv : []),
       '--provider',
       selectedProvider,
       '--model',
@@ -420,6 +503,7 @@ try {
         : ['--thinking', config.preference.effort === 'none' ? 'off' : config.preference.effort]),
       '--tools',
       tools.join(','),
+      ...(guidance ? ['--append-system-prompt', guidance] : []),
       ...(resume ? [config.cli === 'pi' ? '--session' : '--resume', resume] : []),
     ]
     const launch = nativeLaunchArgv([config.executable, ...nativeArgs])
@@ -431,8 +515,6 @@ try {
       stdio: config.cli === 'pi' ? ['pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe'],
     })
     let pending = '',
-      bytes = 0,
-      stderrBytes = 0,
       settled = false,
       finalState = false,
       sent = false,
@@ -463,12 +545,12 @@ try {
       let block = thinkingBlocks.get(key)
       if (!block) {
         if (!text) return
-        block = { messageKey, index, step: thinkingBlocks.size, text: '', emittedAt: 0 }
+        block = { messageKey, index, step: thinkingBlocks.size, text: '', emitted: '', emittedAt: 0 }
         thinkingBlocks.set(key, block)
       }
       block.text = text
       block.state = state
-      // Native token deltas can be tiny. Bound live snapshot frequency while
+      // Native token deltas can be tiny. Coalesce live increments while
       // always delivering the authoritative completed block immediately.
       const now = Date.now()
       if (!force && state === 'RUNNING' && now - block.emittedAt < 200) return
@@ -478,9 +560,10 @@ try {
         kind: 'reasoning',
         step: block.step,
         text: `${config.cli === 'pi' ? 'Pi' : 'OMP'} 公开思考`,
-        detail: text,
+        ...(state === 'RUNNING' && text && text.startsWith(block.emitted) ? { delta: text.slice(block.emitted.length) } : { detail: text }),
         state,
       }, index)
+      block.emitted = text
     }
     const toolSteps = new Map()
     const send = (value) => {
@@ -594,6 +677,20 @@ try {
       session = { id: state.sessionId, path: resolve(state.sessionFile) }
     }
     let contextSequence = 0
+    // A gated Pi turn starts only after the gate reports its hook registered;
+    // without that record nothing would ask before a write or command.
+    let stateReady = false, gateReady = false, gateTimer
+    const sendPrompt = () => {
+      if (!stateReady || sent || stopped || failure) return
+      if (permissionGate && !gateReady) {
+        gateTimer ??= setTimeout(() => stop('Pi 权限确认扩展未加载，本轮未开始'), 5000)
+        return
+      }
+      clearTimeout(gateTimer)
+      sent = true
+      requestLiveStats()
+      send({ id: 'prompt', type: 'prompt', ...attachmentInput })
+    }
     const consume = (value) => {
       if (!value || typeof value !== 'object' || typeof value.type !== 'string')
         throw new Error('Invalid native RPC record')
@@ -727,11 +824,8 @@ try {
             text: `${config.cli === 'pi' ? 'Pi' : 'OMP'} 原生模型已确认`,
             observedModel: `${value.data.model.provider}/${value.data.model.id}`,
           })
-          if (!stopped && !failure) {
-            sent = true
-            requestLiveStats()
-            send({ id: 'prompt', type: 'prompt', ...attachmentInput })
-          }
+          stateReady = true
+          sendPrompt()
         } else if (value.id === 'final') {
           validateState(value.data)
           if (value.data.isStreaming || value.data.isCompacting || (value.data.pendingMessageCount ?? 0) > 0)
@@ -744,8 +838,33 @@ try {
       }
       if (config.discover) return
       if (value.type === 'extension_ui_request') {
-        // Notifications carry no obligation. Interactive requests are denied.
+        // Notifications carry no obligation. A tool approval goes to the Host; other interactive requests are denied.
         if (['confirm', 'select', 'input', 'editor'].includes(value.method)) {
+          const gate = config.cli === 'pi' && !!permissionGate
+          const request = config.approvalNonce && !stopped
+            ? (gate ? readPiGateConfirm(value, permissionGate.nonce) : ompApprovalRequest(value))
+            : undefined
+          // OMP answers a select with Approve/Deny; the Pi gate's confirm takes a boolean.
+          const answer = (decision) => send(gate
+            ? { type: 'extension_ui_response', id: value.id, confirmed: decision !== 'deny' }
+            : { type: 'extension_ui_response', id: value.id, value: decision === 'deny' ? 'Deny' : 'Approve' })
+          if (request && approvals.size < 50 && approvalSequence < 200) {
+            const id = `approval-${++approvalSequence}`
+            void new Promise((resolve) => approvals.set(id, (decision) => {
+              approvals.delete(id)
+              resolve(decision)
+            })).then((decision) => {
+              if (decision === 'deny') permissionDenied = true
+              answer(decision)
+            })
+            output({ type: 'approval', id, request })
+            return
+          }
+          if (request) {
+            permissionDenied = true
+            answer('deny')
+            return
+          }
           failure ??= 'CLI 需要额外原生交互授权'
           send({ type: 'extension_ui_response', id: value.id, cancelled: true, confirmed: false })
         }
@@ -758,6 +877,7 @@ try {
         return
       }
       if (value.type === 'message_update' && value.assistantMessageEvent?.type === 'text_delta') {
+        if (typeof value.assistantMessageEvent.delta === 'string' && value.assistantMessageEvent.delta.trim()) toolOutcomes.succeeded()
         publicText(value.assistantMessageEvent.contentIndex, value.assistantMessageEvent.delta)
         return
       }
@@ -804,7 +924,10 @@ try {
         // blocks; do not apply an uncorrelated final snapshot to an invented block.
         if (!textBlocks.has(`${responseId()}:text:stream`)) {
           for (const [index, block] of content.entries())
-            if (block.type === 'text') publicText(index, block.text, true)
+            if (block.type === 'text') {
+              if (typeof block.text === 'string' && block.text.trim()) toolOutcomes.succeeded()
+              publicText(index, block.text, true)
+            }
         }
         for (const [index, block] of content.entries()) {
           if (block.type !== 'toolCall' || typeof block.id !== 'string') continue
@@ -837,12 +960,8 @@ try {
         return
       }
       if (value.type === 'tool_execution_end') {
-        if (value.isError) failure ??= '至少一个 CLI 工具执行失败'
-        const detail = (value.result?.content ?? [])
-          .filter((c) => c.type === 'text')
-          .map((c) => c.text ?? '')
-          .join('\n')
-          .slice(0, 32768)
+        if (value.isError) toolOutcomes.failed(value.toolCallId)
+        else toolOutcomes.succeeded()
         const owner = toolResponses.get(value.toolCallId)
         const emitTool = (event) => owner ? responses.event(owner.owner, owner.blockId, event) : eventOutput(event)
         emitTool({
@@ -850,7 +969,6 @@ try {
           step: toolSteps.get(value.toolCallId),
           text: String(value.toolName ?? '工具'),
           state: value.isError ? 'FAILED' : 'COMPLETED',
-          detail,
           toolCall: { callId: value.toolCallId, output: value.result },
         })
         return
@@ -880,6 +998,13 @@ try {
         contextPending = contextPending.slice(index + 1)
         try {
           const value = JSON.parse(line)
+          if (value.type === 'cliworker.pi_permission_gate') {
+            if (permissionGate && value.nonce === permissionGate.nonce && value.ready === true && !gateReady) {
+              gateReady = true
+              sendPrompt()
+            }
+            continue
+          }
           if (value.type === 'cliworker.pi_context_observation') {
             if (!sent || settled || stopped || !session) continue
             const context = readPiContextObservation(value, { nonce: contextObserver.nonce,
@@ -893,25 +1018,20 @@ try {
     child.stdout.setEncoding('utf8')
     child.stdout.on('data', (chunk) => {
       try {
-        bytes += Buffer.byteLength(chunk)
-        if (bytes > 16 * 1024 * 1024) throw new Error('Native RPC output exceeds run limit')
         pending += chunk
         let end
         while ((end = pending.indexOf('\n')) >= 0) {
           const line = pending.slice(0, end)
           pending = pending.slice(end + 1)
-          if (Buffer.byteLength(line) > 1024 * 1024) throw new Error('Native RPC line exceeds limit')
+          if (Buffer.byteLength(line) > config.maxNativeLineBytes) throw new Error(inboundError)
           if (line.trim()) consume(JSON.parse(line))
         }
-        if (Buffer.byteLength(pending) > 1024 * 1024) throw new Error('Native RPC line exceeds limit')
+        if (Buffer.byteLength(pending) > config.maxNativeLineBytes) throw new Error(inboundError)
       } catch (error) {
         stop(errorMessage(error))
       }
     })
-    child.stderr.on('data', (chunk) => {
-      stderrBytes += chunk.length
-      if (stderrBytes > 2 * 1024 * 1024) stop('Native stderr exceeds limit')
-    })
+    child.stderr.resume()
     startupTimer = setTimeout(() => stop('Native RPC startup timed out'), 20000)
     send({ id: 'initial', type: 'get_state' })
     const outcome = await new Promise((resolve) => {
@@ -927,6 +1047,7 @@ try {
     for (const block of thinkingBlocks.values())
       publicThinking(block.messageKey, block.index, block.text, block.state, true)
     clearTimeout(startupTimer)
+    clearTimeout(gateTimer)
     clearTimeout(statsTimer)
     clearTimeout(liveStatsTimer)
     clearTimeout(closeTimer)
@@ -942,7 +1063,12 @@ try {
     } catch (error) {
       failure ??= errorMessage(error)
     }
-    output({ type: 'result', status: failure || stopped ? 'ERROR' : 'SUCCESS', response, error: failure, resultScope: 'run' })
+    if (failure || stopped) output({ type: 'result', status: 'ERROR', response, error: failure, resultScope: 'run' })
+    // A denied authorization is the user's decision, not a failure: the turn completes without a notice.
+    else if (permissionDenied) output({ type: 'result', status: 'SUCCESS', response, resultScope: 'run' })
+    else if (toolOutcomes.lastFailed) output({ type: 'result', status: 'UNCERTAIN', response, error: LAST_TOOL_FAILED, resultScope: 'run' })
+    else output({ type: 'result', status: 'SUCCESS', response, resultScope: 'run',
+      ...(toolOutcomes.count ? { notice: recoveredNotice(toolOutcomes.count) } : {}) })
     finalized = true
     if (failure || stopped) process.exitCode = 1
   }
@@ -954,6 +1080,8 @@ try {
   if (!finalized) output({ type: 'result', status: 'ERROR', response: '', error: errorMessage(error) })
   process.exitCode = 1
 }
+for (const settle of [...approvals.values()]) settle('deny')
 await controlReceiver?.close().catch(() => undefined)
 await stopReceiver?.close().catch(() => undefined)
+await approvalReceiver?.close().catch(() => undefined)
 import { nativeAttachmentInput } from './native-attachments.mjs'

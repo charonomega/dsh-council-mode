@@ -5,7 +5,9 @@ import { dirname, join, resolve, sep, parse, relative, toNamespacedPath } from '
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { parse as parseYaml } from 'yaml';
+import { accountEmail } from "./account-identity.js";
 import { authenticatedAccountLogins, providerLogin, usableNativeApiKey } from "./account-login.js";
+import { accountLoginId, parseAccountLoginId } from "../shared/account-links.js";
 import { acquireOwnAccountLease, releaseOwnAccountLease, OWN_ACCOUNT_BUSY } from './own-account-lease.mjs';
 import { refreshFingerprint, refreshPrincipal, refreshJson, writeRefreshJson, assertPiOmpRefreshCache, assertPiOmpRefreshSources, } from './pi-omp-refresh.mjs';
 const object = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
@@ -342,7 +344,7 @@ export async function readPiOmpLogoutSources(cli, stateDirectory, signal, option
                 });
             result.push({
                 id: (index === 0 ? 'native' : 'plugin'),
-                label: index === 0 ? 'CLI 全局账号' : '插件账号',
+                label: index === 0 ? '原生目录' : '插件目录',
                 directory: source.sourceId,
                 env: source.env,
                 config: source.config ?? {},
@@ -359,6 +361,29 @@ export async function listPiOmpAccountSources(cli, stateDirectory, signal, optio
         label,
     }));
 }
+/** The `disabled_cause` OMP's /logout writes when it soft-deletes a credential (OMP 16.4.4). */
+const OMP_SIGNED_OUT = 'deleted by user';
+/**
+ * A row the user signed out is gone; every other row, usable or disabled (e.g. a failed
+ * refresh), still owns its provider and shadows earlier locations. Listing, snapshots and
+ * the shared refresh store must all agree on this.
+ */
+const ownsProvider = (row) => row.disabled_cause !== OMP_SIGNED_OUT;
+/** Sign-out evidence must not confuse an invalid/blocked credential with a removed one. */
+export async function piOmpStoredLoginExists(cli, login, stateDirectory, signal, options = {}) {
+    const target = parseAccountLoginId(login);
+    const match = target?.entry?.match(cli === 'pi' ? /^(native|plugin)$/ : /^(native|plugin)\.([1-9]\d*)$/);
+    if (target?.cli !== cli || !match)
+        throw new Error('不支持单独退出该账号');
+    return withSources(cli, { accountRoot: stateDirectory, signal, ...options }, async (sources) => {
+        const selected = sources[match[1] === 'native' ? 0 : 1];
+        if (!selected)
+            throw new Error('账号来源已变化，请刷新后重试');
+        return cli === 'pi' ? Object.hasOwn(selected.auth, target.provider)
+            : selected.credentials.some(row => row.provider === target.provider &&
+                String(row.native_rowid) === match[2] && ownsProvider(row));
+    });
+}
 function mergeSources(sources) {
     const auth = Object.assign(Object.create(null), ...sources.map((s) => s.auth));
     const providers = Object.assign(Object.create(null), ...sources.map((s) => s.models.providers ?? {}));
@@ -366,7 +391,7 @@ function mergeSources(sources) {
     const credentialProviders = new Map();
     const cache = new Map();
     for (const s of sources) {
-        for (const provider of new Set(s.credentials.map((row) => row.provider)))
+        for (const provider of new Set(s.credentials.filter(ownsProvider).map((row) => row.provider)))
             credentialProviders.set(provider, s.credentials.filter((row) => row.provider === provider));
         for (const row of s.modelCache)
             cache.set(row.provider_id, row);
@@ -425,7 +450,7 @@ async function sharedOAuthStore(cli, sources, options) {
     for (const source of sources)
         for (const provider of cli === 'pi'
             ? Object.keys(source.auth)
-            : new Set(source.credentials.map((row) => row.provider)))
+            : new Set(source.credentials.filter(ownsProvider).map((row) => row.provider)))
             owners.set(provider, source);
     const credentials = cli === 'pi'
         ? Object.entries(merged.auth).map(([provider, data]) => ({
@@ -547,7 +572,8 @@ export async function snapshotPiOmpNative(cli, destination, options = {}) {
                     for (const provider of Object.keys(source.auth))
                         authOwners.set(provider, source);
                     for (const row of source.credentials)
-                        credentialOwners.set(row.provider, source);
+                        if (ownsProvider(row))
+                            credentialOwners.set(row.provider, source);
                 }
                 sources = sources.map((source) => ({
                     ...source,
@@ -678,7 +704,7 @@ export async function snapshotPiOmpNative(cli, destination, options = {}) {
                 '账号配置已变化，请重新刷新模型',
             ].includes(error.message))
             throw error;
-        throw new Error('无法安全读取 Pi/OMP 原生账号或模型配置，请在账号终端检查');
+        throw new Error('无法安全读取 Pi/OMP 原生账号或模型配置，请在账号终端检查', { cause: error });
     }
 }
 export async function inspectPiOmpNativeAccount(cli, stateDirectory, signal, options = {}) {
@@ -694,32 +720,49 @@ export async function inspectPiOmpNativeAccount(cli, stateDirectory, signal, opt
                     : Object.values(knownProviderEnvironment).includes(value))
                 ? env[value]
                 : value;
-            const add = (provider, method) => {
+            const add = (provider, method, stored, email) => {
                 const config = providers[provider];
-                logins.push(providerLogin(provider, method, {
-                    baseUrl: ownValue(config?.baseUrl, true),
-                    name: config?.name,
-                }));
+                const accountLabel = accountEmail(email);
+                const login = {
+                    ...providerLogin(provider, method, {
+                        baseUrl: ownValue(config?.baseUrl, true),
+                        name: config?.name,
+                    }),
+                    // Two logins of one provider are told apart by the account each belongs to.
+                    ...(accountLabel ? { accountLabel } : {}),
+                };
+                const id = stored && accountLoginId(cli, provider, stored.entry);
+                logins.push(stored ? { ...login, ...(id ? { id } : {}), source: stored.source } : login);
             };
             let invalidOAuth = false;
-            const inspect = (provider, type, value, disabled) => {
+            const inspect = (provider, type, value, disabled, stored) => {
                 if (credentialState(type, value, disabled) !== 'configured')
                     return;
                 if (type === 'api' || type === 'api_key') {
                     if (usableNativeApiKey(ownValue(value.key ?? value.apiKey)))
-                        add(provider, 'api');
+                        add(provider, 'api', stored);
                 }
                 else if (usableNativeApiKey(value.access) &&
                     (value.expires >= Date.now() || usableNativeApiKey(value.refresh)))
-                    add(provider, 'oauth');
+                    add(provider, 'oauth', stored, value.email);
                 else
                     invalidOAuth = true;
             };
-            for (const [provider, value] of Object.entries(auth))
-                inspect(provider, value.type, value);
-            for (const [provider, rows] of credentialProviders)
-                for (const row of rows)
-                    inspect(provider, row.credential_type, JSON.parse(row.data), row.disabled_cause);
+            // The credentials workers use: a later location overrides a provider of an earlier one.
+            // Each keeps the location it is stored in, where it is signed out on its own.
+            const later = (index, has) => sources.slice(index + 1).some(has);
+            for (const [index, item] of sources.entries()) {
+                const source = index === 0 ? 'native' : 'plugin';
+                for (const [provider, value] of Object.entries(item.auth))
+                    if (!later(index, (next) => Object.hasOwn(next.auth, provider)))
+                        inspect(provider, value.type, value, undefined, { source, entry: source });
+                for (const row of item.credentials)
+                    if (!later(index, (next) => next.credentials.some((other) => other.provider === row.provider && ownsProvider(other))))
+                        inspect(row.provider, row.credential_type, JSON.parse(row.data), row.disabled_cause, {
+                            source,
+                            entry: `${source}.${row.native_rowid}`,
+                        });
+            }
             for (const [provider, value] of Object.entries(providers)) {
                 if (usableNativeApiKey(ownValue(value.apiKey, true)))
                     add(provider, 'api');

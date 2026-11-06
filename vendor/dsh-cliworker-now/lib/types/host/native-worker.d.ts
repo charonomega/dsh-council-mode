@@ -2,6 +2,7 @@ import type { CliId, Preference, TaskMode, Worker } from '../shared/types.ts';
 import type { RuntimeConfig } from './process.ts';
 import type { NativeHarnessConnection } from './native-harness-tools.ts';
 import type { NativeAttachment } from './native-attachments.mjs';
+import type { NativeAccess, NativeApprovalDecision } from './native-approval-policy.ts';
 export declare const NATIVE_TRANSPORTS: {
     readonly antigravity: "agy-stream-v1";
     readonly codex: "codex-app-v1";
@@ -36,6 +37,8 @@ export declare function prepareNativeWorker<T extends {
     };
     conversationId?: string;
     stateDirectory: string;
+    /** DSH sandbox snapshot for this run; absent keeps the historical workspace mapping. */
+    access?: NativeAccess;
     /** Non-secret model IDs from the exact admitted Claude route. */
     claudeModelCandidates?: Array<{
         value: string;
@@ -46,6 +49,9 @@ export declare function prepareNativeWorker<T extends {
     cleanup: () => Promise<void>;
     steer?: ((message: string, requestId: string, signal?: AbortSignal) => Promise<void>) | undefined;
     argv: string[];
+    answerApproval: (id: string, decision: NativeApprovalDecision) => Promise<void>;
+    /** Pauses or resumes the runner's idle window for hold `key` (`idle-…`); each command has its own mailbox id. */
+    holdIdle: (key: string, state: "hold" | "release") => Promise<void>;
     env: {
         ELECTRON_RUN_AS_NODE: string;
     };

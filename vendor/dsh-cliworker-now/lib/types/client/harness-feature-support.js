@@ -1,3 +1,5 @@
+import { t } from "./i18n.js";
+import { hostText } from "./operation-error.js";
 const reasons = {
     goal: '当前 CLI 不支持目标',
     plan: '当前 CLI 不支持规划模式',
@@ -8,10 +10,6 @@ const reasons = {
 export function harnessFeatureReason(binding, feature) {
     return binding.capabilities[feature]
         ? undefined
-        : binding.reasons?.[feature] || reasons[feature] || '当前 CLI 不支持此功能';
-}
-/** Without plan mode, accept-edits is the only permission mode, so there is nothing to switch. */
-export function harnessPermissionReason(binding) {
-    return binding.capabilities.plan ? undefined : '当前 CLI 只有“允许编辑”一种权限模式';
+        : hostText(binding.reasons?.[feature]) || t(reasons[feature] ?? '当前 CLI 不支持此功能');
 }
 //# sourceMappingURL=harness-feature-support.js.map

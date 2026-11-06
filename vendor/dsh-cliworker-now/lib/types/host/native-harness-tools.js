@@ -3,6 +3,7 @@ import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { constants } from 'node:fs';
 import { open, realpath, lstat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { HARNESS_FALLBACK_PREFIX, nativeCoverage } from './cli-native-capabilities.mjs';
 const record = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
 const text = (value) => typeof value === 'string' && value.length > 0 && !/[\x00-\x1f\x7f]/u.test(value);
 const reserved = new Set(['dsh_list_skills', 'dsh_read_skill', 'dsh_read_skill_resource']);
@@ -10,11 +11,13 @@ const reserved = new Set(['dsh_list_skills', 'dsh_read_skill', 'dsh_read_skill_r
 const forbidden = /^(?:run_code|cliworker|cli_worker|agent|subagents?|spawn|delegate|task|send_message|interrupt_agent|(?:send|resume|close|interrupt|wait|list)_subagents?)(?:[_.-]|$)/iu;
 /**
  * The scoped registry establishes availability; a familiar name or MCP prefix
- * establishes nothing. Effects and approvals still belong to tools.execute.
+ * establishes nothing. Effects and approvals still belong to the Harness tool pipeline.
  * Auxiliary model calls are additionally rejected by withinCliTool's guard.
  */
 export function classifyHarnessTool(name, visibleSchemas = []) {
-    if (forbidden.test(name))
+    if ((name === 'cliworker_start' || name === 'cliworker_status') && visibleSchemas.some(schema => schema.name === name))
+        return 'host';
+    if (forbidden.test(name) || /cli_?worker/iu.test(name))
         return 'dispatch';
     return visibleSchemas.some(schema => schema.name === name) ? 'host' : 'unknown';
 }
@@ -44,20 +47,23 @@ async function body(request, maximum) {
     }
 }
 const resultText = (value) => ({ content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value ?? null) }] });
-function hostToolResult(value) {
-    // tools.execute's public rc.2 result is already its model-visible projection.
+async function hostToolResult(value, image) {
+    // The executor adapter supplies one ToolExecutionResult, never a whole batch.
     // Never JSON-wrap an execution failure into a successful MCP result, or leak
     // execution-local value/error/meta/additionalContexts as unreviewed content.
     if (record(value) && typeof value.isError === 'boolean') {
         if (!Array.isArray(value.content))
             return { ...resultText('DSH 工具结果格式不受支持；未自动重试'), isError: true };
         let unsupported = false;
-        const content = value.content.map(part => {
+        const content = await Promise.all(value.content.map(async (part) => {
             if (record(part) && part.type === 'text' && typeof part.text === 'string')
                 return { type: 'text', text: part.text };
+            const inline = image && record(part) && part.type === 'image' ? await image(part.attachment) : undefined;
+            if (inline)
+                return { type: 'image', data: inline.data, mimeType: inline.mimeType };
             unsupported = true;
             return { type: 'text', text: 'DSH 工具返回非文本内容，当前 CLI 工具桥尚不支持；未自动重试' };
-        });
+        }));
         if (Array.isArray(value.additionalContexts) && value.additionalContexts.length)
             return { content: [...content, { type: 'text', text: 'DSH 工具返回额外上下文，当前 CLI 工具桥尚不支持；未自动重试' }], isError: true };
         return { content, isError: value.isError || unsupported };
@@ -65,7 +71,8 @@ function hostToolResult(value) {
     // Small explicit Host adapters may return a canonical JSON value directly.
     return resultText(value);
 }
-const skillSchema = (name, description, resource = false) => ({ name, description, inputSchema: {
+const fallback = (description) => `${HARNESS_FALLBACK_PREFIX}${description}`;
+const skillSchema = (name, description, resource = false) => ({ name, description: fallback(description), inputSchema: {
         type: 'object', properties: name === 'dsh_list_skills' ? {} : { name: { type: 'string' }, ...(resource ? { path: { type: 'string' } } : {}) },
         required: name === 'dsh_list_skills' ? [] : resource ? ['name', 'path'] : ['name'], additionalProperties: false,
     } });
@@ -77,18 +84,27 @@ export async function createNativeHarnessTools(options) {
     const lifetime = new AbortController(), active = new Set();
     const ledger = new Map();
     const cancelled = new Set();
-    async function visibleTools(signal = lifetime.signal) {
+    // Host grants, including those the CLI covers natively (skill dependencies).
+    async function grantedTools(signal = lifetime.signal) {
         signal.throwIfAborted();
         const grants = typeof options.tools === 'function' ? await options.tools(signal) : options.tools;
         signal.throwIfAborted();
         const tools = new Map();
         for (const grant of grants) {
-            if (grant.execution !== 'host' || forbidden.test(grant.name))
+            if (grant.execution !== 'host' || classifyHarnessTool(grant.name, grants) !== 'host')
                 continue;
             if (!/^[A-Za-z0-9_.-]{1,128}$/u.test(grant.name) || reserved.has(grant.name) || tools.has(grant.name) || !record(grant.inputSchema))
                 throw failure('工具桥授权目录无效或重名');
             tools.set(grant.name, structuredClone(grant));
         }
+        return tools;
+    }
+    // Offered to the CLI: grants its native tools do not already cover.
+    async function visibleTools(signal = lifetime.signal) {
+        const tools = await grantedTools(signal);
+        for (const name of tools.keys())
+            if (nativeCoverage(name, options.native))
+                tools.delete(name);
         return tools;
     }
     const initialTools = await visibleTools();
@@ -113,7 +129,8 @@ export async function createNativeHarnessTools(options) {
         const value = await options.skills.get(name, signal);
         if (!value || value.name !== name || typeof value.content !== 'string')
             throw failure('技能不可用');
-        const tools = await visibleTools(signal);
+        // A dependency the CLI covers natively is still a granted capability.
+        const tools = await grantedTools(signal);
         if (value.requiredTools?.some(required => !tools.has(required)))
             throw failure('技能所需工具未获准或尚未接通');
         return value;
@@ -156,7 +173,7 @@ export async function createNativeHarnessTools(options) {
         await check(method, typeof params.name === 'string' ? params.name : undefined);
         signal.throwIfAborted();
         if (method === 'tools/list')
-            return { tools: [...(await visibleTools(signal)).values()].map(({ execution: _execution, ...schema }) => schema).concat(options.skills ? [
+            return { tools: [...(await visibleTools(signal)).values()].map(({ execution: _execution, ...schema }) => ({ ...schema, description: fallback(schema.description) })).concat(options.skills ? [
                     skillSchema('dsh_list_skills', '列出当前会话获准技能的摘要；正文与资源按需加载。'),
                     skillSchema('dsh_read_skill', '读取获准技能说明；未声明依赖不代表全部外部能力已验证。'),
                     skillSchema('dsh_read_skill_resource', '读取已授权技能内的相对资源；返回base64文件内容。', true),
@@ -180,7 +197,7 @@ export async function createNativeHarnessTools(options) {
             const result = await options.execute({ binding, callId: `cwn-harness-${createHash('sha256').update(key).digest('hex')}`, name: params.name, arguments: args, signal });
             if (signal.aborted)
                 throw failure('工具调用已取消；未自动重试');
-            return hostToolResult(result);
+            return hostToolResult(result, options.native?.mcpImages && options.resolveImage ? attachment => options.resolveImage(attachment, signal) : undefined);
         }
         if (method === 'resources/list' || method === 'resources/templates/list')
             return method === 'resources/list' ? { resources: [] } : { resourceTemplates: options.skills ? [{ uriTemplate: 'dsh-skill://{name}/{path}', name: '当前获准技能资源' }] : [] };
@@ -201,7 +218,7 @@ export async function createNativeHarnessTools(options) {
         const finish = (status, value) => {
             const serialized = JSON.stringify(value);
             response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-            response.end(serialized.length <= maximum ? serialized : JSON.stringify({ error: '工具桥响应超过限制；不会自动重试' }));
+            response.end(Buffer.byteLength(serialized) <= maximum - 4096 ? serialized : JSON.stringify({ error: '工具桥响应超过限制；不会自动重试' }));
         };
         try {
             const auth = request.headers.authorization ?? '', expected = `Bearer ${secret}`;
@@ -236,11 +253,19 @@ export async function createNativeHarnessTools(options) {
             if (cancelled.has(key))
                 controller.abort(new Error('MCP 请求已取消'));
             const operation = previous?.promise ?? dispatch(value.method, (value.params ?? {}), key, AbortSignal.any([lifetime.signal, controller.signal]));
+            const entry = previous ?? { hash, promise: operation, controller, waiting: 0 };
             if (!previous) {
-                ledger.set(key, { hash, promise: operation, controller });
+                ledger.set(key, entry);
                 active.add(operation);
                 void operation.finally(() => active.delete(operation)).catch(() => { });
             }
+            // A caller that hangs up has given the call up; with nobody else waiting,
+            // withdraw it (a pending approval included) instead of running it unseen.
+            entry.waiting++;
+            response.once('close', () => {
+                if (!response.writableFinished && --entry.waiting === 0)
+                    controller.abort(new Error('MCP 请求连接已断开'));
+            });
             const result = await operation;
             await check(value.method, name);
             if (value.method === 'tools/call' && (name === 'dsh_read_skill' || name === 'dsh_read_skill_resource')) {
@@ -262,7 +287,8 @@ export async function createNativeHarnessTools(options) {
     const address = server.address();
     if (!address || typeof address === 'string')
         throw new Error('工具桥地址无效');
-    const connection = { url: `http://127.0.0.1:${address.port}/rpc`, token: secret, binding: { ...binding }, executionReady: options.executionReady === true };
+    const offered = [...initialTools.keys(), ...(options.skills ? ['dsh_list_skills', 'dsh_read_skill', 'dsh_read_skill_resource'] : [])];
+    const connection = { url: `http://127.0.0.1:${address.port}/rpc`, token: secret, binding: { ...binding }, executionReady: options.executionReady === true, tools: offered };
     const abort = () => { void close(); };
     async function close() {
         if (closePromise)
@@ -288,15 +314,15 @@ export async function createNativeHarnessTools(options) {
 /**
  * A lease is owned from the moment it is created. Until the caller receives the
  * returned handle, any publication failure closes the listening bridge and
- * restores the child presentation before the original error is reported.
+ * releases the executor adapter before the original error is reported.
  */
-export async function adoptNativeHarnessLease(lease, resetPresentation, publish) {
+export async function adoptNativeHarnessLease(lease, disposeExecutor, publish) {
     const release = async () => {
         try {
             await lease.close();
         }
         finally {
-            resetPresentation();
+            disposeExecutor();
         }
     };
     try {

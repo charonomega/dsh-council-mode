@@ -1,3 +1,5 @@
+import { parseZcodeDeniedTools, consumeZcodeWorkflowMode } from './cli-native-capabilities.mjs'
+import { summarizeNativeRecord } from './native-transport.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
 import { lstat, open } from 'node:fs/promises'
@@ -5,7 +7,22 @@ import { isAbsolute, join, dirname, basename } from 'node:path'
 import { isRecord, nonempty, replaceNativeArguments } from './native-acp.mjs'
 import { nativeHarnessMcpServers } from './native-harness-injection.mjs'
 import { ZcodeResponseTracker, ZcodeToolInputs } from './zcode-response.mjs'
+import { createToolOutcomes } from './native-tool-outcomes.mjs'
 import { zcodeContextBinding, unknownZcodeContextInspection, readZcodeContextInspections } from './zcode-context-observation.mjs'
+
+const ZCODE_KINDS = { bash: 'command', shell: 'command', edit: 'file', write: 'file', webfetch: 'network', websearch: 'network' }
+/** Public summary of one interaction/requestPermission for the DSH prompt. */
+export function zcodeApprovalRequest(params) {
+  const input = isRecord(params.input) ? params.input : {}
+  const target = [input.command, input.file_path, input.path, input.url].find(nonempty)
+  const tool = nonempty(params.toolName) ? params.toolName : '工具调用'
+  return {
+    kind: ZCODE_KINDS[tool.toLowerCase()] ?? 'tool',
+    summary: (nonempty(params.reason) ? `${tool}：${params.reason}` : tool).slice(0, 500),
+    ...(target ? { detail: target.slice(0, 4000) } : {}),
+    allowSession: false,
+  }
+}
 
 export function zcodeAppServerArgv(config) {
   const firstOption = config.argv.findIndex((arg) =>
@@ -29,6 +46,15 @@ export function zcodeAppServerArgv(config) {
 const matchingModel = (value, model) =>
   value?.providerId === model.providerId && value?.modelId === model.modelId
 const accountEnvironmentKey = 'CLIWORKER_ZCODE_NATIVE_ACCOUNT'
+const memoryEnvironmentKey = 'CLIWORKER_ZCODE_NATIVE_MEMORY'
+/** The desktop memory switch the adapter read; the native CLI never receives the variable. */
+function nativeMemory(config) {
+  const environment = config.env ?? process.env
+  const value = environment[memoryEnvironmentKey]
+  delete environment[memoryEnvironmentKey]
+  delete process.env[memoryEnvironmentKey]
+  return value === undefined ? config.zcodeNativeMemory === true : value === '1'
+}
 function nativeAccount(config, model) {
   const environment = config.env ?? process.env
   const encoded = environment[accountEnvironmentKey]
@@ -79,7 +105,8 @@ function nativeAccount(config, model) {
   return account
 }
 async function confirmAccount(account, config) {
-  if (Date.now() > account.createdAt + config.timeoutMs) throw new Error('ZCode 私有账号材料已过期')
+  // The bridge turns timeoutMs into the time left at its start; the material lasts until the task's deadline.
+  if (Date.now() > (config.deadlineAt ?? account.createdAt + config.timeoutMs)) throw new Error('ZCode 私有账号材料已过期')
   const auth = account.credential.authDirectory
   for (const path of [auth, join(auth, '.zcode'), join(auth, '.zcode/v2')]) {
     const directory = await lstat(path)
@@ -163,9 +190,11 @@ export async function runNativeZcode(config, io) {
     modelId: config.preference.model.slice(slash + 1),
   }
   const account = nativeAccount(config, model)
-  const mode = config.mode === 'plan' ? 'plan' : 'edit'
+  const memory = nativeMemory(config)
+  const workflow = consumeZcodeWorkflowMode(config)
+  let mode = config.mode === 'plan' ? 'plan' : config.access === 'read-only' ? 'build' : config.access === 'danger-full-access' ? 'yolo' : 'edit'
   const denyIndex = config.argv.indexOf('--disallowedTools')
-  const toolDenylist = denyIndex >= 0 ? config.argv[denyIndex + 1]?.split(',').filter(Boolean) : []
+  const toolDenylist = denyIndex >= 0 ? parseZcodeDeniedTools(config.argv[denyIndex + 1]) : []
   const inputId = randomUUID()
   let peer,
     sessionId,
@@ -174,6 +203,7 @@ export async function runNativeZcode(config, io) {
     turnId,
     terminal,
     failed,
+    denied = false,
     response = '',
     thought = '',
     step = 0,
@@ -207,7 +237,12 @@ export async function runNativeZcode(config, io) {
   }
   const seen = new Set(),
     tools = new Map(),
-    early = []
+    // Tool calls whose permission was denied; their failure is the denial itself.
+    deniedTools = new Set(),
+    // Calls whose own result frame already reported the failure the batch counts again.
+    failedTools = new Set(),
+    early = [],
+    toolOutcomes = createToolOutcomes()
   const failure = (message) => {
     failed ??= message
   }
@@ -218,7 +253,9 @@ export async function runNativeZcode(config, io) {
         message?.method,
       )
     )
-      io.native(message)
+      io.native(message?.params?.type === 'tool.updated' && message.params.payload?.result !== undefined
+        ? { ...message, params: { ...message.params, payload: { ...message.params.payload,
+          result: summarizeNativeRecord(message.params.payload.result, 0) } } } : message)
     if (!isRecord(message) || message.jsonrpc !== undefined) {
       failure('Invalid ZCode NDJSON envelope')
       throw new Error('Invalid ZCode NDJSON envelope')
@@ -233,14 +270,31 @@ export async function runNativeZcode(config, io) {
       if (message.method === 'session/requestRuntimePreferences')
         result = {
           nativeSearchEnhancementsEnabled: false,
-          memoryEnabled: false,
+          memoryEnabled: memory,
+          dynamicWorkflowEnabled: workflow !== 'disabled',
+          dynamicWorkflowMode: workflow,
           askUserQuestionAutoResolutionEnabled: false,
         }
       else if (message.method === 'interaction/requestPermission') {
-        result = { decision: 'deny', reason: 'CLI Worker 无额外交互授权' }
-        if (active && message.params?.sessionId === sessionId) {
-          failure('ZCode 额外权限请求已拒绝')
-          io.event({ kind: 'diagnostic', text: 'ZCode 额外权限请求已拒绝' })
+        const deny = () => {
+          if (active && message.params?.sessionId === sessionId) {
+            denied = true
+            if (nonempty(message.params.toolCallId)) deniedTools.add(message.params.toolCallId)
+            io.event({ kind: 'diagnostic', text: 'ZCode 额外权限请求已拒绝' })
+          }
+          return { decision: 'deny', reason: 'DSH 未批准此授权' }
+        }
+        if (!(active && message.params?.sessionId === sessionId)) result = deny()
+        else {
+          // The Host decides without blocking this reader. The reverse reply has
+          // no confirmed session scope, and permissionUpdates would persist a
+          // project rule, so only a plain allow is sent.
+          void io.approval(zcodeApprovalRequest(message.params)).then((answer) => {
+            if (answer.decision === 'deny') return peer.send({ id: message.id, result: deny() })
+            io.event({ kind: 'diagnostic', text: 'ZCode 额外权限请求已批准' })
+            return peer.send({ id: message.id, result: { decision: 'allow' } })
+          }).catch(() => failure('ZCode 授权回复未送达'))
+          return
         }
       } else if (message.method === 'interaction/requestUserInput') {
         result = { action: 'cancel', reason: 'CLI Worker 无额外交互输入' }
@@ -333,6 +387,7 @@ export async function runNativeZcode(config, io) {
         return
       }
       response += payload.delta
+      if (payload.delta.trim()) toolOutcomes.succeeded()
       if (payload.delta) {
         if (!assistantSegmentOpen) { assistantStep++; assistantSegmentOpen = true }
         responses.emit({ kind: 'assistant', step: assistantStep, text: payload.delta },
@@ -348,7 +403,7 @@ export async function runNativeZcode(config, io) {
       thoughtMessageId = payload.assistantMessageId
       thought += payload.delta
       responses.emit({ kind: 'reasoning', step: thoughtStep, text: 'ZCode 公开思考',
-        detail: thought, state: 'RUNNING' }, thoughtMessageId, 'reasoning', 0)
+        delta: payload.delta, state: 'RUNNING' }, thoughtMessageId, 'reasoning', 0)
     } else if (event.type === 'model.streaming' && payload.kind === 'tool_call') {
       // This frame carries a complete structured input even when done=false.
       // Never parse/concatenate text deltas or execute the observed tool.
@@ -356,7 +411,20 @@ export async function runNativeZcode(config, io) {
     } else if (event.type === 'tool.updated') {
       finishThought()
       if (payload.kind === 'batch') {
-        if (payload.errorCount > 0) failure('ZCode 工具批次失败')
+        const batchIds = Array.isArray(payload.toolCallIds) ? payload.toolCallIds : []
+        const deniedInBatch = batchIds.filter((id) => deniedTools.has(id))
+        const known = deniedInBatch.length + batchIds.filter((id) => failedTools.has(id)).length
+        const errors = Number.isSafeInteger(payload.errorCount) ? payload.errorCount : 0
+        // Only failures no call result reported are new; the same batch replayed counts once.
+        for (let index = known; index < errors; index++) toolOutcomes.failed(`batch:${batchIds.join(',')}:${index}`)
+        // A denied call gets no result frame of its own; the batch closes it.
+        for (const id of deniedInBatch) {
+          const value = tools.get(id)
+          if (!value || value.done) continue
+          tools.set(id, { ...value, done: true })
+          responses.tool({ kind: 'tool', step: value.step, text: value.name, state: 'FAILED', detail: JSON.stringify(payload),
+            toolCall: { callId: id, name: value.name, ...(value.input === undefined ? {} : { input: value.input }) } })
+        }
       } else if (nonempty(payload.toolCallId)) {
         assistantSegmentOpen = false
         const previous = tools.get(payload.toolCallId) ?? { step: step++, name: '工具', done: false }
@@ -369,25 +437,35 @@ export async function runNativeZcode(config, io) {
           : cachedInput ?? (!previous.inputFromStream && previous.assistantMessageId === assistantMessageId ? previous.input : undefined)
         const value = { ...previous, name: payload.toolName ?? previous.name, done, assistantMessageId, input,
           inputFromStream: explicitInput ? false : cachedInput !== undefined || previous.inputFromStream }
+        const { input: _input, result, ...metadata } = payload
+        const prior = previous.output ?? ''
+        const increment = !done && typeof result === 'string' && typeof prior === 'string' && result.startsWith(prior)
+        if (Object.hasOwn(payload, 'result')) value.output = result
         tools.set(payload.toolCallId, value)
-        if (error) failure('ZCode 工具执行失败')
-        io.event({
+        if (error && !deniedTools.has(payload.toolCallId)) {
+          failedTools.add(payload.toolCallId)
+          toolOutcomes.failed(payload.toolCallId)
+        } else if (done && !error && !previous.done) toolOutcomes.succeeded()
+        responses.tool({
           kind: 'tool',
           step: value.step,
           text: value.name,
           state: done ? (error ? 'FAILED' : 'COMPLETED') : 'RUNNING',
-          detail: JSON.stringify(payload),
+          detail: JSON.stringify(metadata),
+          ...(increment ? { delta: result.slice(prior.length) } : {}),
           toolCall: { callId: payload.toolCallId,
             ...(nonempty(payload.toolName) ? { name: payload.toolName } : {}),
             ...(value.input === undefined ? {} : { input: value.input }),
-            ...(Object.hasOwn(payload, 'result') ? { output: payload.result } : {}) },
+            ...(!increment && (result !== undefined || done) && value.output !== undefined ? { output: value.output } : {}) },
         })
       }
     } else if (
       event.type === 'permission.resolved' &&
       (payload.decision === 'deny' || payload.decision?.decision === 'deny')
     ) {
-      failure('ZCode 权限请求被拒绝')
+      // The CLI may recover from a denial; the turn then ends as unverified, not failed.
+      denied = true
+      if (nonempty(payload.toolCallId)) deniedTools.add(payload.toolCallId)
     } else if (event.type === 'turn.failed') {
       terminal = event
       failure('ZCode 轮次执行失败')
@@ -418,7 +496,9 @@ export async function runNativeZcode(config, io) {
             ? {
                 result: {
                   nativeSearchEnhancementsEnabled: false,
-                  memoryEnabled: false,
+                  memoryEnabled: memory,
+                  dynamicWorkflowEnabled: workflow !== 'disabled',
+                  dynamicWorkflowMode: workflow,
                   askUserQuestionAutoResolutionEnabled: false,
                 },
               }
@@ -449,7 +529,7 @@ export async function runNativeZcode(config, io) {
           {
             ...common,
             workspace: { workspaceKey: config.project, workspacePath: config.project },
-            mode,
+            mode: mode === 'plan' ? 'plan' : 'build',
             // 0.16.9 converts an initial model to a provider/model string and
             // discards required reasoning options. prepareZCode already set the
             // complete private default; setModel + readback below are mandatory
@@ -465,10 +545,22 @@ export async function runNativeZcode(config, io) {
       { sessionId, model: selection, persistAsWorkspaceLastUsed: false },
       { jsonrpc: false },
     )
-    await peer.request('session/setMode', { sessionId, mode }, { jsonrpc: false })
-    snapshot = await peer.request('session/read', { sessionId, messageLimit: 1 }, { jsonrpc: false })
-    readIdentity(snapshot, sessionId, config.project)
-    confirmSelection(snapshot, selection, mode)
+    const modes = mode === 'yolo' ? ['yolo', 'edit', 'build'] : mode === 'edit' ? ['edit', 'build'] : [mode]
+    for (const candidate of modes) {
+      try {
+        await peer.request('session/setMode', { sessionId, mode: candidate }, { jsonrpc: false })
+        snapshot = await peer.request('session/read', { sessionId, messageLimit: 1 }, { jsonrpc: false })
+        readIdentity(snapshot, sessionId, config.project)
+        confirmSelection(snapshot, selection, candidate)
+        if (candidate !== mode) io.event({ kind: 'diagnostic', text: candidate === 'build'
+          ? 'ZCode 原生权限模式不可用，本轮按询问运行' : 'ZCode 原生完全权限不可用，本轮按仅工作区编辑运行' })
+        mode = candidate
+        break
+      } catch (error) {
+        io.signal?.throwIfAborted()
+        if (candidate === modes.at(-1)) throw new Error('ZCode 原生权限模式无法确认，已拒绝启动', { cause: error })
+      }
+    }
     if (snapshot.runtime?.activeTurnId || snapshot.projection?.status === 'running')
       throw new Error('ZCode session is already running')
     const subscription = await peer.request(
@@ -534,7 +626,8 @@ export async function runNativeZcode(config, io) {
     if (io.signal.aborted) failure('任务已停止')
     const closed = await peer.request('session/close', { sessionId }, { jsonrpc: false })
     if (closed?.closed !== true) throw new Error('ZCode session did not close')
-    io.result(failed ? 'ERROR' : 'SUCCESS', response, failed, 'run')
+    if (failed) io.result('ERROR', response, failed, 'run')
+    else toolOutcomes.settle(io, response, 'run', denied)
   } finally {
     io.signal.removeEventListener('abort', cancel)
     active = false
@@ -551,6 +644,9 @@ export async function forkNativeZcode(config, io) {
   const slash = config.preference.model.indexOf('/')
   const model = { providerId: config.preference.model.slice(0, slash), modelId: config.preference.model.slice(slash + 1) }
   const account = nativeAccount(config, model)
+  // A branch operation sends no model task; only strip the variable.
+  nativeMemory(config)
+  consumeZcodeWorkflowMode(config)
   const peer = await io.openStdio(zcodeAppServerArgv(config), { env: config.env, cwd: config.project })
   const unsubscribe = peer.onMessage((message) => {
     if (message.id !== undefined && message.method)

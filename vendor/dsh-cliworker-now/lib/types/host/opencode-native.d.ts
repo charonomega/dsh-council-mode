@@ -13,7 +13,15 @@ export interface OpenCodeNativeProfile {
     modelsPath: string;
     enabled?: string[];
     disabled: string[];
+    /** Only an unambiguous auth.json credential can be removed by native auth logout. */
+    removableAuth: Record<string, string>;
 }
+/** OpenCode 1.19 uses XDG paths on Windows too, not LOCALAPPDATA. */
+export declare function openCodeNativePaths(options?: OpenCodeNativeOptions): {
+    data: string;
+    config: string;
+    models: string;
+};
 /** JSONC comments/trailing commas, without changing quoted model IDs or URLs. */
 declare function jsonc(raw: string): unknown;
 export { jsonc as parseNativeJsonc };

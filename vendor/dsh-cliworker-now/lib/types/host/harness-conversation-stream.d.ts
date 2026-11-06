@@ -16,7 +16,6 @@ declare module '@deepseek-ai/dsh-llm' {
         };
     }
 }
-/** One CLI run consumed once across native steps. It never calls an LLM or executes a tool. */
 export declare class HarnessConversationStream {
     readonly record: HarnessConversationRecord;
     readonly run: HarnessConversationRun;

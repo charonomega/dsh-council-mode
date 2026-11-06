@@ -3,13 +3,14 @@ import { constants, existsSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join, resolve, toNamespacedPath } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { EFFORTS } from "../shared/types.js";
+import { CLI_LABELS, EFFORTS } from "../shared/types.js";
+import { explainAuthenticationScope } from "./catalog-notice.js";
 import { ProcessCleanupUnconfirmedError } from "./process.js";
 import { snapshotPiOmpNative, safePiOmpAncestors } from "./pi-omp-native.js";
 import { finishPiOmpRefresh } from './pi-omp-refresh.mjs';
-import { acquireOwnAccountLease } from './own-account-lease.mjs';
+import { acquireOwnAccountLease, ownAccountBusy } from './own-account-lease.mjs';
 import { assertPiOmpRefreshSources, assertPiOmpRefreshCache } from './pi-omp-refresh.mjs';
-import { createPiOmpControl, createNativeStopControl } from './pi-omp-control.mjs';
+import { createPiOmpControl, createNativeStopControl, createNativeApprovalControl } from './pi-omp-control.mjs';
 import { buildNativeHarnessInjection } from './native-harness-injection.mjs';
 const bridgePath = () => {
     const here = dirname(fileURLToPath(import.meta.url));
@@ -74,6 +75,7 @@ async function contextFor(input) {
         const requestPath = join(requestDirectory, 'request.json');
         let control;
         let stopControl;
+        let approvalControl;
         const temporary = join(requestDirectory, `.request-${randomUUID()}.tmp`);
         const injection = buildNativeHarnessInjection({ cli: input.cli, argv: [input.executable], env: native.env,
             connection: !('discover' in input) && !extra.metadataPhase ? input.harnessTools : undefined });
@@ -81,6 +83,8 @@ async function contextFor(input) {
             if (!('discover' in input) && !extra.metadataPhase) {
                 control = await createPiOmpControl(join(requestDirectory, 'control'));
                 stopControl = await createNativeStopControl(join(requestDirectory, 'stop'));
+                // OMP's native tool approvals and Pi's tool_call gate reach the Host through this mailbox.
+                approvalControl = await createNativeApprovalControl(join(requestDirectory, 'approval'));
             }
             await writeFile(temporary, JSON.stringify({
                 ...input,
@@ -91,6 +95,9 @@ async function contextFor(input) {
                 ...(control ? { controlNonce: control.nonce } : {}),
                 ...(stopControl
                     ? { stopNonce: stopControl.nonce, stopDirectory: join(requestDirectory, 'stop') }
+                    : {}),
+                ...(approvalControl
+                    ? { approvalNonce: approvalControl.nonce, approvalDirectory: join(requestDirectory, 'approval') }
                     : {}),
                 stateDirectory: isolated,
                 nativeRoot: native.directory,
@@ -104,18 +111,23 @@ async function contextFor(input) {
         catch (error) {
             await control?.close();
             await stopControl?.close();
+            await approvalControl?.close();
             await rm(requestDirectory, { recursive: true, force: true });
             throw error;
         }
         finally {
             await rm(temporary, { force: true });
         }
+        const activeApproval = approvalControl;
         return {
             argv: [process.execPath, bridgePath(), requestPath],
             env: injection.env,
             leaseDirectory: native.leaseDirectory,
             ...(control ? { steer: control.steer } : {}),
             ...(stopControl ? { stop: stopControl.stop } : {}),
+            ...(activeApproval
+                ? { answerApproval: (id, decision) => activeApproval.steer(JSON.stringify(decision), id) }
+                : {}),
             activate: async () => {
                 if (native.leaseDirectory) {
                     await acquireOwnAccountLease(native.leaseDirectory, leaseNonce);
@@ -126,6 +138,7 @@ async function contextFor(input) {
             cleanup: async () => {
                 await control?.close();
                 await stopControl?.close();
+                await approvalControl?.close();
                 if (native.leaseDirectory)
                     await finishPiOmpRefresh(native.leaseDirectory, leaseNonce, input.executable, native.receipt);
                 if (control)
@@ -149,6 +162,9 @@ async function confirmedCatalog(context, capture) {
                 cleanupUnconfirmed = true;
                 throw error;
             }
+            // Another reader can take the account between the two phases; that is a wait, not a broken catalog.
+            if (ownAccountBusy(error))
+                throw error;
             throw new Error('无法读取 Pi/OMP 原生模型目录，请检查本机配置');
         }
         finally {
@@ -156,7 +172,7 @@ async function confirmedCatalog(context, capture) {
                 await launch.cleanup();
         }
         if (phase === 'account-scope')
-            return parseCatalog(raw);
+            return parseAccountScope(raw);
         if (!raw ||
             typeof raw !== 'object' ||
             raw.phase !== phase ||
@@ -181,14 +197,28 @@ export async function preparePiOmp(input, capture) {
     const context = await contextFor(input);
     // Preparing a request is reversible. Execution requires the Host's two
     // captures on this exact snapshot; an unconfirmed request cannot send prompts.
-    const catalog = capture ? await confirmedCatalog(context, capture) : undefined;
+    const catalog = capture ? (await confirmedCatalog(context, capture)).models : undefined;
     return context.request(catalog ? { confirmedCatalog: catalog } : {});
 }
 export async function discoverPiOmp(cli, executable, capture, stateDirectory, options = {}) {
     if (cli !== 'pi' && cli !== 'omp')
         throw new Error('Unsupported Pi/OMP CLI');
     const context = await contextFor({ cli, executable, stateDirectory, discover: true, ...options });
-    return confirmedCatalog(context, capture);
+    const { models, authenticationDenied } = await confirmedCatalog(context, capture);
+    return explainAuthenticationScope(models, authenticationDenied, CLI_LABELS[cli]);
+}
+/** Current bridges send counts with the models; older fixtures send the bare array. */
+function parseAccountScope(raw) {
+    if (Array.isArray(raw))
+        return { models: parseCatalog(raw), authenticationDenied: 0 };
+    const scope = raw;
+    if (!scope ||
+        typeof scope !== 'object' ||
+        scope.phase !== 'account-scope' ||
+        !Number.isSafeInteger(scope.authenticationDenied) ||
+        scope.authenticationDenied < 0)
+        throw new Error('Invalid Pi/OMP account scope result');
+    return { models: parseCatalog(scope.models), authenticationDenied: scope.authenticationDenied };
 }
 function parseCatalog(raw) {
     if (!Array.isArray(raw))

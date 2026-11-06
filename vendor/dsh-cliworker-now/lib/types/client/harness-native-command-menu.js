@@ -1,3 +1,4 @@
+import { DshNativeComposer, useDshConversation } from "./dsh-subagents.js";
 import { createElement, useSyncExternalStore } from 'react';
 import { HARNESS_COMMAND_SOURCE } from "./harness-native-commands.js";
 import { shadowHarnessSlot } from "./harness-slot-shadow.js";
@@ -8,7 +9,10 @@ export function installHarnessNativeCommandMenu(ctx, bindings) {
     return shadowHarnessSlot(ctx.slots, 'conversation.composer.bar', undefined, (original) => {
         const Native = original.component;
         function CommandMenu(props) {
+            const dsh = useDshConversation(props.sessionId);
             const binding = useSyncExternalStore(bindings.subscribe, () => props.sessionId ? bindings.get(props.sessionId) : undefined);
+            if (dsh)
+                return createElement(DshNativeComposer, { Native, nativeProps: props, context: dsh });
             return createElement(Native, binding?.workerId
                 ? { ...props, commandSource: HARNESS_COMMAND_SOURCE }
                 : props);

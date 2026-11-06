@@ -92,11 +92,13 @@ export function claudeManagedSettingsPath(platform = process.platform, env = pro
             ? win32.join(env.ProgramFiles || env.PROGRAMFILES || 'C:\\Program Files', 'ClaudeCode', 'managed-settings.json')
             : '/etc/claude-code/managed-settings.json';
 }
-/** Disable inherited SDK credentials and cross-CLI plugin imports in the native MiMo provider resolver. */
+/** Disable inherited SDK credentials and cross-CLI plugin/session imports in native MiMo. */
 export function firstPartyEnvironment(cli) {
     if (cli !== 'mimo')
         return {};
     return {
+        // mimocode 0.1.15 otherwise copies ~/.claude/projects transcripts into its DB on every start.
+        MIMOCODE_DISABLE_CLAUDE_IMPORT: '1',
         MIMOCODE_DISABLE_PROVIDER_ENV: '1',
         MIMOCODE_DISABLE_DEFAULT_PLUGINS: '1',
         MIMOCODE_PURE: '1',
@@ -421,8 +423,11 @@ export async function readFirstPartyModelSources(cli, executable, project, captu
     signal.throwIfAborted();
     return [route.source];
 }
-export async function discoverFirstPartySources(sources, signal, options = {}) {
+export async function discoverFirstPartySources(sources, signal, options = {}, 
+/** Set when an account catalog was read but lists none of the native candidates. */
+outcome = {}) {
     const models = new Map(), scopes = new Map();
+    let listed = false;
     for (const source of sources) {
         signal.throwIfAborted();
         const route = JSON.stringify([
@@ -481,6 +486,8 @@ export async function discoverFirstPartySources(sources, signal, options = {}) {
         const candidates = source.claudeConfiguredModels
             ? [...source.nativeModels, ...nativeModels]
             : nativeModels;
+        if (scope.models.length)
+            listed = true;
         for (const { remoteId, choice } of candidates) {
             const available = scope.models.find((model) => model.id === remoteId ||
                 (source.claudeConfiguredModels && model.id === claudeRemoteModelId(remoteId)));
@@ -488,6 +495,43 @@ export async function discoverFirstPartySources(sources, signal, options = {}) {
                 models.set(choice.id, { ...choice, cost: available.cost });
         }
     }
+    outcome.unmatched = listed && !models.size;
     return [...models.values()];
+}
+const MIMO_REFRESH_INTERVAL_MS = 10 * 60_000;
+const mimoRefreshed = new Map();
+/**
+ * MiMo lists models from its own models.dev cache, which the plugin never lets it fetch
+ * (`MIMOCODE_DISABLE_MODELS_FETCH`). A cache older than every model the account still
+ * offers matches none of them; then refresh it once with MiMo's own `models --refresh`,
+ * as native MiMo does on a normal start, and read again. `stale` reports a mismatch left.
+ */
+export async function discoverMimoModels(executable, project, capture, signal, options = {}, now = Date.now()) {
+    const read = async () => {
+        const outcome = {};
+        const sources = await readFirstPartyModelSources('mimo', executable, project, capture, signal);
+        const models = await discoverFirstPartySources(sources, signal, options, outcome);
+        return { models, stale: !!outcome.unmatched };
+    };
+    const first = await read();
+    if (first.models.length || !first.stale)
+        return first;
+    const last = mimoRefreshed.get(executable);
+    if (last !== undefined && now >= last && now - last < MIMO_REFRESH_INTERVAL_MS)
+        return first;
+    mimoRefreshed.set(executable, now);
+    try {
+        await capture([executable, 'models', '--refresh'], firstPartyEnvironment('mimo'));
+    }
+    catch {
+        signal.throwIfAborted();
+        return first;
+    }
+    finally {
+        // Reused native metadata predates the refreshed catalogue.
+        mimoMetadataCache.clear();
+    }
+    signal.throwIfAborted();
+    return read();
 }
 //# sourceMappingURL=first-party-models.js.map

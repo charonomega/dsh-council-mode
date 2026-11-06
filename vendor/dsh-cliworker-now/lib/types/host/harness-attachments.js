@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 const parts = (message) => message.content.map(block => {
     if (block.type === 'text')
         return { type: 'text', text: block.text };
@@ -40,5 +41,17 @@ export function resolveHarnessAttachments(ctx, messages) {
         }
     }
     return result;
+}
+const IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+/** Inline bytes of a host tool's image result, for a CLI whose MCP accepts images. */
+export async function readHarnessImage(ctx, ref, signal) {
+    const attachment = ref;
+    if (typeof attachment?.attachmentId !== 'string' || typeof attachment.mediaType !== 'string' || !IMAGE_MEDIA_TYPES.includes(attachment.mediaType))
+        return undefined;
+    const store = ctx.get('attachments');
+    const path = store?.imageHostPath?.(ref);
+    if (!path)
+        return undefined;
+    return { data: (await readFile(path, { signal })).toString('base64'), mimeType: attachment.mediaType };
 }
 //# sourceMappingURL=harness-attachments.js.map

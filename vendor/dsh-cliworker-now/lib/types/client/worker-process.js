@@ -1,11 +1,13 @@
 import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
 import { useEffect, useId, useState } from 'react';
 import { DisclosureRow, DiffBlock, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconThinkOutlineRegular, IconFlatListOutlineRegular, IconCodeOutlineRegular, JsonTree, MarkdownText, StateDot, TerminalBlock, TextShimmer, } from '@deepseek-ai/dsh-client-ui-primitives';
-import { active, isUserInterrupted } from "../shared/types.js";
+import { active, isUserInterrupted, outputSizeLabel, TRUNCATED_PLAIN, TRUNCATED_SIZED } from "../shared/types.js";
 import { messageClock } from "../shared/telemetry.js";
 import { UsageIndicator } from "./telemetry.js";
 import { useNativePresentation } from "./native-presentation.js";
 import { nativeFileDiffs } from "./tool-viewers.js";
+import { t, useT } from "./i18n.js";
+import { hostText } from "./operation-error.js";
 export const runOf = (item) => item.admittedRunId ?? item.id.split(':')[0];
 export const completedEmptyReply = (item, worker) => item.kind === 'assistant' &&
     !item.text.trim() &&
@@ -13,35 +15,35 @@ export const completedEmptyReply = (item, worker) => item.kind === 'assistant' &
         !!item.runEndedAt ||
         (!!item.runOutcome && !active(item.runOutcome)) ||
         (worker?.runId === runOf(item) && !active(worker.status)));
-const markdownLabels = { code: { copyLabel: '复制', copiedLabel: '已复制' }, footnotes: '脚注' };
-const jsonLabels = {
-    copyValue: '复制值',
-    copyJson: '复制 JSON',
-    copyPath: '复制路径',
-    copyPrettyJson: '复制格式化 JSON',
-    copyCompactJson: '复制紧凑 JSON',
-    copied: '已复制',
-    copyFailed: '复制失败',
-    collapseNode: '收起',
-    expandNode: '展开',
+const markdownLabels = () => ({ code: { copyLabel: t('复制'), copiedLabel: t('已复制') }, footnotes: t('脚注') });
+const jsonLabels = () => ({
+    copyValue: t('复制值'),
+    copyJson: t('复制 JSON'),
+    copyPath: t('复制路径'),
+    copyPrettyJson: t('复制格式化 JSON'),
+    copyCompactJson: t('复制紧凑 JSON'),
+    copied: t('已复制'),
+    copyFailed: t('复制失败'),
+    collapseNode: t('收起'),
+    expandNode: t('展开'),
     copyButtonTitle: (action) => action,
-};
-const terminalLabels = {
-    commandLine: (line) => `命令第 ${line} 行`,
-    signal: (signal) => `信号 ${signal}`,
-    exitCode: (code) => `退出码 ${code}`,
-    noExitCode: '未提供退出码',
-    running: '运行中',
-    failed: '失败',
-    done: '已完成',
-    copy: '复制',
-    copied: '已复制',
-    noOutput: '没有输出',
-    collapseAria: '收起输出',
-    collapse: '收起',
-    expandAria: (n) => `展开 ${n} 行输出`,
-    expand: (n) => `展开 ${n} 行`,
-};
+});
+const terminalLabels = () => ({
+    commandLine: (line) => t('命令第 {line} 行', { line }),
+    signal: (signal) => t('信号 {signal}', { signal }),
+    exitCode: (code) => t('退出码 {code}', { code }),
+    noExitCode: t('未提供退出码'),
+    running: t('运行中'),
+    failed: t('失败'),
+    done: t('已完成'),
+    copy: t('复制'),
+    copied: t('已复制'),
+    noOutput: t('没有输出'),
+    collapseAria: t('收起输出'),
+    collapse: t('收起'),
+    expandAria: (n) => t('展开 {n} 行输出', { n }),
+    expand: (n) => t('展开 {n} 行', { n }),
+});
 export function processClosed(rows, worker) {
     return (!!rows.some((row) => row.runEndedAt || (row.runOutcome && !active(row.runOutcome))) ||
         !worker ||
@@ -73,6 +75,7 @@ export function processContent(rows, worker) {
 }
 /** Native rc.2 TurnProcessNodeView geometry; only recorded boundaries supply elapsed time. */
 export function WorkerProcessHeader({ rows, worker, open, toggle, }) {
+    useT();
     const policy = useNativePresentation();
     if (!processClosed(rows, worker))
         return null;
@@ -87,11 +90,11 @@ export function WorkerProcessHeader({ rows, worker, open, toggle, }) {
     const duration = seconds === undefined
         ? ''
         : seconds < 60
-            ? `，用时 ${seconds}秒`
-            : `，用时 ${Math.floor(seconds / 60)}分 ${seconds % 60}秒`;
-    const label = stopped ? '已停止' : failed ? '失败' : `已完成${duration}`;
+            ? t('，用时 {seconds}秒', { seconds })
+            : t('，用时 {minutes}分 {seconds}秒', { minutes: Math.floor(seconds / 60), seconds: seconds % 60 });
+    const label = stopped ? t('已停止') : failed ? t('失败') : t('已完成{duration}', { duration });
     const foldable = policy.foldCompletedTurns && !processAlwaysOpen(rows, worker) && processContent(rows, worker).length > 0;
-    return (_jsxs("div", { className: "cwn-progress", "data-process-run": runOf(first), children: [_jsx("span", { className: "cwn-sr-only", role: "status", children: stopped ? '已停止' : failed ? '失败' : '已完成' }), _jsxs("button", { type: "button", className: "cwn-process-control", disabled: !foldable, "aria-expanded": foldable ? open : undefined, "data-open": open || undefined, onClick: (event) => {
+    return (_jsxs("div", { className: "cwn-progress", "data-process-run": runOf(first), children: [_jsx("span", { className: "cwn-sr-only", role: "status", children: stopped ? t('已停止') : failed ? t('失败') : t('已完成') }), _jsxs("button", { type: "button", className: "cwn-process-control", disabled: !foldable, "aria-expanded": foldable ? open : undefined, "data-open": open || undefined, onClick: (event) => {
                     event.currentTarget.focus();
                     toggle();
                 }, children: [_jsx("span", { children: label }), foldable && _jsx(IconChevronDownOutlineRegular, { size: 14 })] })] }));
@@ -99,16 +102,16 @@ export function WorkerProcessHeader({ rows, worker, open, toggle, }) {
 function rowState(item) {
     const state = (item.state ?? '').toLowerCase();
     if (['completed', 'done', 'success', 'succeeded'].includes(state))
-        return { state: 'done', label: '已完成', running: false };
+        return { state: 'done', label: t('已完成'), running: false };
     if (['error', 'failed', 'failure'].includes(state))
-        return { state: 'error', label: '失败', running: false };
+        return { state: 'error', label: t('失败'), running: false };
     if (item.runStatus || (item.runEndedAt && ['running', 'pending', 'in_progress', 'started'].includes(state)))
-        return { state: 'warning', label: '未收到最终状态', running: false };
+        return { state: 'warning', label: t('未收到最终状态'), running: false };
     if (['stopped', 'interrupted', 'cancelled', 'canceled'].includes(state))
-        return { state: 'warning', label: '已停止', running: false };
+        return { state: 'warning', label: t('已停止'), running: false };
     if (['running', 'pending', 'in_progress', 'started'].includes(state))
-        return { state: 'ongoing', label: '进行中', running: true };
-    return { state: 'idle', label: '状态未提供', running: false };
+        return { state: 'ongoing', label: t('进行中'), running: true };
+    return { state: 'idle', label: t('状态未提供'), running: false };
 }
 function reasoningSummary(text, running) {
     if (!running)
@@ -124,11 +127,17 @@ function reasoningSummary(text, running) {
 function Reasoning({ item }) {
     const [open, setOpen] = useState(false), policy = useNativePresentation(), observed = rowState(item);
     const text = item.detail ?? '', summary = reasoningSummary(text, observed.running);
-    return (_jsx("div", { className: "cwn-reasoning-row", title: item.text, "data-state": observed.state, "data-expanded": open || undefined, children: _jsx(DisclosureRow, { icon: _jsx(IconThinkOutlineRegular, { size: 14 }), title: "\u601D\u8003", open: open, expandable: true, expandOnRowClick: true, running: observed.running, onToggle: () => setOpen(!open), collapsedContent: (observed.running || policy.settledReasoningPreview) && summary ? (_jsxs(_Fragment, { children: [_jsx("span", { className: "cwn-process-separator" }), _jsx("span", { className: "cwn-reasoning-summary", children: _jsx(TextShimmer, { active: observed.running, children: summary }) })] })) : undefined, children: open && (_jsx("div", { className: "cwn-reasoning-body", children: _jsx(MarkdownText, { text: text, streaming: observed.running, labels: markdownLabels, variant: "compact" }) })) }) }));
+    return (_jsx("div", { className: "cwn-reasoning-row", title: item.text, "data-state": observed.state, "data-expanded": open || undefined, children: _jsx(DisclosureRow, { icon: _jsx(IconThinkOutlineRegular, { size: 14 }), title: t('思考'), open: open, expandable: true, expandOnRowClick: true, running: observed.running, onToggle: () => setOpen(!open), collapsedContent: (observed.running || policy.settledReasoningPreview) && summary ? (_jsxs(_Fragment, { children: [_jsx("span", { className: "cwn-process-separator" }), _jsx("span", { className: "cwn-reasoning-summary", children: _jsx(TextShimmer, { active: observed.running, children: summary }) })] })) : undefined, children: open && (_jsxs("div", { className: "cwn-reasoning-body", children: [_jsx(MarkdownText, { text: text, streaming: observed.running, labels: markdownLabels(), variant: "compact" }), _jsx(Truncated, { item: item })] })) }) }));
+}
+/** Shown content was cut to the display budget; the CLI kept running. */
+function Truncated({ item }) {
+    if (!item.truncated)
+        return null;
+    return (_jsx("p", { className: "cwn-process-note", "data-truncated": true, children: item.outputBytes ? t(TRUNCATED_SIZED, { size: outputSizeLabel(item.outputBytes) }) : t(TRUNCATED_PLAIN) }));
 }
 function Value({ value, label }) {
     if (value !== null && typeof value === 'object')
-        return _jsx(JsonTree, { data: value, label: label, labels: jsonLabels, expandTopLevel: true, copyable: true });
+        return _jsx(JsonTree, { data: value, label: label, labels: jsonLabels(), expandTopLevel: true, copyable: true });
     return _jsx("pre", { className: "cwn-tool-raw", children: typeof value === 'string' ? value : JSON.stringify(value) });
 }
 function detailValue(detail) {
@@ -164,23 +173,23 @@ export function toolDepth(item, rows) {
 function Tool({ item, rows, worker }) {
     const [open, setOpen] = useState(false), call = item.toolCall, observed = rowState(item), chain = toolDepth(item, rows);
     const hasInput = call?.input !== undefined, hasOutput = call?.output !== undefined;
-    const expandable = hasInput || hasOutput || !!call?.command || !!item.detail;
-    const title = call?.name || item.text;
+    const expandable = hasInput || hasOutput || !!call?.command || !!item.detail || !!item.truncated;
+    const title = call?.name || hostText(item.text);
     const summary = call?.command ??
         (hasInput ? (typeof call.input === 'string' ? call.input : JSON.stringify(call.input)) : '');
     const terminal = typeof call?.command === 'string';
     const diffs = nativeFileDiffs(call);
-    return (_jsx("div", { className: `cwn-process-tool${chain.depth ? ' cwn-tool-child' : ''}`, "data-tool-call-id": call?.callId, "data-parent-tool-call-id": call?.parentCallId, "data-state": observed.state, style: chain.depth ? { marginLeft: `${chain.depth * 22}px` } : undefined, title: chain.unresolved ? '父调用未在当前记录内或关系无法核对' : undefined, children: _jsx(DisclosureRow, { icon: _jsx(StateDot, { state: observed.state, size: 14 }), title: title, open: open, expandable: expandable, expandOnRowClick: true, previewChevron: true, running: observed.running, onToggle: () => setOpen(!open), collapsedContent: _jsxs(_Fragment, { children: [_jsx("span", { className: "cwn-process-separator" }), _jsx("span", { className: "cwn-tool-summary", children: summary || observed.label })] }), children: open && (_jsxs("div", { className: "cwn-tool-body", children: [terminal ? (_jsx(TerminalBlock, { command: call.command, cwd: worker?.project, output: typeof call.output === 'string' ? call.output : undefined, exitCode: call.exitCode, running: observed.running, runStateDot: false, labels: terminalLabels })) : null, !terminal && hasInput && (_jsxs("section", { className: "cwn-tool-io", children: [_jsx("span", { children: "\u53C2\u6570" }), _jsx(Value, { value: call.input, label: `${title} 参数` })] })), diffs && (_jsxs("section", { className: "cwn-tool-diff", children: [_jsx("p", { className: "cwn-process-note", children: "CLI \u63D0\u4F9B\u7684\u5C40\u90E8\u8865\u4E01\uFF0C\u975E\u6587\u4EF6\u5B8C\u6574\u5185\u5BB9\u3002" }), _jsx(DiffBlock, { diffs: diffs, labels: {
-                                    codeLabel: '代码',
-                                    wrapLabel: '自动换行',
-                                    unwrapLabel: '保持原列',
-                                    copy: '复制',
-                                    copied: '已复制',
-                                    collapseAria: '收起差异',
-                                    collapse: '收起',
-                                    expandAria: (n) => `展开其余 ${n} 行差异`,
-                                    expand: (n) => `… 其余 ${n} 行`,
-                                } })] })), hasOutput && !diffs && (!terminal || typeof call.output !== 'string') && (_jsxs("section", { className: "cwn-tool-io", children: [_jsx("span", { children: "\u7ED3\u679C" }), _jsx(Value, { value: call.output, label: `${title} 结果` })] })), !hasInput && !hasOutput && !terminal && item.detail && (_jsx(Value, { value: detailValue(item.detail), label: `${title} 详情` })), chain.unresolved && _jsx("p", { className: "cwn-process-note", children: "\u7236\u8C03\u7528\u5173\u7CFB\u672A\u5B8C\u6574\u63D0\u4F9B\uFF1B\u6309\u5DF2\u6709\u987A\u5E8F\u5C55\u793A\u3002" })] })) }) }));
+    return (_jsx("div", { className: `cwn-process-tool${chain.depth ? ' cwn-tool-child' : ''}`, "data-tool-call-id": call?.callId, "data-parent-tool-call-id": call?.parentCallId, "data-state": observed.state, style: chain.depth ? { marginLeft: `${chain.depth * 22}px` } : undefined, title: chain.unresolved ? t('父调用未在当前记录内或关系无法核对') : undefined, children: _jsx(DisclosureRow, { icon: _jsx(StateDot, { state: observed.state, size: 14 }), title: title, open: open, expandable: expandable, expandOnRowClick: true, previewChevron: true, running: observed.running, onToggle: () => setOpen(!open), collapsedContent: _jsxs(_Fragment, { children: [_jsx("span", { className: "cwn-process-separator" }), _jsx("span", { className: "cwn-tool-summary", children: summary || observed.label })] }), children: open && (_jsxs("div", { className: "cwn-tool-body", children: [terminal ? (_jsx(TerminalBlock, { command: call.command, cwd: worker?.project, output: typeof call.output === 'string' ? call.output : undefined, exitCode: call.exitCode, running: observed.running, runStateDot: false, labels: terminalLabels() })) : null, !terminal && hasInput && (_jsxs("section", { className: "cwn-tool-io", children: [_jsx("span", { children: t('参数') }), _jsx(Value, { value: call.input, label: t('{title} 参数', { title }) })] })), diffs && (_jsxs("section", { className: "cwn-tool-diff", children: [_jsx("p", { className: "cwn-process-note", children: t('CLI 提供的局部补丁，非文件完整内容。') }), _jsx(DiffBlock, { diffs: diffs, labels: {
+                                    codeLabel: t('代码'),
+                                    wrapLabel: t('自动换行'),
+                                    unwrapLabel: t('保持原列'),
+                                    copy: t('复制'),
+                                    copied: t('已复制'),
+                                    collapseAria: t('收起差异'),
+                                    collapse: t('收起'),
+                                    expandAria: (n) => t('展开其余 {n} 行差异', { n }),
+                                    expand: (n) => t('… 其余 {n} 行', { n }),
+                                } })] })), hasOutput && !diffs && (!terminal || typeof call.output !== 'string') && (_jsxs("section", { className: "cwn-tool-io", children: [_jsx("span", { children: t('结果') }), _jsx(Value, { value: call.output, label: t('{title} 结果', { title }) })] })), !hasInput && !hasOutput && !terminal && item.detail && (_jsx(Value, { value: detailValue(item.detail), label: t('{title} 详情', { title }) })), _jsx(Truncated, { item: item }), chain.unresolved && _jsx("p", { className: "cwn-process-note", children: t('父调用关系未完整提供；按已有顺序展示。') })] })) }) }));
 }
 function ProcessItem({ item, rows, worker }) {
     const [open, setOpen] = useState(false);
@@ -189,11 +198,12 @@ function ProcessItem({ item, rows, worker }) {
     if (item.kind === 'tool')
         return _jsx(Tool, { item: item, rows: rows, worker: worker });
     if (item.kind === 'assistant')
-        return (_jsxs("div", { className: "cwn-process-event", "data-empty-reply-id": item.id, children: ["\u65E0\u6B63\u6587\u56DE\u590D \u00B7 ", _jsx(UsageIndicator, { usage: item.usage, providerCredits: item.providerCredits, creditsBased: worker?.preference.cli === 'qoder' || worker?.preference.cli === 'qodercn', reply: true }), item.durationSeconds !== undefined && ` · CLI 报告耗时：${item.durationSeconds}秒`, " \u00B7", ' ', _jsx("time", { dateTime: item.time, children: messageClock(item.time) }), item.sessionDurationSeconds !== undefined && ` · CLI 会话累计耗时：${item.sessionDurationSeconds}秒`] }));
-    return (_jsx(DisclosureRow, { icon: _jsx(IconCodeOutlineRegular, { size: 14 }), title: item.text, open: open, expandable: !!item.detail, expandOnRowClick: true, onToggle: () => setOpen(!open), children: open && item.detail && (_jsx("div", { className: "cwn-reasoning-body", children: _jsx(MarkdownText, { text: item.detail, labels: markdownLabels, variant: "compact" }) })) }));
+        return (_jsxs("div", { className: "cwn-process-event", "data-empty-reply-id": item.id, children: [t('无正文回复'), " \u00B7 ", _jsx(UsageIndicator, { usage: item.usage, providerCredits: item.providerCredits, creditsBased: worker?.preference.cli === 'qoder' || worker?.preference.cli === 'qodercn', reply: true }), item.durationSeconds !== undefined && t(' · CLI 报告耗时：{seconds}秒', { seconds: item.durationSeconds }), " \u00B7", ' ', _jsx("time", { dateTime: item.time, children: messageClock(item.time) }), item.sessionDurationSeconds !== undefined && t(' · CLI 会话累计耗时：{seconds}秒', { seconds: item.sessionDurationSeconds })] }));
+    return (_jsx(DisclosureRow, { icon: _jsx(IconCodeOutlineRegular, { size: 14 }), title: hostText(item.text), open: open, expandable: !!item.detail, expandOnRowClick: true, onToggle: () => setOpen(!open), children: open && item.detail && (_jsx("div", { className: "cwn-reasoning-body", children: _jsx(MarkdownText, { text: hostText(item.detail), labels: markdownLabels(), variant: "compact" }) })) }));
 }
 /** One consecutive process span. User/assistant boundaries stay outside it in native order. */
 export function WorkerProcessGroup({ items, rows, worker, hidden, first, }) {
+    useT();
     const [open, setOpen] = useState(false), policy = useNativePresentation(), bodyId = useId();
     const content = processContent(items, worker), closed = processClosed(rows, worker);
     const grouped = policy.stepGrouping === 'collapsed' || (policy.stepGrouping === 'history' && closed);
@@ -212,19 +222,19 @@ export function WorkerProcessGroup({ items, rows, worker, hidden, first, }) {
         : '';
     const label = !closed && latestRunning
         ? latestRunning.kind === 'tool'
-            ? '正在调用工具'
-            : '正在分析请求'
+            ? t('正在调用工具')
+            : t('正在分析请求')
         : tools.length
-            ? '已调用工具'
+            ? t('已调用工具')
             : content.some((row) => row.kind === 'reasoning')
-                ? '已完成分析'
-                : '工作记录';
+                ? t('已完成分析')
+                : t('工作记录');
     const title = liveDetail ? `${label} · ${liveDetail}` : label;
     const running = content.some((row) => rowState(row).running);
     const show = !hidden && (!grouped || open);
     return (_jsxs("div", { className: "cwn-process-group", hidden: hidden, "data-process-group": runOf(items[0]), children: [grouped && (_jsxs("button", { type: "button", className: "cwn-process-group-title", "aria-expanded": open, "aria-controls": bodyId, onClick: (event) => {
                     event.currentTarget.focus();
                     setOpen(!open);
-                }, children: [_jsxs("span", { className: "cwn-process-group-icon", children: [_jsx("span", { className: "cwn-process-activity", children: tools.length ? (_jsx(IconFlatListOutlineRegular, { size: 14 })) : (_jsx(IconThinkOutlineRegular, { size: 14 })) }), _jsx("span", { className: "cwn-process-chevron", children: open ? _jsx(IconChevronUpOutlineRegular, { size: 14 }) : _jsx(IconChevronDownOutlineRegular, { size: 14 }) })] }), _jsx(TextShimmer, { active: running, children: title })] })), _jsx("div", { id: bodyId, className: "cwn-process-group-body", hidden: !show, children: show && (_jsxs(_Fragment, { children: [first && !rows.some((row) => row.kind === 'reasoning' && row.detail?.trim()) && (_jsx("p", { className: "cwn-process-note", children: "CLI \u672A\u63D0\u4F9B\u516C\u5F00\u601D\u8003\u6458\u8981\u3002" })), content.map((item) => (_jsx(ProcessItem, { item: item, rows: rows, worker: worker }, item.id)))] })) })] }));
+                }, children: [_jsxs("span", { className: "cwn-process-group-icon", children: [_jsx("span", { className: "cwn-process-activity", children: tools.length ? (_jsx(IconFlatListOutlineRegular, { size: 14 })) : (_jsx(IconThinkOutlineRegular, { size: 14 })) }), _jsx("span", { className: "cwn-process-chevron", children: open ? _jsx(IconChevronUpOutlineRegular, { size: 14 }) : _jsx(IconChevronDownOutlineRegular, { size: 14 }) })] }), _jsx(TextShimmer, { active: running, children: title })] })), _jsx("div", { id: bodyId, className: "cwn-process-group-body", hidden: !show, children: show && (_jsxs(_Fragment, { children: [first && !rows.some((row) => row.kind === 'reasoning' && row.detail?.trim()) && (_jsx("p", { className: "cwn-process-note", children: t('CLI 未提供公开思考摘要。') })), content.map((item) => (_jsx(ProcessItem, { item: item, rows: rows, worker: worker }, item.id)))] })) })] }));
 }
 //# sourceMappingURL=worker-process.js.map

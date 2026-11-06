@@ -1,5 +1,5 @@
 import { cliOf } from "./types.js";
-import { workerPermissionOptions } from "./worker-permissions.js";
+import { workerPlanSupported } from "./worker-permissions.js";
 export const GOAL_OBJECTIVE_LIMIT = 4000;
 /**
  * Native fork evidence per CLI (see openspec/changes/bridge-conversation-features/design.md).
@@ -24,7 +24,7 @@ export const noForkReason = {
 };
 export function bridgedFeatureSupport(worker) {
     const cli = cliOf(worker.preference);
-    const plan = workerPermissionOptions(worker).some((option) => option.value === 'plan');
+    const plan = workerPlanSupported(worker);
     const expectedTransport = { codex: 'codex-app-v1', claude: 'claude-stream-v1', kimi: 'kimi-acp-v1', mimo: 'mimo-http-v1', zcode: 'zcode-app-v1', pi: 'pi-rpc-v1', opencode: 'opencode-http-v1', qoder: 'qoder-acp-v1', qodercn: 'qodercn-acp-v1' };
     const fork = worker.transport === expectedTransport[cli] ? forkSupport[cli] : undefined;
     return {

@@ -2,13 +2,14 @@ import { open, lstat } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { createNativeIO } from './native-transport.mjs'
-import { receiveNativeStopControl, receiveNativeGuidanceControl } from './pi-omp-control.mjs'
+import { receiveNativeStopControl, receiveNativeGuidanceControl, receiveNativeApprovalControl } from './pi-omp-control.mjs'
+import { createIdleHolds, readTimeLimit, startRunTimers, TIME_LIMIT_ERRORS } from './native-time-limit.mjs'
 
 process.umask(0o077)
 const modules = {
   codex: ['native-codex', 'runNativeCodex'],
   claude: ['native-claude', 'runNativeClaude'],
-  antigravity: ['native-agy', 'runNativeAgy'],
+  antigravity: ['native-agy-acp', 'runNativeAgyAuto'],
   kimi: ['native-kimi', 'runNativeKimi'],
   qoder: ['native-qoder', 'runNativeQoder'],
   qodercn: ['native-qoder', 'runNativeQoder'],
@@ -19,7 +20,15 @@ const modules = {
   hermes: ['native-hermes', 'runNativeHermes'],
 }
 const controller = new AbortController()
-let io, emergency, timer, error, control, guidance
+let io, emergency, timers, error, control, guidance, approval
+const idleCommand = createIdleHolds(() => timers?.hold() ?? (() => {}))
+// Mailbox id `<hold key>:<command>`: one id carries one message only.
+const holdIdle = (message, id) => {
+  const [key, command] = id.split(':')
+  return command === message && idleCommand(message, key)
+    ? Promise.resolve()
+    : Promise.reject(new Error('Unknown idle command'))
+}
 const stop = () => {
   if (controller.signal.aborted) return
   controller.abort(new Error('任务已停止'))
@@ -44,7 +53,7 @@ try {
   )
     throw new Error('Unsafe native bridge request')
   const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
-  let config
+  let config, limit
   try {
     const opened = await handle.stat()
     if (opened.ino !== before.ino || opened.dev !== before.dev)
@@ -79,16 +88,27 @@ try {
     config.maxLineBytes > 16_777_216 ||
     !Number.isSafeInteger(config.maxRunBytes) ||
     config.maxRunBytes < config.maxLineBytes ||
-    !Number.isSafeInteger(config.timeoutMs) ||
-    config.timeoutMs < 1 ||
-    config.timeoutMs > 86_400_000
+    (config.maxNativeLineBytes !== undefined &&
+      (!Number.isSafeInteger(config.maxNativeLineBytes) || config.maxNativeLineBytes < 1024 || config.maxNativeLineBytes > 67_108_864)) ||
+    (config.maxToolPreviewBytes !== undefined &&
+      (!Number.isSafeInteger(config.maxToolPreviewBytes) || config.maxToolPreviewBytes < 1024)) ||
+    !(limit = readTimeLimit(config))
   )
     throw new Error('Invalid native bridge configuration')
+  // Runner waits count down the time left to the Host's deadline, not a fresh total.
+  config.deadlineAt = limit.deadlineAt
+  config.timeoutMs = Math.max(1, limit.deadlineAt - Date.now())
   io = createNativeIO(
     config.forkOperation ? { ...config, conversationId: undefined } : config,
-    (line) => process.stdout.write(line),
+    (line) => {
+      timers?.touch()
+      process.stdout.write(line)
+    },
     controller.signal,
     (chunk) => process.stderr.write(chunk),
+    // Heartbeats such as Claude keep_alive are dropped by runners but still prove the CLI is alive.
+    () => timers?.touch(),
+    () => timers?.hold() ?? (() => {}),
   )
   control = await receiveNativeStopControl(config.stopDirectory, config.stopNonce, async () => {
     stop()
@@ -100,10 +120,18 @@ try {
     guidance = await receiveNativeGuidanceControl(config.controlDirectory, config.controlNonce,
       (message, id, attempt) => io.steer(message, id, attempt))
   }
-  timer = setTimeout(() => {
-    error = new Error('Native task timed out')
+  if (config.approvalNonce) {
+    if (config.approvalDirectory !== resolve(dirname(path), 'approval'))
+      throw new Error('Unbound native approval control')
+    approval = await receiveNativeApprovalControl(config.approvalDirectory, config.approvalNonce,
+      // The Host pauses the idle window while a DSH fallback tool waits for the user.
+      (message, id) => (id.startsWith('idle-') ? holdIdle(message, id) : io.answerApproval(message, id)))
+  }
+  timers = startRunTimers(limit, (kind) => {
+    if (controller.signal.aborted) return
+    error = new Error(TIME_LIMIT_ERRORS[kind])
     stop()
-  }, config.timeoutMs)
+  })
   const [module, entry] = modules[config.cli]
   const runner = (await import(`./${module}.mjs`))[config.forkOperation ? entry.replace('runNative', 'forkNative') : entry]
   await runner(config, io)
@@ -111,11 +139,12 @@ try {
 } catch (caught) {
   error = controller.signal.aborted ? (error ?? new Error('任务已停止')) : caught
 } finally {
-  clearTimeout(timer)
+  timers?.close()
   clearTimeout(emergency)
   process.removeListener('SIGTERM', stop)
   process.removeListener('SIGINT', stop)
   try {
+    await approval?.close()
     await guidance?.close()
     await control?.close()
     if (io) await io.close(error)

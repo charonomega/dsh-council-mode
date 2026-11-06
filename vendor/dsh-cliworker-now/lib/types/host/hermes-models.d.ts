@@ -1,4 +1,9 @@
 import { type AccountModelScope } from './account-models.mjs';
+/** The plugin Hermes home holds a source this plugin cannot use. Fixed text only:
+ * the account terminal shows it verbatim (Client startup allow-list). */
+export declare class HermesAccountSourceError extends Error {
+    constructor(message: string);
+}
 /** Native PooledCredential fields; a successful catalog cannot erase a native
  * dead account, active exhaustion window or model-specific entitlement bench. */
 export declare function hermesPoolEntryUnavailable(entry: Record<string, any>, model?: string): boolean;

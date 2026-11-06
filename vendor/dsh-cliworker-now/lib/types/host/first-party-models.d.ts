@@ -19,7 +19,7 @@ export interface FirstPartyModelSource extends AccountModelInput {
 export declare function readFirstPartyJson(path: string): Promise<Record<string, any>>;
 /** Current Claude native managed-file location; Windows no longer reads ProgramData. */
 export declare function claudeManagedSettingsPath(platform?: NodeJS.Platform, env?: NodeJS.ProcessEnv): string;
-/** Disable inherited SDK credentials and cross-CLI plugin imports in the native MiMo provider resolver. */
+/** Disable inherited SDK credentials and cross-CLI plugin/session imports in native MiMo. */
 export declare function firstPartyEnvironment(cli: string): Record<string, string>;
 export declare function assertFirstPartyConfiguration(cli: string, project: string, signal: AbortSignal): Promise<void>;
 export declare function parseKimiModelSources(raw: unknown, sourceId: string): FirstPartyModelSource[];
@@ -30,4 +30,18 @@ export declare function mimoModelSources(raw: Record<string, any>[], config: Rec
     sourceId: string;
 }>): FirstPartyModelSource[];
 export declare function readFirstPartyModelSources(cli: 'kimi' | 'claude' | 'mimo', executable: string, project: string, capture: Capture, signal: AbortSignal): Promise<FirstPartyModelSource[]>;
-export declare function discoverFirstPartySources(sources: FirstPartyModelSource[], signal: AbortSignal, options?: Parameters<typeof probeAccountModels>[1]): Promise<ModelChoice[]>;
+export declare function discoverFirstPartySources(sources: FirstPartyModelSource[], signal: AbortSignal, options?: Parameters<typeof probeAccountModels>[1], 
+/** Set when an account catalog was read but lists none of the native candidates. */
+outcome?: {
+    unmatched?: boolean;
+}): Promise<ModelChoice[]>;
+/**
+ * MiMo lists models from its own models.dev cache, which the plugin never lets it fetch
+ * (`MIMOCODE_DISABLE_MODELS_FETCH`). A cache older than every model the account still
+ * offers matches none of them; then refresh it once with MiMo's own `models --refresh`,
+ * as native MiMo does on a normal start, and read again. `stale` reports a mismatch left.
+ */
+export declare function discoverMimoModels(executable: string, project: string, capture: Capture, signal: AbortSignal, options?: Parameters<typeof probeAccountModels>[1], now?: number): Promise<{
+    models: ModelChoice[];
+    stale: boolean;
+}>;
